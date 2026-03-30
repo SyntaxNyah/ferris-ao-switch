@@ -138,6 +138,66 @@ Thin wrapper around `SDL_Renderer*`. Provides:
 
 ---
 
+### `src/render/text_renderer.hpp` / `src/render/text_renderer.cpp`
+
+**Class:** `ao::TextRenderer`
+
+SDL_ttf wrapper with a 32-slot LRU texture cache. Owned by `App` as `text_renderer_`; exposed via `App::text()`.
+
+**Init:**
+```cpp
+bool init(SDL_Renderer* r, const char* font_rel, int pt_size);
+// font_rel resolved via AssetManager (HTTP → sdmc: → romfs:)
+// Loaded via TTF_OpenFontRW(rw, freesrc=1, pt_size)
+// App calls: text_renderer_.init(renderer_->raw(), "fonts/noto_sans.ttf", 18)
+// Non-fatal on failure — every draw/measure returns 0 silently.
+```
+
+**Public API:**
+```cpp
+int  draw(const char* text, int x, int y, SDL_Color color);
+    // Single-line. Returns rendered width in pixels.
+
+int  draw_wrapped(const char* text, int x, int y, int max_w, SDL_Color color);
+    // Word-wrapped within max_w pixels. Returns total height used.
+
+int  measure_w(const char* text);
+    // Single-line pixel width without rendering (TTF_SizeUTF8, no cache).
+
+int  line_h() const;
+    // TTF_FontLineSkip — use for row height calculations.
+
+bool ready() const;
+    // True once init() succeeded.
+```
+
+**Cache internals:**
+- 32 `Entry` slots: `{text[256], color, max_w, tex, w, h, lru, valid}`
+- Cache key: `(text, color RGBA, max_w)` — same text at different wrap widths gets separate entries
+- LRU eviction: `frame_` increments on every `get_cached` call; victim = entry with the lowest `lru` value
+- On eviction: `SDL_DestroyTexture(old_tex)` before overwriting the slot
+- During IC typewriter animation each in-progress frame produces a unique key; the 32-slot LRU evicts stale entries automatically without any special handling
+
+**Rendering backend:**
+- Single-line: `TTF_RenderUTF8_Blended` → `SDL_CreateTextureFromSurface`
+- Wrapped: `TTF_RenderUTF8_Blended_Wrapped(font, text, color, (Uint32)max_w)` → `SDL_CreateTextureFromSurface`
+
+**Usage in `CourtroomScreen`:**
+
+| UI element | Method | Source field |
+|---|---|---|
+| Showname / character name | `draw()` | `gs.ic_anim.showname` or `.char_name` |
+| IC message text (typewriter) | `draw_wrapped()` | `ic.message` substring of `typewriter_pos_` chars |
+| OOC entry header | `draw()` | `ce.name` formatted as `[name]` |
+| OOC entry body | `draw_wrapped()` | `ce.message` |
+| Music track name | `draw()` | `gs.music_list[i]` |
+| Evidence name | `draw()` | `gs.evidence[i].name` |
+| Current music (side panel) | `draw()` | `gs.current_music` |
+| Button labels (OOC/Music/Evi) | `draw()` centered | literal strings |
+| HP bar labels (DEF/PRO) | `draw()` | literal strings |
+
+---
+
 ### `src/ui/screen.hpp`
 
 **Abstract class:** `ao::Screen`

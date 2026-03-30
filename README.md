@@ -477,7 +477,8 @@ ferris-ao-switch/
     │   └── music_player.hpp/cpp    # BGM: Mix_Music with crossfade
     ├── render/
     │   ├── renderer.hpp/cpp        # SDL_Renderer wrapper, 1280×720 logical size
-    │   └── layout.hpp              # All courtroom coordinate constants (constexpr SDL_Rect)
+    │   ├── text_renderer.hpp/cpp   # SDL_ttf wrapper, 32-slot LRU texture cache
+    │   └── layout.hpp              # Fallback courtroom coordinate constants (constexpr SDL_Rect)
     ├── ui/
     │   ├── screen.hpp              # Abstract Screen base class
     │   ├── screens/
@@ -637,9 +638,8 @@ Pull requests are welcome. Before contributing:
 ### Known limitations / TODO
 
 - `wss://` (TLS WebSocket) is not yet supported — requires porting mbedtls or openssl to Switch portlibs
-- Text rendering is not yet implemented — `TextRenderer` (SDL_ttf wrapper with texture cache) is the next milestone; currently all text fields render as placeholder rectangles
 - IC input overlay does not yet send the MS packet — wired to the UI but the `cmd::ms()` call needs to be connected to the `OutQueue` via the App
-- Character sprite loading is not yet wired into `CourtroomScreen` — `APNGPlayer` and `TextureCache` exist but the courtroom currently renders placeholder rectangles
+- Character sprite loading is not yet wired into `CourtroomScreen` — `APNGPlayer` and `TextureCache` exist but the courtroom currently renders placeholder rectangles for sprites
 - No settings persistence — host/port/username reset on each launch; a `sdmc:/switch/ferris-ao/config.ini` save/load pass is planned
 
 ---

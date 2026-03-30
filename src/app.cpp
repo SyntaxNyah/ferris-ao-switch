@@ -92,6 +92,9 @@ bool App::init() {
     // Falls back to built-in Layout:: constants silently when files are absent.
     theme_manager_.load("default");
 
+    // Init text renderer — non-fatal if font is missing (text renders as nothing).
+    text_renderer_.init(renderer_->raw(), "fonts/noto_sans.ttf", 18);
+
     running_ = true;
     return true;
 }

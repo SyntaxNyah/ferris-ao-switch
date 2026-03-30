@@ -3,9 +3,11 @@
 #include "../../render/renderer.hpp"
 #include "../../state/game_state.hpp"
 #include "../../assets/theme_manager.hpp"
+#include "../../render/text_renderer.hpp"
 #include <SDL2/SDL.h>
 #include <cstring>
 #include <cstdlib>
+#include <cstdio>
 
 namespace ao {
 
@@ -152,109 +154,164 @@ void CourtroomScreen::render_chat_area() {
     Renderer& r = app_.renderer();
     GameState& gs = app_.state();
     const ThemeLayout& tl = app_.theme().layout();
+    TextRenderer& txt = app_.text();
 
     // Chat background strip (from chatbox top to screen bottom)
     SDL_Rect chat_bg = {0, tl.chatbox.y, Renderer::WIDTH, Renderer::HEIGHT - tl.chatbox.y};
-    r.fill_rect(chat_bg,  {10, 10, 20, 230});
+    r.fill_rect(chat_bg,    {10, 10, 20, 230});
     r.fill_rect(tl.chatbox, {15, 15, 30, 200});
     r.draw_rect(tl.chatbox, {60, 80, 120, 255});
 
-    // Nameplate
+    // Nameplate background + showname text
     const ICAnimState& ic = gs.ic_anim;
     r.fill_rect(tl.nameplate, {40, 60, 120, 255});
+    const char* display_name = (ic.showname[0] != '\0') ? ic.showname : ic.char_name;
+    if (display_name[0] != '\0') {
+        int ty = tl.nameplate.y + (tl.nameplate.h - txt.line_h()) / 2;
+        txt.draw(display_name, tl.nameplate.x + 6, ty, {255, 255, 255, 255});
+    }
 
-    // Message text (clipped to typewriter progress)
-    // Full text rendering requires TextRenderer (Phase 5+).
-    // For now we just show the chatbox is wired up by drawing a progress bar.
-    if (typewriter_max_ > 0) {
-        int bar_w = tl.chatbox.w * typewriter_pos_ / typewriter_max_;
+    // IC message text — typewriter-clipped, word-wrapped inside ic_text area
+    if (typewriter_pos_ > 0) {
+        char msg_buf[512];
+        int len = typewriter_pos_ < 511 ? typewriter_pos_ : 511;
+        std::memcpy(msg_buf, ic.message, len);
+        msg_buf[len] = '\0';
+
         SDL_Color text_col = (ic.text_color >= 0 && ic.text_color < 12)
             ? TEXT_COLORS[ic.text_color] : TEXT_COLORS[0];
-        text_col.a = 80;
-        r.fill_rect({tl.chatbox.x, tl.chatbox.y + tl.chatbox.h - 8, bar_w, 8}, text_col);
+        txt.draw_wrapped(msg_buf,
+                         tl.ic_text.x, tl.ic_text.y,
+                         tl.ic_text.w, text_col);
     }
 
     // Panel toggle buttons
-    auto draw_btn = [&](const SDL_Rect& rect, SDL_Color c) {
+    auto draw_btn = [&](const SDL_Rect& rect, SDL_Color c, const char* label) {
         r.fill_rect(rect, c);
         r.draw_rect(rect, {100, 120, 180, 255});
+        int tx = rect.x + (rect.w - txt.measure_w(label)) / 2;
+        int ty = rect.y + (rect.h - txt.line_h()) / 2;
+        txt.draw(label, tx, ty, {220, 230, 255, 255});
     };
     draw_btn(tl.btn_ooc,
-        active_panel_==CourtroomPanel::OOC ? SDL_Color{80,120,200,255} : SDL_Color{30,30,60,255});
+        active_panel_==CourtroomPanel::OOC ? SDL_Color{80,120,200,255} : SDL_Color{30,30,60,255},
+        "OOC");
     draw_btn(tl.btn_music,
-        active_panel_==CourtroomPanel::Music ? SDL_Color{80,120,200,255} : SDL_Color{30,30,60,255});
+        active_panel_==CourtroomPanel::Music ? SDL_Color{80,120,200,255} : SDL_Color{30,30,60,255},
+        "Music");
     draw_btn(tl.btn_evidence,
-        active_panel_==CourtroomPanel::Evidence ? SDL_Color{80,120,200,255} : SDL_Color{30,30,60,255});
+        active_panel_==CourtroomPanel::Evidence ? SDL_Color{80,120,200,255} : SDL_Color{30,30,60,255},
+        "Evi");
 }
 
 void CourtroomScreen::render_side_panel() {
     Renderer& r = app_.renderer();
     GameState& gs = app_.state();
     const ThemeLayout& tl = app_.theme().layout();
+    TextRenderer& txt = app_.text();
 
     r.fill_rect(tl.log, {18, 18, 35, 255});
 
-    // HP bars
-    auto draw_hp = [&](SDL_Rect bar, int val, SDL_Color fill) {
+    // Current music name
+    if (gs.current_music[0] != '\0') {
+        r.fill_rect(tl.music_name, {22, 22, 45, 220});
+        int ty = tl.music_name.y + (tl.music_name.h - txt.line_h()) / 2;
+        txt.draw(gs.current_music, tl.music_name.x + 4, ty, {160, 190, 255, 255});
+    }
+
+    // HP bars with DEF / PRO labels
+    auto draw_hp = [&](SDL_Rect bar, int val, SDL_Color fill,
+                       const char* label, SDL_Color label_col) {
         r.fill_rect(bar, {20, 20, 20, 255});
         if (val > 0) {
             SDL_Rect filled = {bar.x, bar.y, bar.w * val / 10, bar.h};
             r.fill_rect(filled, fill);
         }
         r.draw_rect(bar, {60, 60, 80, 255});
+        txt.draw(label, bar.x, bar.y - txt.line_h(), label_col);
     };
-    draw_hp(tl.hp_def, gs.hp_defense,     {60, 140, 220, 255});
-    draw_hp(tl.hp_pro, gs.hp_prosecution, {220, 60, 60,  255});
+    draw_hp(tl.hp_def, gs.hp_defense,     {60, 140, 220, 255}, "DEF", {140, 180, 255, 255});
+    draw_hp(tl.hp_pro, gs.hp_prosecution, {220, 60,  60, 255}, "PRO", {255, 120, 120, 255});
 }
 
 void CourtroomScreen::render_active_panel() {
     Renderer& r = app_.renderer();
     GameState& gs = app_.state();
     const ThemeLayout& tl = app_.theme().layout();
+    TextRenderer& txt = app_.text();
 
     if (active_panel_ == CourtroomPanel::None) return;
+
+    const int lh = txt.line_h() > 0 ? txt.line_h() : 20; // fallback if font missing
 
     if (active_panel_ == CourtroomPanel::OOC) {
         r.fill_rect(tl.panel_ooc, {10, 10, 20, 230});
         r.draw_rect(tl.panel_ooc, {60, 80, 140, 255});
-        static constexpr int ROWS = 18;
-        int start = gs.ooc_log.count > ROWS ? gs.ooc_log.count - ROWS : 0;
-        start = start - ooc_scroll_;
+
+        // Two text lines per entry: name header + message body
+        const int row_h   = lh * 2 + 6;
+        const int visible = (tl.panel_ooc.h - 8) / row_h;
+        int start = gs.ooc_log.count > visible ? gs.ooc_log.count - visible : 0;
+        start -= ooc_scroll_;
         if (start < 0) start = 0;
-        for (int i = 0; i < ROWS && (start + i) < gs.ooc_log.count; ++i) {
+
+        for (int i = 0; i < visible && (start + i) < gs.ooc_log.count; ++i) {
             const ChatEntry& ce = gs.ooc_log.at(start + i);
-            SDL_Color row_bg = ce.server
-                ? SDL_Color{30, 30, 50, 180}
-                : SDL_Color{20, 20, 40, 180};
-            r.fill_rect({tl.panel_ooc.x + 4, tl.panel_ooc.y + 4 + i * 38,
-                         tl.panel_ooc.w - 8, 36}, row_bg);
-            (void)ce;
+            int ry = tl.panel_ooc.y + 4 + i * row_h;
+            SDL_Rect row_bg = {tl.panel_ooc.x + 4, ry, tl.panel_ooc.w - 8, row_h - 2};
+            r.fill_rect(row_bg, ce.server
+                ? SDL_Color{30, 30, 50, 180} : SDL_Color{20, 20, 40, 180});
+
+            // "[name]" in accent color, message below in white
+            char header[80];
+            std::snprintf(header, sizeof(header), "[%s]", ce.name);
+            SDL_Color name_col = ce.server
+                ? SDL_Color{180, 200, 255, 255} : SDL_Color{140, 200, 140, 255};
+            txt.draw(header, tl.panel_ooc.x + 8, ry + 2, name_col);
+            txt.draw_wrapped(ce.message, tl.panel_ooc.x + 8, ry + 2 + lh,
+                             tl.panel_ooc.w - 16, {220, 220, 220, 255});
         }
+
     } else if (active_panel_ == CourtroomPanel::Music) {
         r.fill_rect(tl.panel_music, {10, 10, 20, 230});
         r.draw_rect(tl.panel_music, {60, 80, 140, 255});
-        static constexpr int ROWS = 16;
+
+        const int row_h   = lh + 10;
+        const int visible = (tl.panel_music.h - 8) / row_h;
         int start = music_scroll_;
         if (start < 0) start = 0;
-        for (int i = 0; i < ROWS && (start + i) < gs.music_count; ++i) {
-            SDL_Rect row = {tl.panel_music.x + 4, tl.panel_music.y + 4 + i * 44,
-                            tl.panel_music.w - 8, 40};
-            bool cur = std::strcmp(gs.music_list[start+i], gs.current_music) == 0;
+
+        for (int i = 0; i < visible && (start + i) < gs.music_count; ++i) {
+            const char* track = gs.music_list[start + i];
+            SDL_Rect row = {tl.panel_music.x + 4, tl.panel_music.y + 4 + i * row_h,
+                            tl.panel_music.w - 8, row_h - 2};
+            bool cur = std::strcmp(track, gs.current_music) == 0;
             r.fill_rect(row, cur ? SDL_Color{50,100,180,200} : SDL_Color{20,20,40,180});
-            r.draw_rect(row, {50,50,80,255});
+            r.draw_rect(row, {50, 50, 80, 255});
+            SDL_Color tc = cur ? SDL_Color{255,255,100,255} : SDL_Color{200,210,230,255};
+            txt.draw(track, row.x + 6, row.y + (row.h - lh) / 2, tc);
         }
+
     } else if (active_panel_ == CourtroomPanel::Evidence) {
         r.fill_rect(tl.panel_evidence, {10, 10, 20, 230});
         r.draw_rect(tl.panel_evidence, {60, 80, 140, 255});
+
         static constexpr int COLS = 4;
-        static constexpr int CELL = 120;
+        static constexpr int CELL = 100;
+        const int cell_stride = CELL + 8;
+        const int name_h = lh + 2;
+
         for (int i = 0; i < gs.evidence_count && i < 20; ++i) {
-            int col = i % COLS;
-            int row_i = i / COLS;
-            SDL_Rect cell = {tl.panel_evidence.x + 10 + col * (CELL+6),
-                             tl.panel_evidence.y + 10 + row_i * (CELL+6), CELL, CELL};
+            int col  = i % COLS;
+            int rowi = (i / COLS) - evi_scroll_;
+            if (rowi < 0) continue;
+            int cx = tl.panel_evidence.x + 8 + col * cell_stride;
+            int cy = tl.panel_evidence.y + 8 + rowi * (cell_stride + name_h);
+            SDL_Rect cell = {cx, cy, CELL, CELL};
             r.fill_rect(cell, {30, 40, 60, 220});
             r.draw_rect(cell, {70, 90, 130, 255});
+            // Evidence name below cell image
+            txt.draw(gs.evidence[i].name, cx, cy + CELL + 2, {200, 215, 235, 255});
         }
     }
 }

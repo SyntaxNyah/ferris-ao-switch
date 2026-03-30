@@ -3,6 +3,7 @@
 #include <array>
 #include <cstdint>
 #include "assets/theme_manager.hpp"
+#include "render/text_renderer.hpp"
 
 namespace ao {
 
@@ -32,6 +33,7 @@ public:
     Renderer&     renderer()     { return *renderer_; }
     GameState&    state()        { return *game_state_; }
     ThemeManager& theme()        { return theme_manager_; }
+    TextRenderer& text()         { return text_renderer_; }
     bool          running()      const { return running_; }
     void        quit()       { running_ = false; }
 
@@ -46,6 +48,7 @@ private:
     Renderer*     renderer_      = nullptr;
     GameState*    game_state_    = nullptr;
     ThemeManager  theme_manager_;
+    TextRenderer  text_renderer_;
 
     Screen* screen_stack_[SCREEN_STACK_MAX] = {};
     int     screen_count_ = 0;
