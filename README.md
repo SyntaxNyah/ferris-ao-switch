@@ -303,6 +303,53 @@ Character sprites follow the AO2 naming convention:
 
 ---
 
+### AO2 Theme Compatibility
+
+ferris-ao-switch reads standard **AO2 desktop-client themes** directly from the base pack — no porting or conversion required. On startup, the client loads `misc/default/courtroom_design.ini` (and `courtroom_sounds.ini`) from your base folder or the server CDN and applies the theme's layout to the courtroom UI.
+
+**What the theme controls:**
+
+| Element | INI section |
+|---|---|
+| Viewport (background + character sprite area) | `[Viewport]` |
+| Chatbox position and size | `[Chatbox]` |
+| IC message text area | `[IC text]` |
+| Nameplate / showname bar | `[Showname]` / `[Nameplate]` |
+| Defense HP bar | `[Defense HP bar]` |
+| Prosecution HP bar | `[Prosecution HP bar]` |
+| OOC log / side panel | `[Log]` |
+| Music name strip | `[Music name]` |
+| UI sound effects | `[Sounds]` |
+
+**How it works:**
+
+1. At startup, `ThemeManager::load("default")` searches for `courtroom_design.ini` in:
+   - `misc/default/` (classic base-pack path)
+   - `themes/default/` (newer AO2 theme path)
+2. Coordinates are read at their authored resolution (default 960×540) and scaled linearly to 1280×720.
+3. If no theme file is found, built-in defaults matching the standard AO2 layout are used.
+
+**Using a non-default theme:**
+
+Themes can be switched at runtime. Future versions will expose a settings screen to select the active theme by name.
+
+**Supported sound mappings** (from `courtroom_sounds.ini`, `[Sounds]` section):
+
+```ini
+[Sounds]
+realization = sfx-realization
+testimony   = sfx-testimony
+cross       = sfx-cross_examination
+blink       = sfx-blink
+objection   = sfx-objection
+holdit      = sfx-holdit
+takethat    = sfx-takethat
+guilty      = sfx-guilty
+notguilty   = sfx-notguilty
+```
+
+---
+
 ## Connecting to a Server
 
 On the Connect screen, fill in three fields using the system keyboard (press **A** to edit each field):

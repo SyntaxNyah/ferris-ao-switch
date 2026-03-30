@@ -1107,6 +1107,100 @@ The `ASS` packet arrives during the handshake, between `FL` and `SI`. `AssetMana
 
 ---
 
+## AO2 Theme System
+
+### Overview
+
+`ThemeManager` (`src/assets/theme_manager.hpp` / `theme_manager.cpp`) parses standard AO2 desktop-client themes and drives the courtroom UI layout at runtime. Any theme that ships with the AO2 desktop base pack works without modification.
+
+`App` owns a `ThemeManager theme_manager_` and exposes it via `App::theme()`. `App::init()` calls `theme_manager_.load("default")` after romfs is mounted.
+
+`CourtroomScreen` reads `app_.theme().layout()` at render time — every rect is live from the theme.
+
+### File search order
+
+`ThemeManager::load(name)` tries these paths via `AssetManager::fetch_bytes`:
+
+1. `misc/<name>/courtroom_design.ini` — classic AO2 base-pack location
+2. `themes/<name>/courtroom_design.ini` — newer AO2 theme location
+3. Built-in defaults (`Layout::` constants from `renderer.hpp`) — used when neither file is found
+
+Sound names are loaded from `misc/<name>/courtroom_sounds.ini` (or `themes/<name>/`) alongside the design file. If absent, sound name fields are left empty (callers must guard with `sfx[0] != '\0'`).
+
+### ThemeLayout struct
+
+```cpp
+struct ThemeLayout {
+    SDL_Rect viewport;       // Background + character sprite area
+    SDL_Rect chatbox;        // Chatbox background image bounds
+    SDL_Rect ic_text;        // IC message text display area (inside chatbox)
+    SDL_Rect nameplate;      // Showname / character nameplate
+    SDL_Rect hp_def;         // Defense HP bar
+    SDL_Rect hp_pro;         // Prosecution HP bar
+    SDL_Rect log;            // OOC log scrollback area (side panel)
+    SDL_Rect music_name;     // Currently playing music name strip
+    SDL_Rect btn_ooc;        // OOC toggle button
+    SDL_Rect btn_music;      // Music toggle button
+    SDL_Rect btn_evidence;   // Evidence toggle button
+    SDL_Rect panel_ooc;      // OOC overlay panel
+    SDL_Rect panel_music;    // Music overlay panel
+    SDL_Rect panel_evidence; // Evidence overlay panel
+    char sfx_realization[64];
+    char sfx_testimony[64];
+    char sfx_cross[64];
+    char sfx_blink[64];      // IC typewriter tick
+    char sfx_objection[64];
+    char sfx_holdit[64];
+    char sfx_takethat[64];
+    char sfx_guilty[64];
+    char sfx_notguilty[64];
+};
+```
+
+### Coordinate scaling
+
+AO2 themes are authored at a base resolution (default 960×540; overridden by `[version] width`/`height` keys). `ThemeManager` reads this resolution from `[version]` and scales all coordinates linearly to 1280×720 on load:
+
+```
+sx = 1280.0f / base_w_
+sy = 720.0f  / base_h_
+```
+
+No per-frame scaling is done — all rects in `ThemeLayout` are already in 1280×720 screen space.
+
+### INI parsing
+
+`parse_ini_bytes(data, size, cb, ud)` is an allocation-free tokenizer that handles:
+- `[Section]` headers
+- `key = value` pairs (whitespace-trimmed)
+- `;` and `#` comment lines
+
+The callback signature is `void cb(const char* section, const char* key, const char* val, void* ud)`.
+`design_cb` and `sounds_cb` are the two callbacks — they write to `ThemeManager::raw_` and `ThemeLayout::sfx_*` respectively.
+
+### Resolve helpers
+
+```cpp
+// "sfx-blink" → "misc/default/sounds/sfx-blink.ogg"
+//               or "sounds/general/sfx-blink.ogg" if theme_dir unknown
+bool resolve_sfx(const char* sfx_name, char* out_path, int out_cap) const;
+
+// "chatbox" → "misc/default/chatbox.png"
+bool resolve_image(const char* image_name, char* out_path, int out_cap) const;
+```
+
+Pass the result to `AssetManager::open_rwops()`.
+
+### Changing theme at runtime
+
+Call `theme_manager_.load("newtheme")` — parses and rescales immediately. `CourtroomScreen` picks up the new layout on the next render frame (it reads `layout()` each frame). No screen reload needed.
+
+### Derived panels
+
+`ThemeManager` derives `panel_ooc`, `panel_music`, and `panel_evidence` from the `log` rect during `scale_layout` — they are positioned to cover the log area and extend full-height. Themes that define explicit panel rects override this. If a theme has no explicit panel section, all three panels share the same position (the log rect extended to screen height).
+
+---
+
 ## Common Gotchas
 
 ### 1. No exceptions, no RTTI

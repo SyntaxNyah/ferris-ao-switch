@@ -2,6 +2,7 @@
 #include <SDL2/SDL.h>
 #include <array>
 #include <cstdint>
+#include "assets/theme_manager.hpp"
 
 namespace ao {
 
@@ -28,9 +29,10 @@ public:
     void pop_screen();
 
     // Access shared systems
-    Renderer&   renderer()   { return *renderer_; }
-    GameState&  state()      { return *game_state_; }
-    bool        running()    const { return running_; }
+    Renderer&     renderer()     { return *renderer_; }
+    GameState&    state()        { return *game_state_; }
+    ThemeManager& theme()        { return theme_manager_; }
+    bool          running()      const { return running_; }
     void        quit()       { running_ = false; }
 
 private:
@@ -41,8 +43,9 @@ private:
     bool        running_  = false;
     SDL_Window* window_   = nullptr;
 
-    Renderer*   renderer_    = nullptr;
-    GameState*  game_state_  = nullptr;
+    Renderer*     renderer_      = nullptr;
+    GameState*    game_state_    = nullptr;
+    ThemeManager  theme_manager_;
 
     Screen* screen_stack_[SCREEN_STACK_MAX] = {};
     int     screen_count_ = 0;

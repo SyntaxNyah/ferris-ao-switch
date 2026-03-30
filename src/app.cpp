@@ -88,6 +88,10 @@ bool App::init() {
 
     game_state_ = new GameState();
 
+    // Load theme layout from base pack (misc/default/courtroom_design.ini) if present.
+    // Falls back to built-in Layout:: constants silently when files are absent.
+    theme_manager_.load("default");
+
     running_ = true;
     return true;
 }
