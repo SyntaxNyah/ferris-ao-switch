@@ -130,10 +130,13 @@ dkp-pacman -S switch-dev \
               switch-sdl2_image \
               switch-sdl2_ttf \
               switch-sdl2_mixer \
-              switch-sdl2_net
+              switch-sdl2_net \
+              switch-libwebp
 ```
 
-These install the Switch-cross-compiled SDL2 libraries and their dependencies (libpng, libvorbis, libopus, freetype, etc.) into `$DEVKITPRO/portlibs/switch/`.
+These install the Switch-cross-compiled SDL2 libraries and their dependencies (libpng, libvorbis, libopus, freetype, libwebp, etc.) into `$DEVKITPRO/portlibs/switch/`.
+
+`switch-libwebp` provides both `libwebp` (static/animated WebP decode) and `libwebpdemux` (animated WebP frame extraction). Both are required for full WebP support.
 
 ### 3. Clone and build
 
@@ -288,12 +291,15 @@ Character sprites follow the AO2 naming convention:
 
 | File | Purpose |
 |---|---|
-| `emotions/<emote>(a).png` | Idle/standing animation (static or APNG) |
-| `emotions/<emote>(b).png` | Talking animation (static or APNG) |
-| `<preanim>.gif` | Pre-animation played before the main emote |
+| `emotions/<emote>(a).png` | Idle/standing animation (static PNG, APNG, or animated WebP) |
+| `emotions/<emote>(a).webp` | Idle/standing animation (WebP alternative) |
+| `emotions/<emote>(b).png` | Talking animation (static PNG, APNG, or animated WebP) |
+| `emotions/<emote>(b).webp` | Talking animation (WebP alternative) |
+| `<preanim>.gif` | Pre-animation (GIF, APNG, or animated WebP) |
+| `<preanim>.webp` | Pre-animation (animated WebP alternative) |
 | `char.ini` | Character metadata (name, showname, emotion list) |
 
-Both **APNG** and **GIF** animations are supported via `SDL2_image`'s `IMG_LoadAnimation()`. Static PNG is used as a fallback if the file is not animated.
+**Supported image formats:** PNG, APNG, GIF, WebP (static), animated WebP. All are decoded via `SDL2_image`'s `IMG_LoadAnimation_RW` / `IMG_LoadTexture_RW` — format detection is by file content, not extension. WebP requires `switch-libwebp` to be installed (included in the build prerequisites above).
 
 ---
 

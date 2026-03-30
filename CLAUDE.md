@@ -654,7 +654,7 @@ struct TexEntry {
 
 **Class:** `ao::APNGPlayer`
 
-Plays APNG/GIF animations frame-by-frame using SDL2_image ≥ 2.6's `IMG_LoadAnimation()`.
+Plays APNG/GIF/animated-WebP animations frame-by-frame using SDL2_image ≥ 2.6's `IMG_LoadAnimation_RW()`.
 
 ```cpp
 bool load(const char* path, SDL_Renderer* r);
@@ -667,7 +667,7 @@ void free_frames();
 ```
 
 **Internals:**
-- `IMG_LoadAnimation()` → `IMG_Animation*` (array of `SDL_Surface*` + delays in ms)
+- `IMG_LoadAnimation_RW()` → `IMG_Animation*` (array of `SDL_Surface*` + delays in ms); handles GIF, APNG, animated WebP
 - Converts each surface to `SDL_Texture*` (up to `MAX_FRAMES = 128`)
 - `update(dt_ms)` accumulates `elapsed_ms_`; when ≥ frame delay, advances `frame_idx_`
 - If non-looping: stays on last frame, sets `finished_ = true`
@@ -1125,9 +1125,11 @@ Both functions are **synchronous blocking calls**. They must not be called from 
 
 When `NetworkThread` drops the connection (error, server close, or `disconnect()` called), it pushes an `InPacket` containing `"__DISCONNECT#%"` to `incoming_queue` before the thread exits. `AOClient::process()` detects this and fires `on_disconnect`. Do not look for `"DISCONNECT"` without the `__` prefix — that's not an AO2 packet.
 
-### 5. `IMG_LoadAnimation` requires SDL2_image ≥ 2.6
+### 5. `IMG_LoadAnimation_RW` requires SDL2_image ≥ 2.6; animated WebP needs `switch-libwebp`
 
-The Switch portlib `switch-sdl2_image` bundles SDL2_image 2.6+. Do not use `IMG_Load` for animations. If `IMG_LoadAnimation` returns null for an APNG/GIF, the file is either corrupt or a static image — fall back to `IMG_Load`.
+SDL2_image 2.6+ is required for `IMG_LoadAnimation_RW`. Never use `IMG_Load` for animations. Supported animated formats: GIF, APNG, animated WebP. Static formats (PNG, WebP) fall back to `IMG_Load_RW` automatically in `APNGPlayer::load`.
+
+Animated WebP requires both `libwebpdemux` and `libwebp` linked in that order (`-lwebpdemux -lwebp`). If `switch-libwebp` is missing, animated WebP silently falls back to single-frame — `IMG_LoadAnimation_RW` returns null and `APNGPlayer` retries with `IMG_Load_RW`.
 
 ### 6. `romfsInit()` must be called before any `romfs:/` access
 
@@ -1268,12 +1270,13 @@ Switch has 4 GB RAM; homebrew can typically use ~2 GB. Budget is not a concern f
 | Library | Source | Notes |
 |---------|--------|-------|
 | SDL2 | `switch-sdl2` portlib | Window, renderer, events, threads |
-| SDL2_image | `switch-sdl2_image` | PNG, APNG, GIF loading; needs ≥ 2.6 for `IMG_LoadAnimation` |
+| SDL2_image | `switch-sdl2_image` | PNG, APNG, GIF, WebP, animated WebP; needs ≥ 2.6 for `IMG_LoadAnimation_RW` |
 | SDL2_ttf | `switch-sdl2_ttf` | Font rendering |
 | SDL2_mixer | `switch-sdl2_mixer` | BGM (Mix_Music) + SFX (Mix_Chunk) |
 | SDL2_net | `switch-sdl2_net` | TCP sockets (blocking, SDLNet_CheckSockets for non-blocking poll) |
 | libnx | built into devkitPro | `romfsInit`, `swkbdCreate/Show`, Switch system APIs |
 | libopusfile, libvorbisidec, libogg | bundled with SDL2_mixer portlib | Audio codec support |
 | libfreetype, libpng, libz | bundled with SDL2_ttf/SDL2_image | Font + image decode |
+| libwebp, libwebpdemux | `switch-libwebp` portlib | Static WebP decode (`libwebp`) + animated WebP frame extraction (`libwebpdemux`); both required for animated WebP |
 
 No external networking libraries. WebSocket is implemented inline (~300 lines total across ws_handshake + ws_frame).
