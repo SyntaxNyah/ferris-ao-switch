@@ -501,27 +501,123 @@ std::function<void()> on_disconnect;    // Connection lost → pop to ConnectScr
 
 **Static class:** `ao::AssetManager`
 
-All asset loading goes through `AssetManager::resolve()` to get an absolute filesystem path.
+Three-tier asset resolution with HTTP streaming support.
+
+**Priority order:**
+
+| Tier | Source | When active |
+|------|--------|-------------|
+| 1 | HTTP — `<asset_url>/<relative>` | Server sent an `ASS` packet with a CDN URL |
+| 2 | `sdmc:/switch/ferris-ao/base/<relative>` | SD card base folder present |
+| 3 | `romfs:/<relative>` | Always (bundled fallback) |
+
+Tier 1 is activated by `set_asset_url(url)` (called from `AOClient::on_ass`). The local base folder (tier 2) is entirely **optional** — servers without a CDN fall through to romfs for bundled fallbacks, and servers with a CDN stream everything on demand without requiring any SD card content.
+
+**API:**
 
 ```cpp
-static bool resolve(const char* rel, char* out, int out_len);
+// URL management — call from main thread only
+static void set_asset_url(const char* url);  // set from ASS packet
+static void clear_asset_url();               // called on disconnect
+static bool        has_asset_url();
+static const char* asset_url();              // "" if unset
+
+// Local path resolution (no HTTP) — fast existence check
+static bool resolve(const char* relative, char* out_path, int out_cap);
+
+// Full three-tier data fetch — may block (network I/O or disk read)
+// Returns SDL_malloc'd buffer; caller must SDL_free() it.
+static uint8_t* fetch_bytes(const char* relative, int* out_size);
+
+// Full three-tier SDL_RWops — owns its buffer; SDL_RWclose() frees it.
+// Pass to IMG_Load_RW, IMG_LoadAnimation_RW, Mix_LoadMUS_RW, etc. with freesrc=1.
+static SDL_RWops* open_rwops(const char* relative);
+
+// Called by AssetStream to pre-populate the prefetch cache.
+// AssetManager takes ownership of `data` (SDL_malloc'd).
+static void store_prefetch(const char* relative, uint8_t* data, int size);
 ```
 
-**Search order:**
-1. `sdmc:/switch/ferris-ao/base/<rel>` — user-supplied assets on SD card
-2. `romfs:/<rel>` — bundled fallback assets
+**`open_rwops` returns a custom owning `SDL_RWops`** (`SDL_AllocRW()` + custom function pointers). When the returned ops is closed (by SDL_image, SDL_mixer, or manually), the underlying buffer is freed automatically. There is no need to track the buffer separately.
 
-On desktop (non-Switch): tries `base/<rel>` then `romfs/<rel>` relative to CWD.
+**`fetch_bytes` consumption order:**
+1. Check `AssetStream`'s prefetch cache — if found, remove and return immediately (no I/O)
+2. HTTP GET from `<asset_url>/<relative>`
+3. Read from `sdmc:/switch/ferris-ao/base/<relative>`
+4. Read from `romfs:/<relative>`
 
-**Usage:**
+**Prefetch cache:** Fixed array of 32 `PrefetchEntry` slots guarded by an `SDL_mutex`. FIFO eviction when full. `store_prefetch` is called by `AssetStream`; `fetch_bytes` calls `consume_prefetch` (removes the entry, single-use).
+
+**All callers use relative paths** — never resolved absolute paths. The relative path is also the cache key in `TextureCache`.
+
+**`resolve()` is local-only** (for quick existence checks, char.ini parsing, etc.). For any actual data loading, use `fetch_bytes` or `open_rwops`.
+
+---
+
+### `src/net/http_fetch.hpp` / `src/net/http_fetch.cpp`
+
+**Function:** `ao::HttpResult http_get(const char* url)`
+
+Synchronous HTTP/1.1 GET over SDL_net TCP. Plain HTTP only — no TLS.
+
+**`HttpResult`:**
 ```cpp
-char resolved[512];
-if (AssetManager::resolve("characters/phoenix/emotions/deskslam(a).png", resolved, sizeof(resolved))) {
-    SDL_Texture* t = IMG_LoadTexture(renderer, resolved);
-}
+struct HttpResult {
+    uint8_t* data;  // SDL_malloc'd; call result.free() when done
+    int      size;
+    bool     ok;    // false on non-200, DNS failure, timeout, or body error
+    void     free();
+};
 ```
 
-Always check the return value. A missing asset should log to stderr and degrade gracefully (skip animation, use placeholder color).
+**Limits:**
+- `HTTP_MAX_BODY = 32 MB` — hard cap; fails if server sends more
+- `HTTP_TIMEOUT_MS = 8000` — per-read socket timeout
+
+**Supported transfer modes:**
+- `Content-Length` — exact byte count read
+- `Transfer-Encoding: chunked` — chunk sizes decoded, body assembled
+- Neither — reads until server closes connection (fallback)
+
+**Blocking call.** Call only from worker threads (`AssetStream`, `NetworkThread`). Never call from the main thread or from inside `App::run()`.
+
+**Thread safety:** safe to call concurrently from multiple threads (each call opens its own socket).
+
+---
+
+### `src/assets/asset_stream.hpp` / `src/assets/asset_stream.cpp`
+
+**Class:** `ao::AssetStream`
+
+Background SDL thread that pre-warms the `AssetManager` prefetch cache. Prevents hitches when assets are first needed by downloading them before the render loop requests them.
+
+```cpp
+void start();
+void stop();
+
+// Queue a relative path for background prefetch.
+// Returns false if request queue is full (retry next frame).
+// Silently deduplicates requests already in the queue.
+bool prefetch(const char* relative);
+
+// Drain completed prefetches (for logging/debugging — optional).
+bool poll_done(char* out_path, int out_cap);
+```
+
+**`STREAM_QUEUE_SIZE = 64`** — max concurrent pending requests.
+
+**Worker loop:**
+1. Block on `SDL_CondWait` until `prefetch()` signals work
+2. Pop relative path from request queue
+3. Call `AssetManager::fetch_bytes(rel, &size)` (HTTP → sdmc: → romfs:)
+4. Call `AssetManager::store_prefetch(rel, data, size)`
+5. Push path to done queue; repeat
+
+**Integration:** `AssetStream` is owned by `App`. `CourtroomScreen` calls `app_.stream().prefetch(rel)` when it knows an IC message is incoming, pre-loading the character sprites and SFX before they are needed.
+
+**Effect on `open_rwops` / `fetch_bytes`:** The next call for a pre-fetched path returns immediately from the in-memory prefetch cache — no HTTP round-trip, no disk read, no frame hitch.
+
+**Without `AssetStream`:** Everything still works. `open_rwops` falls back to synchronous HTTP/local fetch on first use. Use `AssetStream` when low-latency frame rendering matters.
 
 ---
 
@@ -532,14 +628,16 @@ Always check the return value. A missing asset should log to stderr and degrade 
 LRU cache for `SDL_Texture*`. 64 slots. Evicts least-recently-used on overflow.
 
 ```cpp
-SDL_Texture* get(const char* path, SDL_Renderer* r);
-void evict_all();
+SDL_Texture* get(SDL_Renderer* r, const char* rel_path);
+void release(const char* rel_path);
+void clear();
 ```
 
-- `get()` checks cache first (strcmp on path); on miss, calls `IMG_LoadTexture()` via `AssetManager::resolve()`
+- `get()` checks cache first (strcmp on relative path); on miss, calls `AssetManager::open_rwops(rel)` → `IMG_LoadTexture_RW(r, rw, 1)`
+- The cache key and stored path are **relative paths** — never resolved absolute paths
+- On HTTP streaming: first request for an uncached path fetches from server; subsequent calls return cached texture instantly
 - Sets `last_used = SDL_GetTicks()` on every access (hit or miss)
-- Returns `nullptr` if file not found (log to stderr, caller must handle)
-- `evict_all()` called in `App` destructor
+- Returns `nullptr` if asset not found anywhere (log to stderr, caller must handle gracefully)
 
 **Slot struct:**
 ```cpp
@@ -574,9 +672,11 @@ void free_frames();
 - `update(dt_ms)` accumulates `elapsed_ms_`; when ≥ frame delay, advances `frame_idx_`
 - If non-looping: stays on last frame, sets `finished_ = true`
 
-**Fallback:** If `IMG_LoadAnimation()` returns null (static PNG, file not found), tries `IMG_Load()` + `SDL_CreateTextureFromSurface()` as a single-frame "animation".
+**Fallback:** If `IMG_LoadAnimation_RW()` returns null (static image), opens a second `AssetManager::open_rwops()` call and uses `IMG_Load_RW()` as a single-frame "animation".
 
-**Resource management:** `free_frames()` destroys all `SDL_Texture*` and zeros arrays. Call before `load()`ing a new animation into the same `APNGPlayer`.
+**HTTP streaming:** `load(path)` takes a relative path and resolves it via `AssetManager::open_rwops()` — HTTP CDN first, then local base, then romfs. No caller path-resolution needed.
+
+**Resource management:** `unload()` destroys all `SDL_Texture*` and zeros arrays. Called automatically in `load()` before loading a new animation.
 
 ---
 
@@ -629,9 +729,10 @@ void set_sfx_volume(int vol);        // 0–128 (MIX_MAX_VOLUME)
 
 **Cache:** `SfxEntry sfx_cache_[16]` — LRU by `last_used = SDL_GetTicks()`. `evict_sfx()` finds oldest occupied slot when all 16 are full.
 
-**`play_sfx(path)`:**
-1. `find_sfx(path)` — linear search on `path` strings
-2. Miss: `Mix_LoadWAV(resolved_path)`, evict LRU if needed
+**`play_sfx(path)`:** takes a relative path.
+1. `find_sfx(path)` — linear search on relative path strings
+2. Miss: `AssetManager::open_rwops(path)` → `Mix_LoadWAV_RW(rw, 1)`, evict LRU if needed
+   - `freesrc=1`: SDL_mixer decodes WAV/OGG entirely upfront, so the RWops is not needed after load
 3. Hit or loaded: `Mix_PlayChannel(-1, chunk, 0)`
 
 ---
@@ -652,12 +753,13 @@ const char* current() const;      // Path of currently playing track
 
 **`play()` behavior:**
 - If `path == "~~"` → `stop()` (AO2 stop-music sentinel)
-- Resolve path via `AssetManager::resolve()`, then try `music/<path>` prefix fallback
-- If music already playing: `Mix_HaltMusic()` + `Mix_FreeMusic()` (immediate, no async fade)
-- `Mix_LoadMUS(resolved)` → `Mix_FadeInMusic(music_, -1, fade_ms)` (loop forever)
+- Calls `AssetManager::open_rwops(path)`, then tries `music/<path>` prefix fallback (HTTP → sdmc: → romfs:)
+- If music already playing: `Mix_HaltMusic()` + `Mix_FreeMusic()` + `SDL_RWclose(music_rw_)`
+- `Mix_LoadMUS_RW(rw, 0)` with `freesrc=0` — we keep `rw` alive in `music_rw_` because SDL_mixer streams from it
+- `Mix_FadeInMusic(music_, -1, fade_ms)` (loop forever)
 - Updates `current_path_`
 
-**Note:** `Mix_FadeOutMusic` is attempted but immediately halted with `Mix_HaltMusic` because SDL_mixer's fade completion callback is unreliable on Switch. If you need true crossfade, the correct approach is to track the fade timer manually and call `Mix_FreeMusic` after `fade_ms/2` milliseconds via the game loop — but the current simple halt is sufficient for gameplay.
+**`music_rw_` lifetime:** SDL_mixer streams OGG/MP3 from the RWops rather than loading everything upfront. `music_rw_` must stay alive until `stop()` is called. `stop()` calls `Mix_FreeMusic` first (stops streaming), then `SDL_RWclose(music_rw_)` (frees the buffer from `open_rwops`). Never close `music_rw_` while music is playing.
 
 ---
 
@@ -950,6 +1052,61 @@ Always call `Packet::escape()` before building outgoing packets and `Packet::une
 
 ---
 
+## Asset Streaming System
+
+### Overview
+
+The asset streaming system allows the client to load assets directly from a server's HTTP CDN without requiring users to pre-download a base pack to their SD card. The local base folder and romfs are used as fallbacks.
+
+```
+Server sends ASS#http://cdn.example.com/ao-base#%
+         │
+         ▼
+AOClient::on_ass() → AssetManager::set_asset_url("http://cdn.example.com/ao-base")
+         │
+         ▼ (on any open_rwops / fetch_bytes call)
+AssetManager checks:
+  [1] Prefetch cache (populated by AssetStream background thread)
+       └─ hit: return immediately, no I/O
+  [2] HTTP GET http://cdn.example.com/ao-base/<rel>
+       └─ hit: return SDL_malloc'd buffer
+  [3] sdmc:/switch/ferris-ao/base/<rel>
+       └─ hit: read file, return buffer
+  [4] romfs:/<rel>
+       └─ hit: read file, return buffer
+       └─ miss: return nullptr → asset not found
+```
+
+### Without a CDN (no ASS packet)
+
+Tier 1 (HTTP) is skipped entirely. The client uses the local base folder (tier 2) and romfs fallbacks (tier 3). This is the experience for servers that don't host a CDN.
+
+Users who want the full character roster on such servers should drop an AO2 base pack to `sdmc:/switch/ferris-ao/base/` on their SD card.
+
+### With a CDN (ASS packet received)
+
+All asset loading goes through HTTP first. Users need no local files at all — everything streams on demand. The romfs fallbacks still apply for UI chrome (chatbox, HP bars, fonts) which is always bundled.
+
+### Owning SDL_RWops
+
+`open_rwops()` returns a custom `SDL_RWops` (allocated via `SDL_AllocRW()`) with function pointers that own the underlying `SDL_malloc`'d buffer. Calling `SDL_RWclose()` on it frees the buffer. This means:
+
+- `IMG_Load_RW(rw, 1)` — SDL_image decodes and closes rw → buffer freed ✓
+- `IMG_LoadAnimation_RW(rw, 1)` — SDL_image decodes and closes rw → buffer freed ✓
+- `IMG_LoadTexture_RW(r, rw, 1)` — SDL_image decodes and closes rw → buffer freed ✓
+- `Mix_LoadWAV_RW(rw, 1)` — SDL_mixer decodes fully, closes rw → buffer freed ✓
+- `Mix_LoadMUS_RW(rw, 0)` — SDL_mixer **streams** from rw → keep rw alive in `music_rw_`; close after `Mix_FreeMusic`
+
+### ASS packet timing
+
+The `ASS` packet arrives during the handshake, between `FL` and `SI`. `AssetManager::set_asset_url()` is called immediately in `on_ass()`. All subsequent asset loads (character list portraits, backgrounds) use the URL.
+
+### URL cleared on disconnect
+
+`AOClient::on_disconnected()` calls `AssetManager::clear_asset_url()`. The next server connection may have a different CDN URL (or none at all).
+
+---
+
 ## Common Gotchas
 
 ### 1. No exceptions, no RTTI
@@ -991,7 +1148,19 @@ Never invert this. No other thread should ever touch these queues.
 
 `SDL_GetTicks()` returns `uint32_t` milliseconds, which wraps at ~49 days. LRU comparisons (`last_used`) use subtraction, which handles wrapping correctly for differences < 2^31 ms. Do not use `>` / `<` directly for LRU timestamps — always use subtraction.
 
-### 10. Character sprite path convention
+### 10. `http_get` is synchronous and blocking
+
+`http_get()` blocks until the response is complete or times out (8 seconds). Never call it from the main thread or from `App::run()`. It is called from:
+- `AssetStream` worker thread (via `fetch_bytes`)
+- `NetworkThread` indirectly (via `open_rwops` in music/sfx loading, but those happen in AOClient handlers on the main thread — acceptable one-time stall on MC packet)
+
+If latency-sensitive loading is needed, call `asset_stream.prefetch()` before the asset is required.
+
+### 11. `music_rw_` must outlive Mix_Music
+
+`MusicPlayer` holds `music_rw_` alongside `music_`. `music_rw_` is the `open_rwops()` result; SDL_mixer streams from it. Always call `Mix_FreeMusic(music_)` before `SDL_RWclose(music_rw_)`. The `stop()` method does this correctly. Do not reorder these calls.
+
+### 12. Character sprite path convention
 
 ```
 Idle:     characters/<name>/emotions/<emote>(a).png
@@ -999,7 +1168,7 @@ Talk:     characters/<name>/emotions/<emote>(b).png
 Pre-anim: characters/<name>/<pre_anim>.gif
 ```
 
-The `emote` field from the MS packet is the base name (no suffix). Append `(a)` or `(b)` before calling `AssetManager::resolve()`. Pre-anims use the full name from `[Emotions]` ini section field 2.
+The `emote` field from the MS packet is the base name (no suffix). Append `(a)` or `(b)` before calling `AssetManager::open_rwops()` or `TextureCache::get()`. Pre-anims use the full name from `[Emotions]` ini section field 2.
 
 ### 11. `SDLNet_TCP_Send` is not frame-safe on partial sends
 

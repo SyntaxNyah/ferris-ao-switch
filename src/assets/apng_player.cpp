@@ -1,4 +1,5 @@
 #include "apng_player.hpp"
+#include "asset_manager.hpp"
 #include <cstdio>
 #include <cstring>
 
@@ -18,20 +19,26 @@ void APNGPlayer::unload() {
     width_ = height_ = 0;
 }
 
+// `path` is a RELATIVE asset path.
+// Resolution order: HTTP streaming → sdmc: local base → romfs: bundled fallback.
 bool APNGPlayer::load(SDL_Renderer* r, const char* path) {
     unload();
 
-    // Try IMG_LoadAnimation (SDL2_image >= 2.6, supports APNG + GIF)
-    IMG_Animation* anim = IMG_LoadAnimation(path);
+    SDL_RWops* rw = AssetManager::open_rwops(path);
+    if (!rw) {
+        std::fprintf(stderr, "APNGPlayer: not found '%s'\n", path);
+        return false;
+    }
+
+    // Try animated (APNG / GIF) first — freesrc=1 closes rw when done
+    IMG_Animation* anim = IMG_LoadAnimation_RW(rw, 1);
     if (anim && anim->count > 0) {
         int n = anim->count < APNG_MAX_FRAMES ? anim->count : APNG_MAX_FRAMES;
         for (int i = 0; i < n; ++i) {
             frames_[i] = SDL_CreateTextureFromSurface(r, anim->frames[i]);
-            if (!frames_[i]) {
+            if (!frames_[i])
                 std::fprintf(stderr, "APNGPlayer: frame %d texture fail: %s\n",
                     i, SDL_GetError());
-            }
-            // delays in ms; SDL2_image stores them in ms already
             delays_[i] = anim->delays[i] > 0 ? anim->delays[i] : 100;
         }
         frame_count_ = n;
@@ -41,11 +48,15 @@ bool APNGPlayer::load(SDL_Renderer* r, const char* path) {
         return frame_count_ > 0;
     }
     if (anim) IMG_FreeAnimation(anim);
+    // rw was already closed by IMG_LoadAnimation_RW (freesrc=1)
 
-    // Fall back to static image
-    SDL_Surface* surf = IMG_Load(path);
+    // Fall back to static image — need a fresh RWops
+    rw = AssetManager::open_rwops(path);
+    if (!rw) return false;
+
+    SDL_Surface* surf = IMG_Load_RW(rw, 1); // freesrc=1
     if (!surf) {
-        std::fprintf(stderr, "APNGPlayer: can't load '%s': %s\n",
+        std::fprintf(stderr, "APNGPlayer: decode failed '%s': %s\n",
             path, IMG_GetError());
         return false;
     }

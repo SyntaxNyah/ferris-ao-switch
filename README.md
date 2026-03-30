@@ -51,10 +51,13 @@ ferris-ao-switch implements the full AO2 client protocol so Switch players can j
 - **HP bars** — defense and prosecution health bar display, 0–10 scale
 - **Narrator mode** — send IC messages without a character sprite
 
-### Rendering
-- **APNG + GIF animations** — character idle, talk, and pre-animations
-- **Asset fallback** — loads from `sdmc:/switch/ferris-ao/base/` (user AO base pack) with `romfs:/` bundled fallback
-- **LRU texture cache** — 64-slot cache prevents redundant GPU uploads
+### Assets
+- **HTTP streaming** — loads assets on-demand from server CDN (`ASS` packet); no base pack download needed
+- **Three-tier fallback** — HTTP CDN → `sdmc:/switch/ferris-ao/base/` local pack → `romfs:/` bundled fallback
+- **Local base optional** — the SD card base folder is only needed on servers without a CDN
+- **APNG + GIF animations** — character idle, talk, and pre-animations via `IMG_LoadAnimation_RW()`
+- **LRU texture cache** — 64-slot cache; all lookups use relative paths as keys, regardless of source
+- **Background pre-fetcher** — `AssetStream` thread pre-loads upcoming assets into memory before the render loop needs them
 - **1280×720 layout** — matches Switch native resolution in both docked and handheld modes; 4:3 sprite viewport, side panel, chat area
 
 ### Input
@@ -214,12 +217,38 @@ Your Switch must be running **Atmosphere** custom firmware. Homebrew does not wo
 
 ## Asset Setup
 
-AO2 clients rely on a "base" folder containing character sprites, backgrounds, music, and sound effects. ferris-ao-switch looks for assets in two locations, in priority order:
+### HTTP Asset Streaming (recommended — no downloads required)
 
-| Priority | Location | Description |
+ferris-ao-switch supports **on-demand asset streaming** directly from a server's CDN. When a server advertises an asset URL (via the `ASS` packet during handshake), the client fetches every character sprite, background, music file, and sound effect from that URL as needed — no base pack download required.
+
+**For players:** If the server you're connecting to has a CDN, you don't need to install anything. Just connect and play.
+
+**For server operators:** Set the `asset_url` field in your server's config to point to your HTTP file server. Clients that support it (including ferris-ao-switch) will stream from there automatically. Example:
+```toml
+[server]
+asset_url = "http://cdn.myaoserver.com/base"
+```
+
+The client constructs requests as `<asset_url>/<relative_path>`, e.g.:
+```
+http://cdn.myaoserver.com/base/characters/Phoenix_Wright/emotions/normal(a).png
+```
+
+**HTTP only** — HTTPS (TLS) CDN URLs are not supported at this time. Use a plain `http://` URL or a reverse proxy that strips TLS.
+
+---
+
+### Local Base Folder (optional fallback)
+
+If the server has no CDN, or for offline use, assets can be installed locally. ferris-ao-switch looks for assets in three locations, in priority order:
+
+| Priority | Source | When used |
 |---|---|---|
-| 1 | `sdmc:/switch/ferris-ao/base/` | User-installed AO base pack (full quality) |
-| 2 | `romfs:/` | Bundled fallback (minimal — one character, one font, UI chrome) |
+| 1 | HTTP CDN — `<server asset_url>/<relative>` | Server sent `ASS` packet with a URL |
+| 2 | `sdmc:/switch/ferris-ao/base/<relative>` | Local base pack on SD card (optional) |
+| 3 | `romfs:/<relative>` | Bundled fallback (minimal — one character, font, UI chrome) |
+
+If the server has no CDN and you have no local base, the client still works using the bundled romfs fallbacks — you'll see placeholder sprites for characters not in romfs.
 
 The expected folder structure under `base/` mirrors the standard AO2 base pack:
 

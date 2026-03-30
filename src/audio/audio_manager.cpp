@@ -1,4 +1,5 @@
 #include "audio_manager.hpp"
+#include "../assets/asset_manager.hpp"
 #include <cstdio>
 #include <cstring>
 #include <SDL2/SDL.h>
@@ -33,20 +34,30 @@ int AudioManager::evict_sfx() const {
     return oldest;
 }
 
+// `path` is a RELATIVE asset path (e.g. "sounds/sfx-guilty.ogg").
+// Resolution order: HTTP streaming → sdmc: local base → romfs: bundled fallback.
 bool AudioManager::play_sfx(const char* path) {
     int idx = find_sfx(path);
     if (idx < 0) {
-        Mix_Chunk* c = Mix_LoadWAV(path);
+        // Load via AssetManager (HTTP, local, or romfs)
+        SDL_RWops* rw = AssetManager::open_rwops(path);
+        if (!rw) {
+            std::fprintf(stderr, "AudioManager: not found '%s'\n", path);
+            return false;
+        }
+        // freesrc=1: Mix_LoadWAV_RW closes rw (which frees the owning buffer).
+        // Mix_Chunk stores decoded PCM internally so we do not need to keep rw alive.
+        Mix_Chunk* c = Mix_LoadWAV_RW(rw, 1);
         if (!c) {
-            // Try OGG
-            std::fprintf(stderr, "AudioManager: can't load '%s': %s\n",
+            std::fprintf(stderr, "AudioManager: decode failed '%s': %s\n",
                 path, Mix_GetError());
             return false;
         }
         idx = evict_sfx();
         if (sfx_cache_[idx].chunk) Mix_FreeChunk(sfx_cache_[idx].chunk);
         sfx_cache_[idx].chunk = c;
-        std::strncpy(sfx_cache_[idx].path, path, 255);
+        std::strncpy(sfx_cache_[idx].path, path,
+            sizeof(sfx_cache_[idx].path) - 1);
     }
     sfx_cache_[idx].last_used = SDL_GetTicks();
     return Mix_PlayChannel(-1, sfx_cache_[idx].chunk, 0) >= 0;

@@ -1,4 +1,5 @@
 #include "texture_cache.hpp"
+#include "asset_manager.hpp"
 #include <cstdio>
 #include <SDL2/SDL.h>
 
@@ -22,7 +23,6 @@ int TextureCache::find_slot(const char* path) const {
 }
 
 int TextureCache::evict_slot() const {
-    // Find the slot with the smallest last_used (or an empty slot first)
     for (int i = 0; i < TEX_CACHE_SLOTS; ++i)
         if (!slots_[i].tex) return i;
 
@@ -33,6 +33,8 @@ int TextureCache::evict_slot() const {
     return oldest;
 }
 
+// `path` is a RELATIVE asset path (e.g. "characters/phoenix/emotions/normal(a).png").
+// Resolution order: HTTP streaming → sdmc: local base → romfs: bundled fallback.
 SDL_Texture* TextureCache::get(SDL_Renderer* r, const char* path) {
     int idx = find_slot(path);
     if (idx >= 0) {
@@ -40,10 +42,17 @@ SDL_Texture* TextureCache::get(SDL_Renderer* r, const char* path) {
         return slots_[idx].tex;
     }
 
-    // Load from disk
-    SDL_Texture* tex = IMG_LoadTexture(r, path);
+    // Load via AssetManager (HTTP, local, or romfs)
+    SDL_RWops* rw = AssetManager::open_rwops(path);
+    if (!rw) {
+        std::fprintf(stderr, "TextureCache: not found '%s'\n", path);
+        return nullptr;
+    }
+
+    // freesrc=1: IMG_LoadTexture_RW closes rw (which frees the owning buffer)
+    SDL_Texture* tex = IMG_LoadTexture_RW(r, rw, 1);
     if (!tex) {
-        std::fprintf(stderr, "TextureCache: failed to load '%s': %s\n",
+        std::fprintf(stderr, "TextureCache: decode failed '%s': %s\n",
             path, IMG_GetError());
         return nullptr;
     }
@@ -62,8 +71,8 @@ void TextureCache::release(const char* path) {
     int idx = find_slot(path);
     if (idx < 0) return;
     SDL_DestroyTexture(slots_[idx].tex);
-    slots_[idx].tex      = nullptr;
-    slots_[idx].path[0]  = '\0';
+    slots_[idx].tex       = nullptr;
+    slots_[idx].path[0]   = '\0';
     slots_[idx].last_used = 0;
 }
 

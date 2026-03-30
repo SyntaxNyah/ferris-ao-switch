@@ -1,4 +1,5 @@
 #pragma once
+#include <SDL2/SDL.h>
 #include <SDL2/SDL_mixer.h>
 
 namespace ao {
@@ -26,6 +27,7 @@ public:
 
 private:
     Mix_Music* music_      = nullptr;
+    SDL_RWops* music_rw_   = nullptr;  // kept alive while SDL_mixer streams from it
     char       current_path_[256] = {};
 };
 

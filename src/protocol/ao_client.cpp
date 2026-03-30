@@ -1,5 +1,6 @@
 #include "ao_client.hpp"
 #include "commands.hpp"
+#include "../assets/asset_manager.hpp"
 #include <cstdio>
 #include <cstring>
 #include <cstdarg>
@@ -23,6 +24,7 @@ void AOClient::on_disconnected() {
     state_.connected  = false;
     state_.in_lobby   = false;
     parse_len_ = 0;
+    AssetManager::clear_asset_url();
 }
 
 void AOClient::send(const char* buf, int len) {
@@ -87,7 +89,7 @@ void AOClient::handle(const Packet& pkt) {
     if (std::strcmp(h, "ID")          == 0) { on_id(pkt);         return; }
     if (std::strcmp(h, "PN")          == 0) { on_pn(pkt);         return; }
     if (std::strcmp(h, "FL")          == 0) { on_fl(pkt);         return; }
-    if (std::strcmp(h, "ASS")         == 0) { /* asset URL — store if needed */ return; }
+    if (std::strcmp(h, "ASS")         == 0) { on_ass(pkt);         return; }
     if (std::strcmp(h, "SI")          == 0) { on_si(pkt);         return; }
     if (std::strcmp(h, "SC")          == 0) { on_sc(pkt);         return; }
     if (std::strcmp(h, "SM")          == 0) { on_sm(pkt);         return; }
@@ -147,6 +149,18 @@ void AOClient::on_pn(const Packet& /*p*/) {
 
 void AOClient::on_fl(const Packet& /*p*/) {
     // Feature flags — nothing to store for now (we support everything)
+}
+
+void AOClient::on_ass(const Packet& p) {
+    // ASS#<base_url>#%  — server-provided HTTP asset base URL (optional)
+    // If present, all asset lookups try this URL first before local base / romfs.
+    const char* url = p.field(0);
+    if (url && url[0] != '\0') {
+        AssetManager::set_asset_url(url);
+        std::fprintf(stdout, "[ao_client] ASS asset URL: %s\n", url);
+    } else {
+        AssetManager::clear_asset_url();
+    }
 }
 
 void AOClient::on_si(const Packet& p) {

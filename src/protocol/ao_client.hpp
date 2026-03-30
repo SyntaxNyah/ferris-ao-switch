@@ -45,6 +45,7 @@ private:
     void on_id        (const Packet& p);
     void on_pn        (const Packet& p);
     void on_fl        (const Packet& p);
+    void on_ass       (const Packet& p);
     void on_si        (const Packet& p);
     void on_sc        (const Packet& p);
     void on_sm        (const Packet& p);
