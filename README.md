@@ -36,7 +36,7 @@ ferris-ao-switch implements the full AO2 client protocol so Switch players can j
 
 ### Core
 - **Full AO2 protocol** — IC messages with animations, OOC chat, music, evidence, health bars, rebuttal/realization, pairing, case alerts, mod calls
-- **TCP + WebSocket** — connects to any AO2 server; auto-detects `ws://` prefix for WebSocket mode
+- **TCP + WebSocket + WSS** — connects to any AO2 server; auto-detects `ws://` (plain WebSocket) and `wss://` (TLS WebSocket via mbedtls) prefixes
 - **Dual-platform** — same `.nro` runs on Ryujinx emulator and real Switch hardware (Atmosphere CFW)
 - **Any AO2 server** — compatible with Ferris-AO, tsuserver3, Akasha, and any server implementing the standard AO2 protocol
 
@@ -73,6 +73,7 @@ ferris-ao-switch implements the full AO2 client protocol so Switch players can j
 ### Networking
 - **Background thread** — all socket I/O on a dedicated thread; main thread only reads from a lock-free SPSC queue
 - **WebSocket** — custom RFC 6455 implementation (~300 lines, no external dependency); SHA-1 and Base64 inline
+- **TLS WebSocket (`wss://`)** — mbedtls (`switch-mbedtls` portlib) for encrypted WebSocket connections; SNI sent; certificate verification disabled (no CA bundle on Switch)
 - **Reconnect** — synthetic `__DISCONNECT` notification lets the UI handle drops gracefully
 
 ---
@@ -131,7 +132,8 @@ dkp-pacman -S switch-dev \
               switch-sdl2_ttf \
               switch-sdl2_mixer \
               switch-sdl2_net \
-              switch-libwebp
+              switch-libwebp \
+              switch-mbedtls
 ```
 
 These install the Switch-cross-compiled SDL2 libraries and their dependencies (libpng, libvorbis, libopus, freetype, libwebp, etc.) into `$DEVKITPRO/portlibs/switch/`.
@@ -362,7 +364,9 @@ On the Connect screen, fill in three fields using the system keyboard (press **A
 
 Press **ZR** (right trigger) or navigate to **\[ Connect \]** and press **A** to connect.
 
-**WebSocket servers:** Prefix the host with `ws://` to connect in WebSocket mode instead of plain TCP. Example: `ws://game.example.com` on port `27018`.
+**WebSocket servers:** Prefix the host with `ws://` to connect in WebSocket mode, or `wss://` for TLS WebSocket (encrypted). Examples:
+- `ws://game.example.com` on port `27018` — plain WebSocket
+- `wss://game.example.com` on port `443` — TLS WebSocket (default port 443)
 
 After connecting, the handshake sequence runs automatically:
 
@@ -637,7 +641,6 @@ Pull requests are welcome. Before contributing:
 
 ### Known limitations / TODO
 
-- `wss://` (TLS WebSocket) is not yet supported — requires porting mbedtls or openssl to Switch portlibs
 - IC input overlay does not yet send the MS packet — wired to the UI but the `cmd::ms()` call needs to be connected to the `OutQueue` via the App
 - Character sprite loading is not yet wired into `CourtroomScreen` — `APNGPlayer` and `TextureCache` exist but the courtroom currently renders placeholder rectangles for sprites
 - No settings persistence — host/port/username reset on each launch; a `sdmc:/switch/ferris-ao/config.ini` save/load pass is planned

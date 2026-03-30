@@ -5,7 +5,7 @@
 # Prerequisites (run once):
 #   dkp-pacman -S switch-dev switch-sdl2 switch-sdl2_image \
 #                  switch-sdl2_ttf switch-sdl2_mixer switch-sdl2_net \
-#                  switch-libwebp
+#                  switch-libwebp switch-mbedtls
 #---------------------------------------------------------------------------------
 .SUFFIXES:
 
@@ -63,7 +63,8 @@ CFLAGS   := -Wall -Wextra -O2 -ffunction-sections \
 CXXFLAGS := $(CFLAGS) \
             -std=c++17 \
             -fno-exceptions \
-            -fno-rtti
+            -fno-rtti \
+            -DAO_TLS
 
 ASFLAGS  := -g $(ARCH)
 LDFLAGS   = -specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
@@ -75,6 +76,7 @@ LDFLAGS   = -specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) -Wl,-Map,$(notdir 
 LIBS := -lSDL2_mixer -lSDL2_ttf -lSDL2_image -lSDL2_net -lSDL2 \
         -lopusfile -lopus -lvorbisidec -logg \
         -lfreetype -lpng -lwebpdemux -lwebp -lz \
+        -lmbedtls -lmbedx509 -lmbedcrypto \
         -lnx -lm
 
 #---------------------------------------------------------------------------------

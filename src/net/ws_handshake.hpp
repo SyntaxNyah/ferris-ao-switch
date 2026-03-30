@@ -2,19 +2,19 @@
 
 namespace ao {
 
-// Perform an RFC 6455 WebSocket upgrade on an already-connected TCP socket.
-// sock_fd:  platform socket descriptor (SDL_net TCPsocket cast to int, or
-//           use the raw fd via SDLNet_TCP_GetPeerAddress hack).
-// host:     the Host header value (e.g. "game.example.com")
-// path:     the request path (e.g. "/" or "/ws")
+// Abstract send/recv callbacks so ws_upgrade works over both plain TCP
+// (SDL_net) and TLS (mbedtls) without linking either directly.
 //
-// Returns true if the server replied with 101 Switching Protocols and a
-// valid Sec-WebSocket-Accept header.
-//
-// This is a blocking call — call from the network thread only.
+// send_fn: write len bytes; returns bytes sent (>0) or error (<=0).
+// recv_fn: read up to cap bytes; returns bytes read (>0) or error (<=0).
+// ctx:     opaque pointer forwarded to both callbacks (e.g. TCPsocket* or TlsConn*).
+typedef int (*WsSendFn)(void* ctx, const void* data, int len);
+typedef int (*WsRecvFn)(void* ctx, void*       buf,  int cap);
 
-struct TCPsocket_tag;
-
-bool ws_upgrade(void* sdl_tcp_socket, const char* host, const char* path = "/");
+// Perform an RFC 6455 WebSocket upgrade over an already-connected transport.
+// Returns true if the server replies 101 Switching Protocols with a valid
+// Sec-WebSocket-Accept header.  Blocking — call from the network thread only.
+bool ws_upgrade(WsSendFn send_fn, WsRecvFn recv_fn, void* ctx,
+                const char* host, const char* path = "/");
 
 } // namespace ao

@@ -310,7 +310,7 @@ Runs on a dedicated SDL thread (`SDL_CreateThread`). Owns raw socket(s). Communi
 
 **Public API:**
 ```cpp
-bool connect(const char* host, int port, ConnMode mode); // TCP or WS
+bool connect(const char* host, int port, ConnMode mode); // TCP, WS, or WSS
 void disconnect();
 bool is_connected() const;          // atomic
 void stop();                        // sets stop_flag_, joins thread
@@ -318,23 +318,35 @@ InQueue&  incoming();               // main thread pops from this
 OutQueue& outgoing();               // main thread pushes to this
 ```
 
-**`ConnMode` enum:** `TCP`, `WS` (determined by URL prefix in ConnectScreen)
+**`ConnMode` enum:** `TCP`, `WS`, `WSS` (determined by URL prefix in ConnectScreen)
+
+**Abstract IO helpers** (private, mode-dispatch):
+- `net_poll(timeout_ms)` — `SDLNet_CheckSockets` (TCP/WS) or `mbedtls_net_poll` (WSS)
+- `net_recv(buf, cap)` — `SDLNet_TCP_Recv` or `TlsConn::recv`; returns 0 on would-block, <0 on error
+- `net_send(data, len)` — `SDLNet_TCP_Send` or `TlsConn::send`
+
+All internal loops (`tcp_loop`, `ws_loop`) go through these helpers — they never call SDL_net or mbedtls directly. Static callbacks `cb_sdlnet_send/recv` and `cb_tls_send/recv` are passed to `ws_upgrade` for the WS/WSS upgrade phase.
+
+**`run()` dispatch:**
+- `WSS` → `TlsConn::connect` → `ws_upgrade(cb_tls_send, cb_tls_recv, &tls_conn_)` → `ws_loop()`
+- `WS` → `SDLNet_TCP_Open` → `ws_upgrade(cb_sdlnet_send, cb_sdlnet_recv, socket_)` → `ws_loop()`
+- `TCP` → `SDLNet_TCP_Open` → `tcp_loop()`
 
 **Internal loops:**
 
 `tcp_loop()`:
-1. `SDLNet_CheckSockets(set, 1ms)`
-2. If readable: `SDLNet_TCP_Recv` into rolling buffer
+1. `net_poll(1ms)`
+2. If readable: `net_recv` into rolling buffer
 3. `extract_packets()` — splits buffer on `%`, pushes complete packets to `incoming_`
-4. `outgoing_.pop()` → `SDLNet_TCP_Send`
+4. `outgoing_.pop()` → `net_send`
 
 `ws_loop()`:
-1. Same recv into buffer
+1. Same recv via `net_recv` into buffer
 2. `ws_decode_frame()` on buffer bytes
 3. If `FrameResult::Ping` → `send_pong()`
 4. If `FrameResult::Close` → disconnect
 5. If `FrameResult::Complete` → `extract_packets()` on frame payload → push to `incoming_`
-6. `outgoing_.pop()` → `ws_encode_frame()` → send
+6. `outgoing_.pop()` → `ws_encode_frame()` → `net_send`
 
 **`extract_packets()`:** Scans recv buffer for `%` delimiter. Each `%`-terminated segment is a complete AO2 packet. Pushes each as one `InPacket`. Leftover bytes (partial packet) are moved to front of buffer.
 
@@ -342,9 +354,39 @@ OutQueue& outgoing();               // main thread pushes to this
 
 ---
 
+### `src/net/tls_conn.hpp` / `src/net/tls_conn.cpp`
+
+**Struct:** `ao::TlsConn` (guarded by `#ifdef AO_TLS`)
+
+mbedtls TLS client wrapper used by `NetworkThread` in `WSS` mode.
+
+```cpp
+struct TlsConn {
+    bool connect(const char* host, uint16_t port); // TLS handshake + SNI
+    void close();
+    int  send(const void* data, int len);
+    int  recv(void* buf, int cap);  // 0 = WANT_READ, <0 = error
+    bool poll(int timeout_ms);      // true if data ready
+};
+```
+
+- Uses `MBEDTLS_SSL_VERIFY_NONE` (no CA bundle available on Switch); SNI is still sent
+- Non-blocking socket via `mbedtls_net_set_nonblock`; handshake loops on `WANT_READ`/`WANT_WRITE`
+- When `AO_TLS` is not defined (non-Switch desktop builds without mbedtls), all methods are stubs returning false/error
+- Compiled in only when `-DAO_TLS` is in `CXXFLAGS` (set by Makefile)
+
+---
+
 ### `src/net/ws_handshake.hpp` / `src/net/ws_handshake.cpp`
 
-**Function:** `bool ao::ws_upgrade(TCPsocket sock, const char* host, const char* path)`
+**Function:** `bool ao::ws_upgrade(WsSendFn send_fn, WsRecvFn recv_fn, void* ctx, const char* host, const char* path)`
+
+```cpp
+typedef int (*WsSendFn)(void* ctx, const void* data, int len);
+typedef int (*WsRecvFn)(void* ctx, void* buf, int cap);
+```
+
+Abstract IO callbacks allow the same upgrade logic to work over both SDL_net (WS) and mbedtls TLS (WSS). Callers pass `cb_sdlnet_send/recv` or `cb_tls_send/recv` from `NetworkThread`.
 
 Performs the RFC 6455 HTTP upgrade:
 1. Generates 16 random bytes → Base64 → `Sec-WebSocket-Key`
@@ -925,7 +967,7 @@ First screen the user sees. Three fields: Host, Port, Username.
 - ZR (TriggerR) → attempt connection
 - Renders colored rows with selection highlight (yellow border on active field)
 - Calls `App::connect(host, port, mode)` which starts `NetworkThread` and enters handshake
-- `ConnMode` determined by URL prefix: `ws://` → WS, `wss://` → WS (TLS not implemented), else → TCP
+- `ConnMode` determined by URL prefix: `ws://` → WS, `wss://` → WSS (TLS via mbedtls), else → TCP
 
 **After successful `DONE` from server:** `AOClient::on_ready` callback fires → `app.push_screen(new CharSelectScreen(...))`
 
@@ -1433,4 +1475,4 @@ Switch has 4 GB RAM; homebrew can typically use ~2 GB. Budget is not a concern f
 | libfreetype, libpng, libz | bundled with SDL2_ttf/SDL2_image | Font + image decode |
 | libwebp, libwebpdemux | `switch-libwebp` portlib | Static WebP decode (`libwebp`) + animated WebP frame extraction (`libwebpdemux`); both required for animated WebP |
 
-No external networking libraries. WebSocket is implemented inline (~300 lines total across ws_handshake + ws_frame).
+WebSocket is implemented inline (~300 lines total across ws_handshake + ws_frame). TLS (WSS) uses `switch-mbedtls` portlib (`-lmbedtls -lmbedx509 -lmbedcrypto`), guarded by `-DAO_TLS` compile flag.
