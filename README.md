@@ -39,6 +39,7 @@ ferris-ao-switch implements the full AO2 client protocol so Switch players can j
 - **TCP + WebSocket + WSS** — connects to any AO2 server; auto-detects `ws://` (plain WebSocket) and `wss://` (TLS WebSocket via mbedtls) prefixes
 - **Dual-platform** — same `.nro` runs on Ryujinx emulator and real Switch hardware (Atmosphere CFW)
 - **Any AO2 server** — compatible with Ferris-AO, tsuserver3, Akasha, and any server implementing the standard AO2 protocol
+- **Server browser** — fetches the public server list from the Attorney Online master server (`https://servers.aceattorneyonline.com/servers`); master server URL is configurable in-app
 
 ### Gameplay
 - **Character select** — full grid of server character slots; grayed-out slots for taken characters
@@ -354,15 +355,30 @@ notguilty   = sfx-notguilty
 
 ## Connecting to a Server
 
-On the Connect screen, fill in three fields using the system keyboard (press **A** to edit each field):
+The Connect screen has two tabs — switch between them with **L** / **R**:
+
+### Tab 1: Servers (server browser)
+
+Displays the public server list fetched from the Attorney Online master server in the background. Each row shows:
+
+- Server name
+- Player count
+- Address and port
+- Short description
+
+Press **A** on any row to connect immediately. Press **R** to refresh the list. The master server URL defaults to `https://servers.aceattorneyonline.com/servers` and can be changed in-app by pressing **ZL**.
+
+### Tab 2: Direct Connect
+
+Manually enter connection details for servers not on the public list:
 
 | Field | Description | Default |
 |---|---|---|
-| **Host** | Server IP address or hostname | `127.0.0.1` |
+| **Host** | Server IP address, hostname, or WebSocket URL | `127.0.0.1` |
 | **Port** | TCP port (AO2 default: 27017) or WebSocket port | `27017` |
 | **Username** | Your OOC display name | `Switch` |
 
-Press **ZR** (right trigger) or navigate to **\[ Connect \]** and press **A** to connect.
+Press **A** on a field to open the system keyboard and edit it. Press **ZR** to connect.
 
 **WebSocket servers:** Prefix the host with `ws://` to connect in WebSocket mode, or `wss://` for TLS WebSocket (encrypted). Examples:
 - `ws://game.example.com` on port `27018` — plain WebSocket
@@ -393,9 +409,12 @@ If the server places you in an area automatically (single-area servers), the Are
 
 | Button | Action |
 |---|---|
-| **D-pad Up/Down** | Select field |
-| **A** | Open system keyboard for selected field |
-| **ZR** | Connect |
+| **L / R** | Switch between Servers and Direct Connect tabs |
+| **D-pad Up/Down** | Move selection (server list or field) |
+| **A** | Connect to selected server (Servers tab) / Edit field (Direct Connect tab) |
+| **R** | Refresh server list (Servers tab) |
+| **ZL** | Edit master server URL |
+| **ZR** | Connect (Direct Connect tab) |
 
 ### Character Select
 

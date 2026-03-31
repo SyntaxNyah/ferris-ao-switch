@@ -24,11 +24,16 @@ ROMFS    := romfs
 ARCH     := -march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE
 CXXFLAGS := -std=c++17 -O2 -fno-exceptions -fno-rtti $(ARCH)
 LIBS     := -lSDL2_mixer -lSDL2_ttf -lSDL2_image -lSDL2_net -lSDL2 \
-            -lopusfile -lopus -lvorbisidec -logg -lfreetype -lpng -lz -lnx -lm
+            -lopusfile -lopus -lvorbisidec -logg \
+            -lfreetype -lharfbuzz -lbz2 -lpng -lwebpdemux -lwebp -lz \
+            -lmbedtls -lmbedx509 -lmbedcrypto \
+            -lEGL -lGLESv2 -lglapi -ldrm_nouveau \
+            -ljpeg -lmodplug -lmpg123 \
+            -lnx -lm
 ```
 
 **Required portlibs** (install via `dkp-pacman -S`):
-- `switch-sdl2` `switch-sdl2_image` `switch-sdl2_ttf` `switch-sdl2_mixer` `switch-sdl2_net`
+- `switch-sdl2` `switch-sdl2_image` `switch-sdl2_ttf` `switch-sdl2_mixer` `switch-sdl2_net` `switch-libwebp` `switch-mbedtls`
 
 **Key flags:**
 - `-fno-exceptions -fno-rtti` — standard Switch practice; no `try`/`catch` anywhere in codebase
@@ -658,9 +663,11 @@ static void store_prefetch(const char* relative, uint8_t* data, int size);
 
 ### `src/net/http_fetch.hpp` / `src/net/http_fetch.cpp`
 
-**Function:** `ao::HttpResult http_get(const char* url)`
+**Functions:** `ao::HttpResult http_get(const char* url)` / `ao::HttpResult https_get(const char* url)` (guarded by `#ifdef AO_TLS`)
 
-Synchronous HTTP/1.1 GET over SDL_net TCP. Plain HTTP only — no TLS.
+`http_get` dispatches to `https_get` when the URL starts with `https://`; otherwise uses plain SDL_net TCP. `https_get` uses `TlsConn` for TLS. This allows the server browser to fetch from `https://servers.aceattorneyonline.com/servers` transparently.
+
+Synchronous HTTP/1.1 GET. Plain HTTP over SDL_net TCP; HTTPS via mbedtls (`AO_TLS` defined).
 
 **`HttpResult`:**
 ```cpp
@@ -960,16 +967,46 @@ waiting_for_keyboard_ = false;
 
 ### `src/ui/screens/connect_screen.hpp` / `connect_screen.cpp`
 
-First screen the user sees. Three fields: Host, Port, Username.
+First screen the user sees. Two-tab UI: **Servers** (tab 0) and **Direct Connect** (tab 1).
 
-- D-pad Up/Down → select field
-- A (Confirm) → open system keyboard for selected field
-- ZR (TriggerR) → attempt connection
-- Renders colored rows with selection highlight (yellow border on active field)
+**Server browser (tab 0):**
+- Background SDL thread (`fetch_thread_fn`) calls `http_get(ms_url_)` on entry; `SDL_AtomicSet` tracks fetch state (0=idle, 1=fetching, 2=done, 3=error)
+- Manual JSON parser (`parse_servers`, `json_find_key`, `json_skip_ws`) — no external library; fills `ServerEntry servers_[MAX_SERVERS=128]`
+- Scrollable list showing up to `VISIBLE_ROWS=10` at a time (ROW_H=48px each)
+- Each row: server name, player count, address:port, description
+- A → connect to selected server; R (TabR) → refresh (re-runs fetch); ZL (TriggerL) → edit master server URL
+- Default master URL: `"https://servers.aceattorneyonline.com/servers"`
+
+**Direct Connect (tab 1):**
+- Four fields: Host, Port, Username, \[ Connect \]
+- D-pad Up/Down → select field; A → open system keyboard (or connect on \[ Connect \] row)
+- ZR (TriggerR) → connect immediately
+
+**Tab switching:** L (TabL) / R (TabR) switch tabs.
+
+**Connection flow:**
 - Calls `App::connect(host, port, mode)` which starts `NetworkThread` and enters handshake
 - `ConnMode` determined by URL prefix: `ws://` → WS, `wss://` → WSS (TLS via mbedtls), else → TCP
+- After successful `DONE` from server: `AOClient::on_ready` callback fires → `app.push_screen(new CharSelectScreen(...))`
 
-**After successful `DONE` from server:** `AOClient::on_ready` callback fires → `app.push_screen(new CharSelectScreen(...))`
+**Key members:**
+```cpp
+static constexpr int MAX_SERVERS  = 128;
+static constexpr int VISIBLE_ROWS = 10;
+static constexpr int ROW_H        = 48;
+struct ServerEntry {
+    char name[128], ip[256], description[512];
+    int  port = 27017, ws_port = 0, players = 0;
+};
+ServerEntry  servers_[MAX_SERVERS];
+int          server_count_   = 0;
+int          server_scroll_  = 0;  // top visible index
+int          server_sel_     = 0;  // selected index
+int          tab_            = 0;  // 0=Servers, 1=Direct
+SDL_atomic_t fetch_state_atom_;    // 0=idle, 1=fetching, 2=done, 3=error
+SDL_mutex*   fetch_mutex_;         // guards fetched servers_[] buffer
+char         ms_url_[256];         // master server URL (configurable)
+```
 
 ---
 
