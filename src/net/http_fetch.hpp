@@ -5,7 +5,7 @@
 namespace ao {
 
 // Simple synchronous HTTP/1.1 GET over plain TCP (SDL_net).
-// Plain HTTP only — no TLS. Most AO2 CDNs serve assets over http://.
+// Also supports HTTPS via TlsConn when compiled with AO_TLS.
 //
 // Supports:
 //   - Content-Length body framing
@@ -37,5 +37,9 @@ struct HttpResult {
 // Blocking HTTP GET. Returns an HttpResult; call result.free() when done.
 // url must begin with "http://". Returns ok=false on non-200, timeout, or error.
 HttpResult http_get(const char* url);
+
+// Blocking HTTPS GET via TlsConn (mbedtls). Guarded by AO_TLS.
+// url must begin with "https://". Returns ok=false when AO_TLS not defined.
+HttpResult https_get(const char* url);
 
 } // namespace ao

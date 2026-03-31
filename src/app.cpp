@@ -2,11 +2,13 @@
 #include "render/renderer.hpp"
 #include "state/game_state.hpp"
 #include "ui/screen.hpp"
+#include "ui/screens/char_select_screen.hpp"
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_ttf.h>
 #include <SDL2/SDL_image.h>
 #include <SDL2/SDL_mixer.h>
 #include <cstdio>
+#include <cstring>
 
 #ifdef __SWITCH__
 #include <switch.h>
@@ -25,6 +27,10 @@ App::~App() {
         delete screen_stack_[screen_count_];
         screen_stack_[screen_count_] = nullptr;
     }
+
+    // disconnect() sets both to nullptr after deleting
+    disconnect();
+
     delete game_state_;
     delete renderer_;
 
@@ -161,6 +167,32 @@ void App::process_events() {
 }
 
 void App::update(uint32_t dt_ms) {
+    // Process incoming network packets on the main thread
+    if (ao_client_) {
+        ao_client_->process(in_queue_);
+    }
+
+    // Detect transition to in_lobby (DONE packet received) → push CharSelectScreen
+    if (game_state_ && game_state_->in_lobby && !was_in_lobby_) {
+        was_in_lobby_ = true;
+        push_screen(new CharSelectScreen(*this));
+    }
+
+    // Detect unexpected disconnection: network thread stopped while we were
+    // connected (net_thread_ exists, not connected, but was_in_lobby_ is true)
+    // and the AOClient went back to Idle.  Pop back to the connect screen.
+    if (net_thread_ && !net_thread_->is_connected() && was_in_lobby_) {
+        if (ao_client_ &&
+            ao_client_->handshake_state() == HandshakeState::Idle) {
+            was_in_lobby_ = false;
+            game_state_->in_lobby  = false;
+            game_state_->connected = false;
+            // Pop screens until only ConnectScreen remains (screen_count_ == 1)
+            while (screen_count_ > 1)
+                pop_screen();
+        }
+    }
+
     if (screen_count_ > 0)
         screen_stack_[screen_count_ - 1]->update(dt_ms);
 }
@@ -173,6 +205,54 @@ void App::render() {
         screen_stack_[i]->render();
 
     renderer_->present();
+}
+
+// ── Networking ─────────────────────────────────────────────────────────────────
+
+bool App::connect(const char* host, uint16_t port, ConnMode mode) {
+    // Tear down any existing connection
+    disconnect();
+
+    // Reset game state for a fresh connection
+    *game_state_  = GameState();
+    was_in_lobby_ = false;
+
+    // Create fresh network objects
+    net_thread_ = new NetworkThread(in_queue_, out_queue_);
+    ao_client_  = new AOClient(out_queue_, *game_state_, username_);
+
+    if (!net_thread_->connect(host, port, mode)) {
+        std::fprintf(stderr, "App::connect: NetworkThread::connect failed\n");
+        delete net_thread_; net_thread_ = nullptr;
+        delete ao_client_;  ao_client_  = nullptr;
+        return false;
+    }
+
+    ao_client_->on_connected();
+    return true;
+}
+
+void App::disconnect() {
+    if (net_thread_) {
+        net_thread_->disconnect();
+        delete net_thread_;
+        net_thread_ = nullptr;
+    }
+    if (ao_client_) {
+        ao_client_->on_disconnected();
+        delete ao_client_;
+        ao_client_ = nullptr;
+    }
+    was_in_lobby_ = false;
+    if (game_state_) {
+        game_state_->connected = false;
+        game_state_->in_lobby  = false;
+    }
+}
+
+void App::set_username(const char* u) {
+    std::strncpy(username_, u, sizeof(username_) - 1);
+    username_[sizeof(username_) - 1] = '\0';
 }
 
 } // namespace ao
