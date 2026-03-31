@@ -30,6 +30,7 @@ bool APNGPlayer::load(SDL_Renderer* r, const char* path) {
         return false;
     }
 
+#if SDL_IMAGE_VERSION_ATLEAST(2, 6, 0)
     // Try animated (APNG / GIF) first — freesrc=1 closes rw when done
     IMG_Animation* anim = IMG_LoadAnimation_RW(rw, 1);
     if (anim && anim->count > 0) {
@@ -52,6 +53,7 @@ bool APNGPlayer::load(SDL_Renderer* r, const char* path) {
 
     // Fall back to static image — need a fresh RWops
     rw = AssetManager::open_rwops(path);
+#endif // SDL_IMAGE_VERSION_ATLEAST(2, 6, 0)
     if (!rw) return false;
 
     SDL_Surface* surf = IMG_Load_RW(rw, 1); // freesrc=1

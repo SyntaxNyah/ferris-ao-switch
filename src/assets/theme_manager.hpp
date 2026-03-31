@@ -86,6 +86,9 @@ public:
     bool resolve_image(const char* image_name, char* out_path, int out_cap) const;
 
 private:
+    friend void design_cb(const char*, const char*, const char*, void*);
+    friend void sounds_cb(const char*, const char*, const char*, void*);
+
     void parse_design(const uint8_t* data, int size);
     void parse_sounds(const uint8_t* data, int size);
     void scale_layout(float sx, float sy);

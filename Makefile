@@ -60,6 +60,8 @@ CFLAGS   := -Wall -Wextra -O2 -ffunction-sections \
             $(ARCH) \
             $(DEFINES)
 
+CFLAGS   += $(INCLUDE) -D__SWITCH__
+
 CXXFLAGS := $(CFLAGS) \
             -std=c++17 \
             -fno-exceptions \
@@ -75,8 +77,10 @@ LDFLAGS   = -specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) -Wl,-Map,$(notdir 
 #---------------------------------------------------------------------------------
 LIBS := -lSDL2_mixer -lSDL2_ttf -lSDL2_image -lSDL2_net -lSDL2 \
         -lopusfile -lopus -lvorbisidec -logg \
-        -lfreetype -lpng -lwebpdemux -lwebp -lz \
+        -lfreetype -lharfbuzz -lbz2 -lpng -lwebpdemux -lwebp -lz \
         -lmbedtls -lmbedx509 -lmbedcrypto \
+        -lEGL -lGLESv2 -lglapi -ldrm_nouveau \
+        -ljpeg -lmodplug -lmpg123 \
         -lnx -lm
 
 #---------------------------------------------------------------------------------
@@ -115,6 +119,9 @@ export INCLUDE := $(foreach dir,$(INCLUDES),-I$(CURDIR)/$(dir)) \
 export LIBPATHS := $(foreach dir,$(LIBDIRS),-L$(dir)/lib)
 
 export BUILD_EXEFS_SRC := $(TOPDIR)/exefs_src
+
+export NROFLAGS += --icon=$(CURDIR)/$(APP_ICON)
+export NROFLAGS += --nacp=$(CURDIR)/$(TARGET).nacp
 
 ifneq ($(ROMFS),)
     export NROFLAGS += --romfsdir=$(CURDIR)/$(ROMFS)

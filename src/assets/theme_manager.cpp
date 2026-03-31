@@ -125,7 +125,7 @@ static void parse_ini_bytes(const uint8_t* data, int size,
 
 struct DesignCtx { ThemeManager* m; };
 
-static void design_cb(const char* sec, const char* key, const char* val, void* ud) {
+void design_cb(const char* sec, const char* key, const char* val, void* ud) {
     ThemeManager* m = ((DesignCtx*)ud)->m;
     ThemeManager::Raw& r = m->raw_;
     int v = std::atoi(val);
@@ -199,7 +199,7 @@ static void design_cb(const char* sec, const char* key, const char* val, void* u
 
 // ── Sounds INI handler ────────────────────────────────────────────────────────
 
-static void sounds_cb(const char* sec, const char* key, const char* val, void* ud) {
+void sounds_cb(const char* sec, const char* key, const char* val, void* ud) {
     if (std::strcmp(sec, "Sounds") != 0 && std::strcmp(sec, "sounds") != 0) return;
     ThemeLayout& l = ((ThemeManager*)ud)->layout_;
     auto set = [&](char* dst, int cap) {
