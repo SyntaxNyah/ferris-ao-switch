@@ -301,7 +301,7 @@ using InQueue  = SPSCQueue<InPacket,  256>;  // NetworkThread → main thread
 using OutQueue = SPSCQueue<OutPacket, 64>;   // main thread → NetworkThread
 ```
 
-**`InPacket`** / **`OutPacket`**: fixed `char buf[2048]` — no heap.
+**`InPacket`** / **`OutPacket`**: fixed char arrays — no heap. `OutPacket.data[2048]` (OutQueue ≈ 128 KB total), `InPacket.data[4096]` (InQueue ≈ 1 MB total).
 
 **Rule:** Never access these queues except from their designated producer/consumer thread. No exceptions.
 
