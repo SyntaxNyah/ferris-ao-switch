@@ -146,8 +146,16 @@ int NetworkThread::cb_sdlnet_send(void* ctx, const void* data, int len) {
     return SDLNet_TCP_Send(reinterpret_cast<TCPsocket>(ctx), data, len);
 }
 int NetworkThread::cb_sdlnet_recv(void* ctx, void* buf, int cap) {
-    return SDLNet_TCP_Recv(reinterpret_cast<TCPsocket>(ctx),
-                           reinterpret_cast<char*>(buf), cap);
+    TCPsocket sock = reinterpret_cast<TCPsocket>(ctx);
+    // Poll before recv so we never block on platforms (e.g. Ryujinx) where
+    // blocking SDLNet_TCP_Recv hangs indefinitely.
+    SDLNet_SocketSet tmp = SDLNet_AllocSocketSet(1);
+    if (!tmp) return -1;
+    SDLNet_TCP_AddSocket(tmp, sock);
+    int ready = SDLNet_CheckSockets(tmp, 1); // 1 ms timeout
+    SDLNet_FreeSocketSet(tmp);
+    if (ready <= 0 || !SDLNet_SocketReady(sock)) return 0; // no data yet
+    return SDLNet_TCP_Recv(sock, reinterpret_cast<char*>(buf), cap);
 }
 int NetworkThread::cb_tls_send(void* ctx, const void* data, int len) {
     return reinterpret_cast<TlsConn*>(ctx)->send(data, len);

@@ -110,14 +110,21 @@ bool ws_upgrade(WsSendFn send_fn, WsRecvFn recv_fn, void* ctx,
         return false;
     }
 
-    // Read HTTP response byte-by-byte until \r\n\r\n
+    // Read HTTP response byte-by-byte until \r\n\r\n.
+    // Retry on n==0 (no data yet) to handle non-blocking recv (e.g. TLS WANT_READ,
+    // or Ryujinx where blocking recv returns 0 instead of blocking).
     char resp[1024] = {};
     int  resp_len   = 0;
     while (resp_len < (int)sizeof(resp) - 1) {
         char ch;
-        int n = recv_fn(ctx, &ch, 1);
+        int n;
+        int wait_ms = 0;
+        do {
+            n = recv_fn(ctx, &ch, 1);
+            if (n == 0) SDL_Delay(1);
+        } while (n == 0 && ++wait_ms < 8000);
         if (n <= 0) {
-            std::fprintf(stderr, "ws_upgrade: recv failed\n");
+            std::fprintf(stderr, "ws_upgrade: recv failed or timed out\n");
             return false;
         }
         resp[resp_len++] = ch;
