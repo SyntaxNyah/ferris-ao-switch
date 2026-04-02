@@ -1,6 +1,7 @@
 #include "tls_conn.hpp"
 #include <cstdio>
 #include <cstring>
+#include <SDL2/SDL.h>
 
 #ifdef AO_TLS
 // ── Full mbedtls implementation ───────────────────────────────────────────────
@@ -55,9 +56,18 @@ bool TlsConn::connect(const char* host, uint16_t port) {
     mbedtls_ssl_set_bio(&ssl, &net,
         mbedtls_net_send, mbedtls_net_recv, nullptr);
 
-    // Handshake (spin on WANT_READ / WANT_WRITE — non-blocking socket)
+    // Handshake (poll then retry on WANT_READ/WANT_WRITE — non-blocking socket)
+    uint32_t hs_deadline = SDL_GetTicks() + 10000; // 10-second timeout
     do {
         ret = mbedtls_ssl_handshake(&ssl);
+        if (ret == MBEDTLS_ERR_SSL_WANT_READ)
+            mbedtls_net_poll(&net, MBEDTLS_NET_POLL_READ,  10);
+        else if (ret == MBEDTLS_ERR_SSL_WANT_WRITE)
+            mbedtls_net_poll(&net, MBEDTLS_NET_POLL_WRITE, 10);
+        if ((int32_t)(hs_deadline - SDL_GetTicks()) <= 0) {
+            std::fprintf(stderr, "TLS [handshake]: timed out\n");
+            return false;
+        }
     } while (ret == MBEDTLS_ERR_SSL_WANT_READ ||
              ret == MBEDTLS_ERR_SSL_WANT_WRITE);
 
