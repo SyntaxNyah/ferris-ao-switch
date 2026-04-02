@@ -38,17 +38,15 @@ void NetworkThread::disconnect() {
         SDL_WaitThread(thread_, nullptr);
         thread_ = nullptr;
     }
-    if (socket_set_) {
-        SDLNet_FreeSocketSet(socket_set_);
-        socket_set_ = nullptr;
-    }
-    if (socket_) {
-        SDLNet_TCP_Close(socket_);
-        socket_ = nullptr;
-    }
-    if (mode_ == ConnMode::WSS) {
+    if (mode_ == ConnMode::WSS)
         tls_conn_.close();
-    }
+#ifdef AO_TLS
+    else
+        raw_conn_.close();
+#else
+    if (socket_set_) { SDLNet_FreeSocketSet(socket_set_); socket_set_ = nullptr; }
+    if (socket_)     { SDLNet_TCP_Close(socket_);         socket_     = nullptr; }
+#endif
     connected_.store(false, std::memory_order_release);
     SDLNet_Quit();
 }
@@ -77,7 +75,28 @@ void NetworkThread::run() {
         tls_conn_.close();
 
     } else {
-        // ── TCP / WS: plain SDL_net connect ───────────────────────────────────
+#ifdef AO_TLS
+        // ── TCP / WS: non-blocking POSIX connect via mbedtls_net ─────────────
+        // SDLNet_TCP_Open issues a blocking connect() which Ryujinx rejects.
+        // mbedtls_net_connect uses POSIX sockets and works correctly.
+        if (!raw_conn_.connect(host_, port_)) {
+            std::snprintf(error_msg_, sizeof(error_msg_),
+                "TCP connect failed: %s:%u", host_, port_);
+            goto push_disconnect;
+        }
+        if (mode_ == ConnMode::WS) {
+            if (!ws_upgrade(cb_raw_send, cb_raw_recv, &raw_conn_, host_)) {
+                std::snprintf(error_msg_, sizeof(error_msg_),
+                    "WebSocket upgrade failed");
+                raw_conn_.close();
+                goto push_disconnect;
+            }
+        }
+        connected_.store(true, std::memory_order_release);
+        if (mode_ == ConnMode::WS) ws_loop(); else tcp_loop();
+        raw_conn_.close();
+#else
+        // ── TCP / WS: SDL_net fallback (desktop builds without mbedtls) ──────
         IPaddress ip;
         if (SDLNet_ResolveHost(&ip, host_, port_) != 0) {
             std::snprintf(error_msg_, sizeof(error_msg_),
@@ -92,21 +111,16 @@ void NetworkThread::run() {
         }
         socket_set_ = SDLNet_AllocSocketSet(1);
         SDLNet_TCP_AddSocket(socket_set_, socket_);
-
         if (mode_ == ConnMode::WS) {
             if (!ws_upgrade(cb_sdlnet_send, cb_sdlnet_recv, socket_, host_)) {
                 std::snprintf(error_msg_, sizeof(error_msg_),
                     "WebSocket upgrade failed");
-                SDLNet_TCP_Close(socket_);
-                socket_ = nullptr;
                 goto push_disconnect;
             }
-            connected_.store(true, std::memory_order_release);
-            ws_loop();
-        } else {
-            connected_.store(true, std::memory_order_release);
-            tcp_loop();
         }
+        connected_.store(true, std::memory_order_release);
+        if (mode_ == ConnMode::WS) ws_loop(); else tcp_loop();
+#endif
     }
 
     connected_.store(false, std::memory_order_release);
@@ -122,40 +136,49 @@ push_disconnect:
 // ── Abstract IO helpers ────────────────────────────────────────────────────────
 
 bool NetworkThread::net_poll(int timeout_ms) {
-    if (mode_ == ConnMode::WSS)
-        return tls_conn_.poll(timeout_ms);
+    if (mode_ == ConnMode::WSS) return tls_conn_.poll(timeout_ms);
+#ifdef AO_TLS
+    return raw_conn_.poll(timeout_ms);
+#else
     return SDLNet_CheckSockets(socket_set_, (Uint32)timeout_ms) > 0
         && SDLNet_SocketReady(socket_);
+#endif
 }
 
 int NetworkThread::net_recv(void* buf, int cap) {
-    if (mode_ == ConnMode::WSS)
-        return tls_conn_.recv(buf, cap);
+    if (mode_ == ConnMode::WSS) return tls_conn_.recv(buf, cap);
+#ifdef AO_TLS
+    return raw_conn_.recv(buf, cap);
+#else
     return SDLNet_TCP_Recv(socket_, reinterpret_cast<char*>(buf), cap);
+#endif
 }
 
 int NetworkThread::net_send(const void* data, int len) {
-    if (mode_ == ConnMode::WSS)
-        return tls_conn_.send(data, len);
+    if (mode_ == ConnMode::WSS) return tls_conn_.send(data, len);
+#ifdef AO_TLS
+    return raw_conn_.send(data, len);
+#else
     return SDLNet_TCP_Send(socket_, data, len);
+#endif
 }
 
 // ── ws_upgrade callbacks ───────────────────────────────────────────────────────
 
-int NetworkThread::cb_sdlnet_send(void* ctx, const void* data, int len) {
-    return SDLNet_TCP_Send(reinterpret_cast<TCPsocket>(ctx), data, len);
+int NetworkThread::cb_raw_send(void* ctx, const void* data, int len) {
+    return reinterpret_cast<RawConn*>(ctx)->send(data, len);
 }
-int NetworkThread::cb_sdlnet_recv(void* ctx, void* buf, int cap) {
-    TCPsocket sock = reinterpret_cast<TCPsocket>(ctx);
-    // Poll before recv so we never block on platforms (e.g. Ryujinx) where
-    // blocking SDLNet_TCP_Recv hangs indefinitely.
-    SDLNet_SocketSet tmp = SDLNet_AllocSocketSet(1);
-    if (!tmp) return -1;
-    SDLNet_TCP_AddSocket(tmp, sock);
-    int ready = SDLNet_CheckSockets(tmp, 1); // 1 ms timeout
-    SDLNet_FreeSocketSet(tmp);
-    if (ready <= 0 || !SDLNet_SocketReady(sock)) return 0; // no data yet
-    return SDLNet_TCP_Recv(sock, reinterpret_cast<char*>(buf), cap);
+int NetworkThread::cb_raw_recv(void* ctx, void* buf, int cap) {
+    // ws_upgrade calls recv byte-by-byte; RawConn::recv returns 0 on WANT_READ.
+    // Poll up to 10 s so ws_upgrade's retry loop gets data as soon as it arrives.
+    RawConn* conn = reinterpret_cast<RawConn*>(ctx);
+    uint32_t deadline = SDL_GetTicks() + 10000;
+    while (true) {
+        int n = conn->recv(buf, cap);
+        if (n != 0) return n;
+        if ((int32_t)(deadline - SDL_GetTicks()) <= 0) return -1;
+        conn->poll(10);
+    }
 }
 int NetworkThread::cb_tls_send(void* ctx, const void* data, int len) {
     return reinterpret_cast<TlsConn*>(ctx)->send(data, len);
@@ -163,6 +186,15 @@ int NetworkThread::cb_tls_send(void* ctx, const void* data, int len) {
 int NetworkThread::cb_tls_recv(void* ctx, void* buf, int cap) {
     return reinterpret_cast<TlsConn*>(ctx)->recv(buf, cap);
 }
+#ifndef AO_TLS
+int NetworkThread::cb_sdlnet_send(void* ctx, const void* data, int len) {
+    return SDLNet_TCP_Send(reinterpret_cast<TCPsocket>(ctx), data, len);
+}
+int NetworkThread::cb_sdlnet_recv(void* ctx, void* buf, int cap) {
+    return SDLNet_TCP_Recv(reinterpret_cast<TCPsocket>(ctx),
+                           reinterpret_cast<char*>(buf), cap);
+}
+#endif
 
 // ── TCP loop ──────────────────────────────────────────────────────────────────
 void NetworkThread::tcp_loop() {

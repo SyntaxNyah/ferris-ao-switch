@@ -57,18 +57,26 @@ private:
     void send_pong(const char* payload, int len);
 
     // ── Static callbacks passed to ws_upgrade ─────────────────────────────────
+    static int cb_raw_send (void* ctx, const void* data, int len);
+    static int cb_raw_recv (void* ctx, void*       buf,  int cap);
+    static int cb_tls_send (void* ctx, const void* data, int len);
+    static int cb_tls_recv (void* ctx, void*       buf,  int cap);
+#ifndef AO_TLS
+    // SDL_net fallback for desktop builds compiled without mbedtls.
     static int cb_sdlnet_send(void* ctx, const void* data, int len);
     static int cb_sdlnet_recv(void* ctx, void*       buf,  int cap);
-    static int cb_tls_send   (void* ctx, const void* data, int len);
-    static int cb_tls_recv   (void* ctx, void*       buf,  int cap);
+#endif
 
     InQueue&  in_queue_;
     OutQueue& out_queue_;
 
-    SDL_Thread*       thread_     = nullptr;
-    TCPsocket         socket_     = nullptr;   // used by TCP and WS modes
-    SDLNet_SocketSet  socket_set_ = nullptr;   // used by TCP and WS modes
-    TlsConn           tls_conn_;              // used by WSS mode
+    SDL_Thread* thread_ = nullptr;
+    RawConn     raw_conn_;                    // TCP and WS modes (AO_TLS builds)
+    TlsConn     tls_conn_;                    // WSS mode
+#ifndef AO_TLS
+    TCPsocket        socket_     = nullptr;   // TCP/WS fallback without mbedtls
+    SDLNet_SocketSet socket_set_ = nullptr;
+#endif
 
     std::atomic<bool> stop_flag_  {false};
     std::atomic<bool> connected_  {false};

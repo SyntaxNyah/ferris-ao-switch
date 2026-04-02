@@ -15,6 +15,46 @@ static void tls_log_err(const char* tag, int ret) {
     std::fprintf(stderr, "TLS [%s]: %s (−0x%04X)\n", tag, msg, (unsigned)(-ret));
 }
 
+// ── RawConn — plain non-blocking TCP via mbedtls_net ─────────────────────────
+
+bool RawConn::connect(const char* host, uint16_t port) {
+    mbedtls_net_init(&net);
+    char port_str[8];
+    std::snprintf(port_str, sizeof(port_str), "%u", (unsigned)port);
+    int ret = mbedtls_net_connect(&net, host, port_str, MBEDTLS_NET_PROTO_TCP);
+    if (ret != 0) { tls_log_err("raw_connect", ret); return false; }
+    mbedtls_net_set_nonblock(&net);
+    return true;
+}
+
+void RawConn::close() {
+    mbedtls_net_free(&net);
+}
+
+int RawConn::send(const void* data, int len) {
+    int ret;
+    do {
+        ret = (int)mbedtls_net_send(&net,
+            reinterpret_cast<const unsigned char*>(data), (size_t)len);
+        if (ret == MBEDTLS_ERR_SSL_WANT_WRITE)
+            mbedtls_net_poll(&net, MBEDTLS_NET_POLL_WRITE, 1);
+    } while (ret == MBEDTLS_ERR_SSL_WANT_WRITE);
+    return ret;
+}
+
+int RawConn::recv(void* buf, int cap) {
+    int ret = (int)mbedtls_net_recv(&net,
+        reinterpret_cast<unsigned char*>(buf), (size_t)cap);
+    if (ret == MBEDTLS_ERR_SSL_WANT_READ) return 0;
+    return ret;
+}
+
+bool RawConn::poll(int timeout_ms) {
+    return mbedtls_net_poll(&net, MBEDTLS_NET_POLL_READ, (uint32_t)timeout_ms) > 0;
+}
+
+// ── TlsConn ───────────────────────────────────────────────────────────────────
+
 bool TlsConn::connect(const char* host, uint16_t port) {
     mbedtls_net_init(&net);
     mbedtls_ssl_init(&ssl);
@@ -108,9 +148,18 @@ bool TlsConn::poll(int timeout_ms) {
 
 } // namespace ao
 
-#else // ── Stub when AO_TLS is not defined ──────────────────────────────────────
+#else // ── Stubs when AO_TLS is not defined ─────────────────────────────────────
 
 namespace ao {
+
+bool RawConn::connect(const char*, uint16_t) {
+    std::fprintf(stderr, "RawConn: built without AO_TLS\n");
+    return false;
+}
+void RawConn::close() {}
+int  RawConn::send(const void*, int)  { return -1; }
+int  RawConn::recv(void*, int)        { return 0;  }
+bool RawConn::poll(int)               { return false; }
 
 bool TlsConn::connect(const char* host, uint16_t port) {
     (void)host; (void)port;

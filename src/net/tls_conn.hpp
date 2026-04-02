@@ -14,6 +14,24 @@
 
 namespace ao {
 
+// Plain TCP connection using mbedtls_net (no TLS).
+//
+// Replaces SDLNet_TCP_Open for TCP and WS modes. SDL_net issues a blocking
+// connect() syscall which Ryujinx rejects with "Blocking socket operations
+// are not yet working properly". mbedtls_net_connect uses POSIX sockets
+// which Ryujinx handles correctly. After connect, mbedtls_net_set_nonblock
+// gives us the same non-blocking I/O model as TlsConn.
+struct RawConn {
+#ifdef AO_TLS
+    mbedtls_net_context net {};
+#endif
+    bool connect(const char* host, uint16_t port);
+    void close();
+    int  send(const void* data, int len);
+    int  recv(void* buf, int cap); // 0 = WANT_READ, <0 = error
+    bool poll(int timeout_ms);
+};
+
 // Thin mbedtls TLS client connection wrapper.
 //
 // Usage:
