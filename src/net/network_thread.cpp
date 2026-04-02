@@ -237,7 +237,7 @@ void NetworkThread::ws_loop() {
                 int remaining = frame_len - consumed_total;
                 if (remaining <= 0) break;
 
-                char payload[4096];
+                char payload[65536];
                 int  payload_len = 0;
                 FrameResult res = ws_decode_frame(
                     frame_buf + consumed_total, remaining,

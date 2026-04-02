@@ -55,13 +55,14 @@ struct OutPacket {
     int  len;
 };
 
-// Incoming: raw AO2 packet strings received from the server
+// Incoming: raw AO2 packet strings received from the server.
+// 65536 bytes to handle large SM packets (500+ music tracks ≈ 30–100 KB).
 struct InPacket {
-    char data[4096];
+    char data[65536];
     int  len;
 };
 
 using OutQueue = SPSCQueue<OutPacket, 64>;
-using InQueue  = SPSCQueue<InPacket,  256>;
+using InQueue  = SPSCQueue<InPacket,  32>; // 32 × 64 KB ≈ 2 MB
 
 } // namespace ao
