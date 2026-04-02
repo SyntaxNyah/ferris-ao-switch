@@ -43,6 +43,7 @@ App::~App() {
     SDL_Quit();
 
 #ifdef __SWITCH__
+    socketExit();
     romfsExit();
 #endif
 }
@@ -52,6 +53,11 @@ bool App::init() {
     // Mount the RomFS bundle
     if (R_FAILED(romfsInit())) {
         std::fprintf(stderr, "romfsInit failed\n");
+        return false;
+    }
+    // Initialize BSD socket layer (required before any network use, incl. mbedtls)
+    if (R_FAILED(socketInitializeDefault())) {
+        std::fprintf(stderr, "socketInitializeDefault failed\n");
         return false;
     }
 #endif
@@ -148,6 +154,7 @@ void App::pop_screen() {
 }
 
 void App::process_events() {
+    input_manager_.begin_frame();
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
         if (e.type == SDL_QUIT) {
@@ -161,6 +168,7 @@ void App::process_events() {
             return;
         }
 #endif
+        input_manager_.handle_event(e);
         if (screen_count_ > 0)
             screen_stack_[screen_count_ - 1]->handle_event(e);
     }

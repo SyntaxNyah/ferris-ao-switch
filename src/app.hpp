@@ -4,6 +4,7 @@
 #include <cstdint>
 #include "assets/theme_manager.hpp"
 #include "render/text_renderer.hpp"
+#include "input/input_manager.hpp"
 #include "net/network_thread.hpp"
 #include "net/packet_queue.hpp"
 #include "protocol/ao_client.hpp"
@@ -62,6 +63,7 @@ private:
     GameState*    game_state_    = nullptr;
     ThemeManager  theme_manager_;
     TextRenderer  text_renderer_;
+    InputManager  input_manager_;
 
     // Networking
     InQueue        in_queue_;
