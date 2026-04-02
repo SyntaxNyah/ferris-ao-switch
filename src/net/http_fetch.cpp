@@ -162,15 +162,15 @@ HttpResult http_get(const char* url) {
 
     IPaddress ip;
     if (SDLNet_ResolveHost(&ip, pu.host, (Uint16)pu.port) != 0) {
-        std::fprintf(stderr, "http_get: DNS failed for '%s': %s\n",
-            pu.host, SDLNet_GetError());
+        std::snprintf(res.error, sizeof(res.error), "DNS failed: %s", SDLNet_GetError());
+        std::fprintf(stderr, "http_get: %s\n", res.error);
         return res;
     }
 
     TCPsocket sock = SDLNet_TCP_Open(&ip);
     if (!sock) {
-        std::fprintf(stderr, "http_get: connect %s:%d failed: %s\n",
-            pu.host, pu.port, SDLNet_GetError());
+        std::snprintf(res.error, sizeof(res.error), "TCP connect failed: %s", SDLNet_GetError());
+        std::fprintf(stderr, "http_get: %s\n", res.error);
         return res;
     }
 
@@ -189,7 +189,7 @@ HttpResult http_get(const char* url) {
         pu.path, pu.host);
 
     if (SDLNet_TCP_Send(sock, req, req_len) != req_len) {
-        std::fprintf(stderr, "http_get: send failed for '%s'\n", url);
+        std::snprintf(res.error, sizeof(res.error), "Send failed");
         SDLNet_FreeSocketSet(set);
         SDLNet_TCP_Close(sock);
         return res;
@@ -198,7 +198,7 @@ HttpResult http_get(const char* url) {
     // Read status line: "HTTP/1.x NNN reason"
     char line[512];
     if (recv_line(sock, set, line, sizeof(line), HTTP_TIMEOUT_MS) < 0) {
-        std::fprintf(stderr, "http_get: timeout reading status for '%s'\n", url);
+        std::snprintf(res.error, sizeof(res.error), "Timeout reading response");
         SDLNet_FreeSocketSet(set);
         SDLNet_TCP_Close(sock);
         return res;
@@ -206,7 +206,7 @@ HttpResult http_get(const char* url) {
 
     int status_code = 0;
     if (std::sscanf(line, "HTTP/%*s %d", &status_code) != 1 || status_code != 200) {
-        std::fprintf(stderr, "http_get: HTTP %d for '%s'\n", status_code, url);
+        std::snprintf(res.error, sizeof(res.error), "HTTP %d", status_code);
         SDLNet_FreeSocketSet(set);
         SDLNet_TCP_Close(sock);
         return res;
@@ -374,7 +374,8 @@ HttpResult https_get(const char* url) {
 
     TlsConn tls;
     if (!tls.connect(pu.host, (uint16_t)pu.port)) {
-        std::fprintf(stderr, "https_get: TLS connect to %s:%d failed\n", pu.host, pu.port);
+        std::snprintf(res.error, sizeof(res.error), "TLS connect to %s failed", pu.host);
+        std::fprintf(stderr, "https_get: %s\n", res.error);
         return res;
     }
 
@@ -391,7 +392,7 @@ HttpResult https_get(const char* url) {
 
     int sent = tls.send(req, req_len);
     if (sent != req_len) {
-        std::fprintf(stderr, "https_get: send failed for '%s'\n", url);
+        std::snprintf(res.error, sizeof(res.error), "TLS send failed");
         tls.close();
         return res;
     }
@@ -399,14 +400,14 @@ HttpResult https_get(const char* url) {
     // Read status line
     char line[512];
     if (tls_recv_line(tls, line, sizeof(line), HTTP_TIMEOUT_MS) < 0) {
-        std::fprintf(stderr, "https_get: timeout reading status for '%s'\n", url);
+        std::snprintf(res.error, sizeof(res.error), "TLS timeout reading response");
         tls.close();
         return res;
     }
 
     int status_code = 0;
     if (std::sscanf(line, "HTTP/%*s %d", &status_code) != 1 || status_code != 200) {
-        std::fprintf(stderr, "https_get: HTTP %d for '%s'\n", status_code, url);
+        std::snprintf(res.error, sizeof(res.error), "HTTP %d", status_code);
         tls.close();
         return res;
     }

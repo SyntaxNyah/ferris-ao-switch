@@ -148,7 +148,7 @@ int SDLCALL ConnectScreen::fetch_thread_fn(void* ud) {
 
     if (!r.ok) {
         std::snprintf(self->fetch_error_, sizeof(self->fetch_error_),
-            "Server list fetch failed");
+            "%s", r.error[0] ? r.error : "fetch failed");
         SDL_AtomicSet(&self->fetch_state_atom_, (int)FetchState::Error);
         r.free();
         return 1;

@@ -31,6 +31,9 @@ public:
     InputManager();
     ~InputManager();
 
+    // Call once after SDL_Init to open any already-connected controllers.
+    void open_controllers();
+
     // Call at the start of each frame, before processing SDL events.
     void begin_frame();
 

@@ -3,8 +3,10 @@
 
 namespace ao {
 
-InputManager::InputManager() {
-    // Open the first available controller
+InputManager::InputManager() {}
+
+void InputManager::open_controllers() {
+    if (controller_) return;
     for (int i = 0; i < SDL_NumJoysticks(); ++i) {
         if (SDL_IsGameController(i)) {
             controller_ = SDL_GameControllerOpen(i);

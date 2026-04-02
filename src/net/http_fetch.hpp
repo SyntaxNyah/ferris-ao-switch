@@ -26,6 +26,7 @@ struct HttpResult {
     uint8_t* data = nullptr;  // SDL_malloc'd; caller must call free()
     int      size = 0;
     bool     ok   = false;
+    char     error[128] = {};  // human-readable failure reason when ok==false
 
     void free() {
         if (data) { SDL_free(data); data = nullptr; }

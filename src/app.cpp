@@ -66,6 +66,7 @@ bool App::init() {
         std::fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
         return false;
     }
+    input_manager_.open_controllers();
 
     if (TTF_Init() != 0) {
         std::fprintf(stderr, "TTF_Init: %s\n", TTF_GetError());
