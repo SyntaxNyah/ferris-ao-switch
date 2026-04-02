@@ -202,6 +202,21 @@ void App::update(uint32_t dt_ms) {
         }
     }
 
+    // Detect pre-lobby connection failure: connection attempt started but the
+    // network thread died before the handshake completed.
+    // (was_in_lobby_ is false here because DONE was never received.)
+    if (net_thread_ && !net_thread_->is_connected() && !was_in_lobby_) {
+        if (ao_client_ &&
+            ao_client_->handshake_state() == HandshakeState::Idle) {
+            const char* err = net_thread_->error();
+            std::snprintf(pending_error_, sizeof(pending_error_),
+                "Connection failed: %s",
+                err[0] ? err : "server closed connection");
+            std::fprintf(stderr, "App: %s\n", pending_error_);
+            disconnect();
+        }
+    }
+
     if (screen_count_ > 0)
         screen_stack_[screen_count_ - 1]->update(dt_ms);
 }

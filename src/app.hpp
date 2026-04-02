@@ -51,6 +51,11 @@ public:
     NetworkThread* net_thread() { return net_thread_; }
     AOClient*      ao_client()  { return ao_client_; }
 
+    // Set by App::update() when a connection attempt fails before reaching the lobby.
+    // ConnectScreen reads and clears this to show an error message.
+    const char* pending_error() const { return pending_error_[0] ? pending_error_ : nullptr; }
+    void        clear_pending_error() { pending_error_[0] = '\0'; }
+
 private:
     void process_events();
     void update(uint32_t dt_ms);
@@ -72,6 +77,7 @@ private:
     AOClient*      ao_client_     = nullptr;
     char           username_[64]  = "Switch";
     bool           was_in_lobby_  = false;  // edge detection for CharSelectScreen push
+    char           pending_error_[256] = {};
 
     Screen* screen_stack_[SCREEN_STACK_MAX] = {};
     int     screen_count_ = 0;

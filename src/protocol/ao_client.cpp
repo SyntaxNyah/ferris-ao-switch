@@ -130,21 +130,20 @@ void AOClient::on_id(const Packet& p) {
     std::strncpy(state_.server_version, p.field(2), sizeof(state_.server_version) - 1);
 
     if (hs_state_ == HandshakeState::WaitId) {
-        // Send client ID
+        // Send client ID then immediately ask for character count.
+        // AO2 protocol: askchaa follows ID without waiting for PN — some servers
+        // do not send PN at all, which would stall the handshake if we waited.
         char buf[128];
-        int n = cmd::id(buf, sizeof(buf));
-        send(buf, n);
+        send(buf, cmd::id(buf, sizeof(buf)));
+        char buf2[32];
+        send(buf2, cmd::askchaa(buf2, sizeof(buf2)));
         hs_state_ = HandshakeState::WaitSi;
-        // Server will now send PN + FL [+ ASS], then wait for askchaa
     }
 }
 
 void AOClient::on_pn(const Packet& /*p*/) {
-    // Player count info — send askchaa now
-    if (hs_state_ == HandshakeState::WaitSi) {
-        char buf[32];
-        send(buf, cmd::askchaa(buf, sizeof(buf)));
-    }
+    // Player count / server info packet — informational only.
+    // askchaa was already sent in on_id(), so no action needed here.
 }
 
 void AOClient::on_fl(const Packet& /*p*/) {

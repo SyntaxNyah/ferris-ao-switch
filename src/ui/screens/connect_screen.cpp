@@ -430,6 +430,13 @@ void ConnectScreen::handle_event(const SDL_Event& e) {
 // ── update ────────────────────────────────────────────────────────────────────
 
 void ConnectScreen::update(uint32_t /*dt_ms*/) {
+    // Show any connection error reported by App (e.g. TCP connect failed,
+    // WS upgrade failed, server closed connection during handshake).
+    if (const char* err = app_.pending_error()) {
+        std::snprintf(status_, sizeof(status_), "%s", err);
+        app_.clear_pending_error();
+    }
+
     FetchState fs = (FetchState)SDL_AtomicGet(&fetch_state_atom_);
 
     if (fs == FetchState::Done) {
