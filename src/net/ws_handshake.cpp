@@ -105,10 +105,12 @@ bool ws_upgrade(WsSendFn send_fn, WsRecvFn recv_fn, void* ctx,
         "\r\n",
         path, host, key_b64);
 
+    std::fprintf(stderr, "ws_upgrade: sending %d-byte request to %s%s\n", req_len, host, path);
     if (send_fn(ctx, request, req_len) < req_len) {
         std::fprintf(stderr, "ws_upgrade: send failed\n");
         return false;
     }
+    std::fprintf(stderr, "ws_upgrade: request sent, waiting for response\n");
 
     // Read HTTP response byte-by-byte until \r\n\r\n.
     // Retry on n==0 (no data yet) to handle non-blocking recv (e.g. TLS WANT_READ,
@@ -124,7 +126,8 @@ bool ws_upgrade(WsSendFn send_fn, WsRecvFn recv_fn, void* ctx,
             if (n == 0) SDL_Delay(1);
         } while (n == 0 && ++wait_ms < 8000);
         if (n <= 0) {
-            std::fprintf(stderr, "ws_upgrade: recv failed or timed out\n");
+            std::fprintf(stderr, "ws_upgrade: recv %s after %d ms (n=%d)\n",
+                n == 0 ? "timed out" : "error", wait_ms, n);
             return false;
         }
         resp[resp_len++] = ch;

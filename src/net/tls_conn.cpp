@@ -117,11 +117,36 @@ bool TlsConn::connect(const char* host, uint16_t port) {
                                      (const unsigned char*)pers, std::strlen(pers));
     if (ret != 0) { tls_log_err("ctr_drbg_seed", ret); return false; }
 
-    // DNS resolve + TCP connect via mbedtls (uses POSIX sockets — works on Switch)
+    // DNS resolve + TCP connect — run in a thread with timeout (Ryujinx hangs
+    // indefinitely on blocking connect() when the remote doesn't respond fast)
     char port_str[8];
     std::snprintf(port_str, sizeof(port_str), "%u", (unsigned)port);
-    ret = mbedtls_net_connect(&net, host, port_str, MBEDTLS_NET_PROTO_TCP);
-    if (ret != 0) { tls_log_err("net_connect", ret); return false; }
+    {
+        auto* task = new RawConnectTask{};
+        std::strncpy(task->host, host, sizeof(task->host) - 1);
+        std::strncpy(task->port_str, port_str, sizeof(task->port_str) - 1);
+        task->result = -1;
+        task->sem    = SDL_CreateSemaphore(0);
+        SDL_Thread* th = SDL_CreateThread(raw_connect_thread, "tls_tcp_connect", task);
+        if (!th) {
+            SDL_DestroySemaphore(task->sem);
+            delete task;
+            std::fprintf(stderr, "TlsConn: failed to create connect thread\n");
+            return false;
+        }
+        SDL_DetachThread(th);
+        if (SDL_SemWaitTimeout(task->sem, 10000) != 0) {
+            std::fprintf(stderr, "TlsConn: TCP connect to %s:%u timed out\n", host, port);
+            return false;
+        }
+        ret = task->result;
+        net = task->net;
+        mbedtls_net_init(&task->net);
+        SDL_DestroySemaphore(task->sem);
+        delete task;
+        if (ret != 0) { tls_log_err("net_connect", ret); return false; }
+        std::fprintf(stderr, "TlsConn: TCP connected to %s:%u\n", host, port);
+    }
 
     // Non-blocking so poll() + WANT_READ work correctly
     mbedtls_net_set_nonblock(&net);
