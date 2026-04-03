@@ -468,7 +468,17 @@ void AOClient::on_fa(const Packet& p) {
 
 void AOClient::on_pr(const Packet& /*p*/) {
     // PR#uid#type#% — player roster add (0) / remove (1).
-    // Informational only; we don't maintain a separate player roster for now.
+    // Akashi sends PR immediately after receiving HI, before (or instead of)
+    // decryptor. Use the first PR as a trigger to send ID+askchaa so the
+    // server proceeds with SI/SC/SM/DONE.
+    if (hs_state_ == HandshakeState::WaitDecryptor) {
+        std::fprintf(stderr, "[ao_client] Akashi: PR before decryptor — sending ID+askchaa\n");
+        char buf[128];
+        send(buf, cmd::id(buf, sizeof(buf)));
+        char buf2[32];
+        send(buf2, cmd::askchaa(buf2, sizeof(buf2)));
+        hs_state_ = HandshakeState::WaitSi;
+    }
 }
 
 void AOClient::on_pu(const Packet& /*p*/) {
