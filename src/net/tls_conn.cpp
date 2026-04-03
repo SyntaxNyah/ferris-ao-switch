@@ -6,8 +6,6 @@
 #ifdef AO_TLS
 // ── Full mbedtls implementation ───────────────────────────────────────────────
 #include <mbedtls/error.h>
-#include <sys/socket.h>
-#include <sys/time.h>
 
 namespace ao {
 
@@ -25,17 +23,7 @@ bool RawConn::connect(const char* host, uint16_t port) {
     std::snprintf(port_str, sizeof(port_str), "%u", (unsigned)port);
     int ret = mbedtls_net_connect(&net, host, port_str, MBEDTLS_NET_PROTO_TCP);
     if (ret != 0) { tls_log_err("raw_connect", ret); return false; }
-    // Use SO_RCVTIMEO (5 ms) instead of a non-blocking socket.
-    // On Ryujinx, mbedtls_net_recv on a non-blocking socket returns WANT_READ
-    // even when data is buffered (Ryujinx select() is unreliable).
-    // With SO_RCVTIMEO the recv call blocks up to 5 ms then returns EAGAIN,
-    // which mbedtls maps to WANT_READ → 0 in RawConn::recv.
-    // This lets ws_loop check the outgoing queue every 5 ms without select().
-    struct timeval tv;
-    tv.tv_sec  = 0;
-    tv.tv_usec = 5000; // 5 ms
-    setsockopt(net.fd, SOL_SOCKET, SO_RCVTIMEO,
-               reinterpret_cast<const char*>(&tv), sizeof(tv));
+    mbedtls_net_set_nonblock(&net);
     return true;
 }
 

@@ -170,15 +170,15 @@ int NetworkThread::cb_raw_send(void* ctx, const void* data, int len) {
     return reinterpret_cast<RawConn*>(ctx)->send(data, len);
 }
 int NetworkThread::cb_raw_recv(void* ctx, void* buf, int cap) {
-    // RawConn uses SO_RCVTIMEO (5 ms) — recv blocks up to 5 ms then returns
-    // WANT_READ (→ 0).  Retry until data arrives or the 10-second deadline.
-    // Do NOT call conn->poll() here: it uses select() which is broken on Ryujinx.
+    // Non-blocking socket — recv returns 0 (WANT_READ) when no data yet.
+    // Do NOT call conn->poll() here: select() is broken on Ryujinx.
     RawConn* conn = reinterpret_cast<RawConn*>(ctx);
     uint32_t deadline = SDL_GetTicks() + 10000;
     while (true) {
         int n = conn->recv(buf, cap);
         if (n != 0) return n;
         if ((int32_t)(deadline - SDL_GetTicks()) <= 0) return -1;
+        SDL_Delay(1);
     }
 }
 int NetworkThread::cb_tls_send(void* ctx, const void* data, int len) {
@@ -212,7 +212,8 @@ void NetworkThread::tcp_loop() {
             recv_len_ += n;
             extract_packets();
         }
-        // n == 0: SO_RCVTIMEO expired (no data in 5 ms) — fall through to sends
+        // n == 0: WANT_READ (non-blocking, no data yet) — yield then check sends
+        if (n == 0) SDL_Delay(1);
         OutPacket out;
         while (out_queue_.pop(out)) {
             if (net_send(out.data, out.len) < out.len) break;
@@ -236,7 +237,7 @@ void NetworkThread::ws_loop() {
 
             int n = net_recv(frame_buf + frame_len, space);
             if (n < 0) break;   // error / close
-            if (n == 0) { goto send_outgoing; } // SO_RCVTIMEO expired — check sends
+            if (n == 0) { SDL_Delay(1); goto send_outgoing; } // WANT_READ — check sends
             frame_len += n;
 
             int consumed_total = 0;
