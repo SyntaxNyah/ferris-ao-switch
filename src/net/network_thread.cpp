@@ -127,10 +127,11 @@ void NetworkThread::run() {
 
 push_disconnect:
     // Push a synthetic disconnect notification so the main thread can react.
-    InPacket disc;
-    std::strncpy(disc.data, "__DISCONNECT#%", sizeof(disc.data));
-    disc.len = (int)std::strlen(disc.data);
-    in_queue_.push(disc);
+    // static: 128 KB on the network-thread stack would overflow it.
+    { static InPacket disc;
+      std::strncpy(disc.data, "__DISCONNECT#%", sizeof(disc.data));
+      disc.len = (int)std::strlen(disc.data);
+      in_queue_.push(disc); }
 }
 
 // ── Abstract IO helpers ────────────────────────────────────────────────────────
@@ -294,7 +295,7 @@ void NetworkThread::extract_packets() {
         if (recv_buf_[i] == '%') {
             int pkt_len = i - start + 1;
             if (pkt_len > 0 && pkt_len < (int)sizeof(InPacket::data)) {
-                InPacket pkt;
+                static InPacket pkt; // static: 128 KB on network-thread stack overflows it
                 std::memcpy(pkt.data, recv_buf_ + start, pkt_len);
                 pkt.data[pkt_len] = '\0';
                 pkt.len = pkt_len;

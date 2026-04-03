@@ -46,7 +46,7 @@ void AOClient::send_fmt(const char* fmt, ...) {
 }
 
 void AOClient::process(InQueue& in) {
-    InPacket raw;
+    static InPacket raw; // static: 128 KB on the call stack is too large
     while (in.pop(raw)) {
         // Synthetic disconnect signal from network thread
         if (std::strcmp(raw.data, "__DISCONNECT#%") == 0) {
