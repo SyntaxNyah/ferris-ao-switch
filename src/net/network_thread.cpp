@@ -199,16 +199,19 @@ int NetworkThread::cb_sdlnet_recv(void* ctx, void* buf, int cap) {
 // ── TCP loop ──────────────────────────────────────────────────────────────────
 void NetworkThread::tcp_loop() {
     while (!stop_flag_.load(std::memory_order_acquire)) {
-        if (net_poll(1)) {
-            int space = RECV_BUF_CAP - recv_len_;
-            if (space <= 0) {
-                std::fprintf(stderr, "recv_buf overflow — clearing\n");
-                recv_len_ = 0; space = RECV_BUF_CAP;
-            }
-            int n = net_recv(recv_buf_ + recv_len_, space);
-            if (n <= 0) break;
+        // Receive without gating on net_poll — select() is unreliable on Ryujinx.
+        int space = RECV_BUF_CAP - recv_len_;
+        if (space <= 0) {
+            std::fprintf(stderr, "recv_buf overflow — clearing\n");
+            recv_len_ = 0; space = RECV_BUF_CAP;
+        }
+        int n = net_recv(recv_buf_ + recv_len_, space);
+        if (n < 0) break;   // error / close
+        if (n > 0) {
             recv_len_ += n;
             extract_packets();
+        } else {
+            SDL_Delay(1); // WANT_READ — yield briefly
         }
         OutPacket out;
         while (out_queue_.pop(out)) {
@@ -221,15 +224,17 @@ void NetworkThread::tcp_loop() {
 void NetworkThread::ws_loop() {
     static uint8_t frame_buf[65536];
     static int     frame_len = 0;
+    frame_len = 0; // reset for each new connection
 
     while (!stop_flag_.load(std::memory_order_acquire)) {
-        if (net_poll(1)) {
+        // Receive without gating on net_poll — select() is unreliable on Ryujinx.
+        {
             int space = (int)sizeof(frame_buf) - frame_len;
             if (space <= 0) { frame_len = 0; space = (int)sizeof(frame_buf); }
 
             int n = net_recv(frame_buf + frame_len, space);
             if (n < 0) break;   // error / close
-            if (n == 0) goto send_outgoing; // WANT_READ — nothing yet
+            if (n == 0) { SDL_Delay(1); goto send_outgoing; } // WANT_READ — yield briefly
             frame_len += n;
 
             int consumed_total = 0;
@@ -245,7 +250,7 @@ void NetworkThread::ws_loop() {
 
                 if (res == FrameResult::Incomplete) break;
                 if (res == FrameResult::Close)  { stop_flag_.store(true); break; }
-                if (res == FrameResult::Error)  { std::fprintf(stderr, "WS frame error\n"); break; }
+                if (res == FrameResult::Error)  { std::fprintf(stderr, "WS frame error\n"); stop_flag_.store(true); break; }
                 if (res == FrameResult::Ping)   { send_pong(payload, payload_len); }
 
                 if (payload_len > 0 && recv_len_ + payload_len < RECV_BUF_CAP) {
