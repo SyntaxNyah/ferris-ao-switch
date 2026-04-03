@@ -125,6 +125,8 @@ void AOClient::on_decryptor(const Packet& /*p*/) {
 }
 
 void AOClient::on_id(const Packet& p) {
+    // field(0) = server-assigned UID — needed for CC
+    state_.my_uid = p.field_int(0);
     // Store server name/version
     std::strncpy(state_.server_name,    p.field(1), sizeof(state_.server_name) - 1);
     std::strncpy(state_.server_version, p.field(2), sizeof(state_.server_version) - 1);
@@ -416,7 +418,9 @@ void AOClient::on_zz(const Packet& p) {
 }
 
 void AOClient::on_check(const Packet& /*p*/) {
-    // Server responded to our CH ping — nothing to do
+    // Server is pinging us — respond so we aren't disconnected for inactivity
+    char buf[16];
+    send(buf, cmd::ch(buf, sizeof(buf)));
 }
 
 } // namespace ao

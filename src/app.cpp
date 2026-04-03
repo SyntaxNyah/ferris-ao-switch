@@ -274,6 +274,15 @@ void App::disconnect() {
     }
 }
 
+void App::send_packet(const char* buf, int len) {
+    OutPacket pkt;
+    int copy = len < (int)sizeof(pkt.data) - 1 ? len : (int)sizeof(pkt.data) - 1;
+    std::memcpy(pkt.data, buf, copy);
+    pkt.data[copy] = '\0';
+    pkt.len = copy;
+    out_queue_.push(pkt);
+}
+
 void App::set_username(const char* u) {
     std::strncpy(username_, u, sizeof(username_) - 1);
     username_[sizeof(username_) - 1] = '\0';

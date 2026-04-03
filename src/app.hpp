@@ -44,6 +44,7 @@ public:
     // Networking
     bool connect(const char* host, uint16_t port, ConnMode mode);
     void disconnect();
+    void send_packet(const char* buf, int len);  // push raw packet to outgoing queue
 
     const char* username() const { return username_; }
     void        set_username(const char* u);

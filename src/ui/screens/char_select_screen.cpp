@@ -27,8 +27,9 @@ void CharSelectScreen::handle_event(const SDL_Event& e) {
             case SDLK_UP:    selected_ = (selected_ - COLS + gs.char_count) % gs.char_count; break;
             case SDLK_RETURN:
                 if (!gs.char_taken[selected_]) {
-                    // Send CC packet
-                    // TODO Phase 3: access OutQueue via App
+                    char buf[256];
+                    int n = cmd::cc(buf, sizeof(buf), gs.my_uid, selected_, "ferris-ao-switch");
+                    app_.send_packet(buf, n);
                     app_.push_screen(new CourtroomScreen(app_));
                 }
                 break;
@@ -42,8 +43,12 @@ void CharSelectScreen::handle_event(const SDL_Event& e) {
             case SDL_CONTROLLER_BUTTON_DPAD_DOWN:  selected_=(selected_+COLS)%gs.char_count; break;
             case SDL_CONTROLLER_BUTTON_DPAD_UP:    selected_=(selected_-COLS+gs.char_count)%gs.char_count; break;
             case SDL_CONTROLLER_BUTTON_A:
-                if (!gs.char_taken[selected_])
+                if (!gs.char_taken[selected_]) {
+                    char buf[256];
+                    int n = cmd::cc(buf, sizeof(buf), gs.my_uid, selected_, "ferris-ao-switch");
+                    app_.send_packet(buf, n);
                     app_.push_screen(new CourtroomScreen(app_));
+                }
                 break;
             default: break;
         }
