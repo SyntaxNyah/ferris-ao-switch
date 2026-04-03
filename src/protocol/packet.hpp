@@ -46,8 +46,9 @@ struct Packet {
             buf[w++] = s[r++];
         }
         buf[w] = '\0';
-        std::strncpy(s, buf, MAX_FIELD_LEN - 1);
-        s[MAX_FIELD_LEN - 1] = '\0';
+        // Copy exactly w+1 bytes — unescaping only shrinks the string so
+        // w <= strlen(input), making this safe for any caller buffer size.
+        std::memcpy(s, buf, w + 1);
     }
 
     // Escape src into dst (dst must be >= strlen(src)*9+1 bytes in worst case).
