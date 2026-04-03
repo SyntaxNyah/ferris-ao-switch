@@ -407,6 +407,17 @@ void AOClient::on_le(const Packet& p) {
 void AOClient::on_chars_check(const Packet& p) {
     for (int i = 0; i < p.field_count && i < GameState::MAX_CHARS; ++i)
         state_.char_taken[i] = (p.field(i)[0] == '1');
+
+    // Akashi direct-lobby mode: CharsCheck arrives before any handshake.
+    // The server skips decryptor/ID/SI entirely. Request the character list
+    // now so the normal SC→RM→SM→RD→DONE chain can complete the handshake.
+    if (hs_state_ == HandshakeState::WaitDecryptor ||
+        hs_state_ == HandshakeState::WaitId) {
+        std::fprintf(stderr, "[ao_client] Akashi direct: CharsCheck before handshake — requesting chars\n");
+        char buf[32];
+        send(buf, cmd::rc(buf, sizeof(buf)));
+        hs_state_ = HandshakeState::WaitSc;
+    }
 }
 
 void AOClient::on_pv(const Packet& p) {
