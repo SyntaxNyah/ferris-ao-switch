@@ -85,8 +85,9 @@ private:
     uint16_t port_      = 0;
     ConnMode mode_      = ConnMode::TCP;
 
-    // Recv ring buffer (shared by tcp_loop and ws_loop via extract_packets)
-    static constexpr int RECV_BUF_CAP = 65536;
+    // Recv ring buffer (shared by tcp_loop and ws_loop via extract_packets).
+    // 128 KB handles large SM packets (servers with 500+ music tracks).
+    static constexpr int RECV_BUF_CAP = 131072;
     uint8_t recv_buf_[RECV_BUF_CAP];
     int     recv_len_   = 0;
 

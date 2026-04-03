@@ -72,8 +72,8 @@ private:
     char           username_[64];
     char           hdid_[64]    = "ferris-ao-switch";
 
-    // Pending parse buffer (across frames) — must be >= InPacket::data (65536)
-    char  parse_buf_[65536];
+    // Pending parse buffer (across frames) — must be >= InPacket::data (131072)
+    char  parse_buf_[131072];
     int   parse_len_ = 0;
 };
 

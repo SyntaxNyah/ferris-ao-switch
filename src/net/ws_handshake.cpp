@@ -135,8 +135,9 @@ bool ws_upgrade(WsSendFn send_fn, WsRecvFn recv_fn, void* ctx,
     }
     resp[resp_len] = '\0';
 
+    std::fprintf(stderr, "ws_upgrade: got %d response bytes\n", resp_len);
     if (!std::strstr(resp, "101")) {
-        std::fprintf(stderr, "ws_upgrade: server did not return 101\n%.256s\n", resp);
+        std::fprintf(stderr, "ws_upgrade: server did not return 101:\n%.512s\n", resp);
         return false;
     }
 
@@ -154,6 +155,7 @@ bool ws_upgrade(WsSendFn send_fn, WsRecvFn recv_fn, void* ctx,
         return false;
     }
 
+    std::fprintf(stderr, "ws_upgrade: OK\n");
     return true;
 }
 

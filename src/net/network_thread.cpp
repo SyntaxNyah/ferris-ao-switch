@@ -169,15 +169,15 @@ int NetworkThread::cb_raw_send(void* ctx, const void* data, int len) {
     return reinterpret_cast<RawConn*>(ctx)->send(data, len);
 }
 int NetworkThread::cb_raw_recv(void* ctx, void* buf, int cap) {
-    // ws_upgrade calls recv byte-by-byte; RawConn::recv returns 0 on WANT_READ.
-    // Poll up to 10 s so ws_upgrade's retry loop gets data as soon as it arrives.
+    // RawConn uses SO_RCVTIMEO (5 ms) — recv blocks up to 5 ms then returns
+    // WANT_READ (→ 0).  Retry until data arrives or the 10-second deadline.
+    // Do NOT call conn->poll() here: it uses select() which is broken on Ryujinx.
     RawConn* conn = reinterpret_cast<RawConn*>(ctx);
     uint32_t deadline = SDL_GetTicks() + 10000;
     while (true) {
         int n = conn->recv(buf, cap);
         if (n != 0) return n;
         if ((int32_t)(deadline - SDL_GetTicks()) <= 0) return -1;
-        conn->poll(10);
     }
 }
 int NetworkThread::cb_tls_send(void* ctx, const void* data, int len) {
@@ -210,9 +210,8 @@ void NetworkThread::tcp_loop() {
         if (n > 0) {
             recv_len_ += n;
             extract_packets();
-        } else {
-            SDL_Delay(1); // WANT_READ — yield briefly
         }
+        // n == 0: SO_RCVTIMEO expired (no data in 5 ms) — fall through to sends
         OutPacket out;
         while (out_queue_.pop(out)) {
             if (net_send(out.data, out.len) < out.len) break;
@@ -222,9 +221,11 @@ void NetworkThread::tcp_loop() {
 
 // ── WebSocket loop ────────────────────────────────────────────────────────────
 void NetworkThread::ws_loop() {
-    static uint8_t frame_buf[65536];
+    // 128 KB — handles servers with 1000+ music tracks in a single SM frame.
+    static uint8_t frame_buf[131072];
     static int     frame_len = 0;
     frame_len = 0; // reset for each new connection
+    std::fprintf(stderr, "[ws_loop] started\n");
 
     while (!stop_flag_.load(std::memory_order_acquire)) {
         // Receive without gating on net_poll — select() is unreliable on Ryujinx.
@@ -234,7 +235,7 @@ void NetworkThread::ws_loop() {
 
             int n = net_recv(frame_buf + frame_len, space);
             if (n < 0) break;   // error / close
-            if (n == 0) { SDL_Delay(1); goto send_outgoing; } // WANT_READ — yield briefly
+            if (n == 0) { goto send_outgoing; } // SO_RCVTIMEO expired — check sends
             frame_len += n;
 
             int consumed_total = 0;
@@ -242,7 +243,7 @@ void NetworkThread::ws_loop() {
                 int remaining = frame_len - consumed_total;
                 if (remaining <= 0) break;
 
-                static char payload[65536];
+                static char payload[131072];
                 int  payload_len = 0;
                 FrameResult res = ws_decode_frame(
                     frame_buf + consumed_total, remaining,
