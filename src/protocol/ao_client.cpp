@@ -16,6 +16,7 @@ void AOClient::on_connected(const char* hdid) {
     std::strncpy(hdid_, hdid, sizeof(hdid_) - 1);
     hs_state_ = HandshakeState::WaitDecryptor;
     parse_len_ = 0;
+    hs_start_ms_ = SDL_GetTicks();
     // Send HI immediately — some servers skip decryptor and go straight to ID.
     // Traditional servers send decryptor first; on_decryptor() will send HI again
     // (redundant but harmless) and transition us to WaitId.
@@ -50,6 +51,22 @@ void AOClient::send_fmt(const char* fmt, ...) {
 }
 
 void AOClient::process(InQueue& in) {
+    // Handshake timeout — give up after 15 s if we never reach InLobby
+    if (hs_state_ != HandshakeState::Idle &&
+        hs_state_ != HandshakeState::InLobby &&
+        hs_start_ms_ != 0 &&
+        (int32_t)(SDL_GetTicks() - hs_start_ms_) > 15000) {
+        std::fprintf(stderr, "[ao_client] handshake timed out (state=%d)\n",
+            (int)hs_state_);
+        on_disconnected();
+        // Push synthetic disconnect so App tears down the connection
+        static InPacket disc;
+        std::strncpy(disc.data, "__DISCONNECT#%", sizeof(disc.data));
+        disc.len = (int)std::strlen(disc.data);
+        in.push(disc);
+        return;
+    }
+
     static InPacket raw; // static: 128 KB on the call stack is too large
     while (in.pop(raw)) {
         // Synthetic disconnect signal from network thread

@@ -75,6 +75,9 @@ private:
     // Pending parse buffer (across frames) — must be >= InPacket::data (131072)
     char  parse_buf_[131072];
     int   parse_len_ = 0;
+
+    // Handshake timeout — if we don't reach InLobby within 15s, disconnect.
+    uint32_t hs_start_ms_ = 0;
 };
 
 } // namespace ao
