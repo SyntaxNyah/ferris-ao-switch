@@ -55,7 +55,7 @@ void AOClient::process(InQueue& in) {
     if (hs_state_ != HandshakeState::Idle &&
         hs_state_ != HandshakeState::InLobby &&
         hs_start_ms_ != 0 &&
-        (int32_t)(SDL_GetTicks() - hs_start_ms_) > 15000) {
+        (int32_t)(SDL_GetTicks() - hs_start_ms_) > 60000) {
         std::fprintf(stderr, "[ao_client] handshake timed out (state=%d)\n",
             (int)hs_state_);
         on_disconnected();
@@ -467,18 +467,7 @@ void AOClient::on_fa(const Packet& p) {
 }
 
 void AOClient::on_pr(const Packet& /*p*/) {
-    // PR#uid#type#% — player roster add (0) / remove (1).
-    // Akashi sends PR immediately after receiving HI, before (or instead of)
-    // decryptor. Use the first PR as a trigger to send ID+askchaa so the
-    // server proceeds with SI/SC/SM/DONE.
-    if (hs_state_ == HandshakeState::WaitDecryptor) {
-        std::fprintf(stderr, "[ao_client] Akashi: PR before decryptor — sending ID+askchaa\n");
-        char buf[128];
-        send(buf, cmd::id(buf, sizeof(buf)));
-        char buf2[32];
-        send(buf2, cmd::askchaa(buf2, sizeof(buf2)));
-        hs_state_ = HandshakeState::WaitSi;
-    }
+    // PR#uid#type#% — player roster add/remove broadcast. Informational only.
 }
 
 void AOClient::on_pu(const Packet& /*p*/) {
