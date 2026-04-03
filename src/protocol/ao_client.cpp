@@ -139,10 +139,8 @@ void AOClient::handle(const Packet& pkt) {
 // ── Handshake handlers ─────────────────────────────────────────────────────────
 
 void AOClient::on_decryptor(const Packet& /*p*/) {
-    // Server says NOENCRYPT — send HI
-    char buf[256];
-    int n = cmd::hi(buf, sizeof(buf), hdid_);
-    send(buf, n);
+    // Server says NOENCRYPT — HI was already sent in on_connected().
+    // Just advance the state; do NOT send HI again (double HI causes KB/kick).
     hs_state_ = HandshakeState::WaitId;
 }
 
