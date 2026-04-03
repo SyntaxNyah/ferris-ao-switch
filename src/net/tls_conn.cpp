@@ -17,13 +17,62 @@ static void tls_log_err(const char* tag, int ret) {
 
 // ── RawConn — plain non-blocking TCP via mbedtls_net ─────────────────────────
 
+// mbedtls_net_connect does a blocking TCP connect.  On Ryujinx the blocking
+// connect() syscall never times out, freezing the app forever.  Run it on a
+// detached thread and wait with a 10-second timeout via SDL semaphore.
+
+struct RawConnectTask {
+    char              host[256];
+    char              port_str[8];
+    mbedtls_net_context net;
+    int               result;
+    SDL_sem*          sem;
+};
+
+static int raw_connect_thread(void* ud) {
+    auto* t = static_cast<RawConnectTask*>(ud);
+    mbedtls_net_init(&t->net);
+    t->result = mbedtls_net_connect(&t->net, t->host, t->port_str,
+                                    MBEDTLS_NET_PROTO_TCP);
+    SDL_SemPost(t->sem);
+    return 0;
+}
+
 bool RawConn::connect(const char* host, uint16_t port) {
     mbedtls_net_init(&net);
-    char port_str[8];
-    std::snprintf(port_str, sizeof(port_str), "%u", (unsigned)port);
-    int ret = mbedtls_net_connect(&net, host, port_str, MBEDTLS_NET_PROTO_TCP);
+
+    auto* task = new RawConnectTask{};
+    std::strncpy(task->host, host, sizeof(task->host) - 1);
+    std::snprintf(task->port_str, sizeof(task->port_str), "%u", (unsigned)port);
+    task->result = -1;
+    task->sem    = SDL_CreateSemaphore(0);
+
+    SDL_Thread* th = SDL_CreateThread(raw_connect_thread, "raw_tcp_connect", task);
+    if (!th) {
+        SDL_DestroySemaphore(task->sem);
+        delete task;
+        std::fprintf(stderr, "RawConn: failed to create connect thread\n");
+        return false;
+    }
+    SDL_DetachThread(th);
+
+    // Wait up to 10 s for the connect to complete
+    if (SDL_SemWaitTimeout(task->sem, 10000) != 0) {
+        // Timed out — task/thread leaked intentionally (thread may still be
+        // blocked in the OS connect() call; it will eventually post and exit)
+        std::fprintf(stderr, "RawConn: connect to %s:%u timed out\n", host, port);
+        return false;
+    }
+
+    int ret = task->result;
+    net = task->net;              // take ownership of the fd
+    mbedtls_net_init(&task->net); // zero task copy so its destructor won't close our fd
+    SDL_DestroySemaphore(task->sem);
+    delete task;
+
     if (ret != 0) { tls_log_err("raw_connect", ret); return false; }
     mbedtls_net_set_nonblock(&net);
+    std::fprintf(stderr, "RawConn: connected to %s:%u\n", host, port);
     return true;
 }
 
