@@ -16,7 +16,11 @@ void AOClient::on_connected(const char* hdid) {
     std::strncpy(hdid_, hdid, sizeof(hdid_) - 1);
     hs_state_ = HandshakeState::WaitDecryptor;
     parse_len_ = 0;
-    // Server sends decryptor first — we just wait.
+    // Send HI immediately — some servers skip decryptor and go straight to ID.
+    // Traditional servers send decryptor first; on_decryptor() will send HI again
+    // (redundant but harmless) and transition us to WaitId.
+    char buf[256];
+    send(buf, cmd::hi(buf, sizeof(buf), hdid_));
 }
 
 void AOClient::on_disconnected() {
@@ -132,10 +136,9 @@ void AOClient::on_id(const Packet& p) {
     std::strncpy(state_.server_name,    p.field(1), sizeof(state_.server_name) - 1);
     std::strncpy(state_.server_version, p.field(2), sizeof(state_.server_version) - 1);
 
-    if (hs_state_ == HandshakeState::WaitId) {
-        // Send client ID then immediately ask for character count.
-        // AO2 protocol: askchaa follows ID without waiting for PN — some servers
-        // do not send PN at all, which would stall the handshake if we waited.
+    // Accept ID from both WaitId and WaitDecryptor — some servers skip decryptor.
+    if (hs_state_ == HandshakeState::WaitId ||
+        hs_state_ == HandshakeState::WaitDecryptor) {
         char buf[128];
         send(buf, cmd::id(buf, sizeof(buf)));
         char buf2[32];
