@@ -209,7 +209,7 @@ void NetworkThread::tcp_loop() {
             std::fprintf(stderr, "recv_buf overflow — clearing\n");
             recv_len_ = 0; space = RECV_BUF_CAP;
         }
-        int n = net_recv(recv_buf_ + recv_len_, space);
+        int n = net_recv(recv_buf_ + recv_len_, space < 1024 ? space : 1024);
         if (n < 0) break;   // error / close
         if (n > 0) {
             recv_len_ += n;
@@ -238,7 +238,9 @@ void NetworkThread::ws_loop() {
             int space = (int)sizeof(frame_buf) - frame_len;
             if (space <= 0) { frame_len = 0; space = (int)sizeof(frame_buf); }
 
-            int n = net_recv(frame_buf + frame_len, space);
+            // Cap read to 1024 — Ryujinx non-blocking recv returns EAGAIN for
+            // large requests even when data is buffered (non-POSIX behaviour).
+            int n = net_recv(frame_buf + frame_len, space < 1024 ? space : 1024);
             if (n < 0) { std::fprintf(stderr, "[ws_loop] net_recv error %d\n", n); break; }
             if (n == 0) { SDL_Delay(1); goto send_outgoing; } // WANT_READ — check sends
             std::fprintf(stderr, "[ws_loop] recv %d bytes\n", n);
