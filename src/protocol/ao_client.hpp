@@ -66,6 +66,12 @@ private:
     void on_zz        (const Packet& p);
     void on_check     (const Packet& p);
 
+    // Akashi-specific handlers
+    void on_fa        (const Packet& p); // full area list (replaces SM areas)
+    void on_pr        (const Packet& p); // player roster add/remove
+    void on_pu        (const Packet& p); // player state update
+    void on_ti        (const Packet& p); // timer info
+
     OutQueue&      out_;
     GameState&     state_;
     HandshakeState hs_state_ = HandshakeState::Idle;

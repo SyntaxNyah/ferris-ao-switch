@@ -133,6 +133,13 @@ void AOClient::handle(const Packet& pkt) {
     if (std::strcmp(h, "CHECK")       == 0) { on_check(pkt);      return; }
     if (std::strcmp(h, "CASEA")       == 0) { /* TODO */ return; }
 
+    // Akashi-specific
+    if (std::strcmp(h, "FA")          == 0) { on_fa(pkt);         return; }
+    if (std::strcmp(h, "PR")          == 0) { on_pr(pkt);         return; }
+    if (std::strcmp(h, "PU")          == 0) { on_pu(pkt);         return; }
+    if (std::strcmp(h, "TI")          == 0) { on_ti(pkt);         return; }
+    if (std::strcmp(h, "SP")          == 0) { return; } // area/position update, ignore
+
     std::fprintf(stderr, "[ao_client] unknown packet: %s\n", h);
 }
 
@@ -440,6 +447,37 @@ void AOClient::on_check(const Packet& /*p*/) {
     // Server is pinging us — respond so we aren't disconnected for inactivity
     char buf[16];
     send(buf, cmd::ch(buf, sizeof(buf)));
+}
+
+// ── Akashi-specific handlers ───────────────────────────────────────────────────
+
+void AOClient::on_fa(const Packet& p) {
+    // FA#area0#area1#...#% — full area list, sent by Akashi instead of putting
+    // areas in SM. Overwrite whatever SM might have set.
+    state_.area_count = 0;
+    for (int i = 0; i < p.field_count && i < GameState::MAX_AREAS; ++i) {
+        char tmp[128];
+        std::strncpy(tmp, p.field(i), sizeof(tmp) - 1);
+        Packet::unescape(tmp);
+        std::strncpy(state_.areas[state_.area_count].name, tmp,
+            sizeof(state_.areas[0].name) - 1);
+        ++state_.area_count;
+    }
+    std::fprintf(stderr, "[ao_client] FA: %d areas\n", state_.area_count);
+}
+
+void AOClient::on_pr(const Packet& /*p*/) {
+    // PR#uid#type#% — player roster add (0) / remove (1).
+    // Informational only; we don't maintain a separate player roster for now.
+}
+
+void AOClient::on_pu(const Packet& /*p*/) {
+    // PU#uid#data_type#value#% — player state update (name/char/showname/area).
+    // Informational only; we don't display a player list yet.
+}
+
+void AOClient::on_ti(const Packet& /*p*/) {
+    // TI#timer_id#type#value#% — area timer update. Not displayed yet.
 }
 
 } // namespace ao
