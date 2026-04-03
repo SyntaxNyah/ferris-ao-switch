@@ -125,6 +125,8 @@ static int parse_servers(const char* json, int len,
             e.port = std::atoi(tmp);
         if (json_find_key(obj_start, obj_end, "ws_port", tmp, sizeof(tmp)))
             e.ws_port = std::atoi(tmp);
+        if (json_find_key(obj_start, obj_end, "wss_port", tmp, sizeof(tmp)))
+            e.wss_port = std::atoi(tmp);
         if (json_find_key(obj_start, obj_end, "players", tmp, sizeof(tmp)))
             e.players = std::atoi(tmp);
 
@@ -288,7 +290,10 @@ void ConnectScreen::connect_to_server(const ServerEntry& s) {
     uint16_t port;
     ConnMode mode;
 
-    if (s.ws_port > 0) {
+    if (s.wss_port > 0) {
+        mode = ConnMode::WSS;
+        port = (uint16_t)s.wss_port;
+    } else if (s.ws_port > 0) {
         mode = ConnMode::WS;
         port = (uint16_t)s.ws_port;
     } else {

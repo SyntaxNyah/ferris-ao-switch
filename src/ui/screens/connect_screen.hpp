@@ -11,6 +11,7 @@ struct ServerEntry {
     char description[512];
     int  port     = 27017;
     int  ws_port  = 0;
+    int  wss_port = 0;
     int  players  = 0;
 };
 
