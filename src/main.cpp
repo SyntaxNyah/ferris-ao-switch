@@ -6,7 +6,9 @@
 int main(int /*argc*/, char* /*argv*/[]) {
     // Redirect stderr to SD card so debug prints are visible on Ryujinx/hardware.
     // Check sdmc:/ferris-ao-debug.log after running.
-    std::freopen("sdmc:/ferris-ao-debug.log", "w", stderr);
+    if (std::freopen("sdmc:/ferris-ao-debug.log", "w", stderr))
+        std::setvbuf(stderr, nullptr, _IONBF, 0); // unbuffered — flush on every write
+    std::fprintf(stderr, "ferris-ao starting\n");
 
     // App contains large fixed-size queue buffers (~1.15 MB total) that would
     // overflow the Switch main-thread stack (~1 MB default) if stack-allocated.
