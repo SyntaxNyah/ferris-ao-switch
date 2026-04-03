@@ -93,7 +93,10 @@ void NetworkThread::run() {
             }
         }
         connected_.store(true, std::memory_order_release);
+        std::fprintf(stderr, "[net] connected, mode=%d, entering %s\n",
+            (int)mode_, mode_ == ConnMode::WS ? "ws_loop" : "tcp_loop");
         if (mode_ == ConnMode::WS) ws_loop(); else tcp_loop();
+        std::fprintf(stderr, "[net] loop exited\n");
         raw_conn_.close();
 #else
         // ── TCP / WS: SDL_net fallback (desktop builds without mbedtls) ──────
@@ -236,8 +239,9 @@ void NetworkThread::ws_loop() {
             if (space <= 0) { frame_len = 0; space = (int)sizeof(frame_buf); }
 
             int n = net_recv(frame_buf + frame_len, space);
-            if (n < 0) break;   // error / close
+            if (n < 0) { std::fprintf(stderr, "[ws_loop] net_recv error %d\n", n); break; }
             if (n == 0) { SDL_Delay(1); goto send_outgoing; } // WANT_READ — check sends
+            std::fprintf(stderr, "[ws_loop] recv %d bytes\n", n);
             frame_len += n;
 
             int consumed_total = 0;

@@ -68,6 +68,7 @@ void AOClient::process(InQueue& in) {
             int n = parse_packet(parse_buf_ + consumed, parse_len_ - consumed, pkt);
             if (n == 0) break;
             consumed += n;
+            std::fprintf(stderr, "[ao_client] pkt: %s\n", pkt.header);
             handle(pkt);
         }
         if (consumed > 0) {
