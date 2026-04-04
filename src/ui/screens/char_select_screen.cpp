@@ -7,6 +7,7 @@
 #include "../../net/packet_queue.hpp"
 #include "../../protocol/commands.hpp"
 #include <SDL2/SDL.h>
+#include <cstdio>
 
 namespace ao {
 
@@ -16,15 +17,16 @@ void CharSelectScreen::on_enter() { selected_ = 0; scroll_ = 0; }
 
 void CharSelectScreen::handle_event(const SDL_Event& e) {
     GameState& gs = app_.state();
-    if (gs.char_count == 0) return;
+    int total = gs.char_count;
+    if (total == 0) return;
 
     // Use keyboard for emulator convenience
     if (e.type == SDL_KEYDOWN) {
         switch (e.key.keysym.sym) {
-            case SDLK_RIGHT: selected_ = (selected_ + 1) % gs.char_count; break;
-            case SDLK_LEFT:  selected_ = (selected_ - 1 + gs.char_count) % gs.char_count; break;
-            case SDLK_DOWN:  selected_ = (selected_ + COLS) % gs.char_count; break;
-            case SDLK_UP:    selected_ = (selected_ - COLS + gs.char_count) % gs.char_count; break;
+            case SDLK_RIGHT: selected_ = (selected_ + 1) % total; break;
+            case SDLK_LEFT:  selected_ = (selected_ - 1 + total) % total; break;
+            case SDLK_DOWN:  selected_ = (selected_ + COLS) % total; break;
+            case SDLK_UP:    selected_ = (selected_ - COLS + total) % total; break;
             case SDLK_RETURN:
                 if (!gs.char_taken[selected_]) {
                     char buf[256];
@@ -38,10 +40,10 @@ void CharSelectScreen::handle_event(const SDL_Event& e) {
     }
     if (e.type == SDL_CONTROLLERBUTTONDOWN) {
         switch (e.cbutton.button) {
-            case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: selected_=(selected_+1)%gs.char_count; break;
-            case SDL_CONTROLLER_BUTTON_DPAD_LEFT:  selected_=(selected_-1+gs.char_count)%gs.char_count; break;
-            case SDL_CONTROLLER_BUTTON_DPAD_DOWN:  selected_=(selected_+COLS)%gs.char_count; break;
-            case SDL_CONTROLLER_BUTTON_DPAD_UP:    selected_=(selected_-COLS+gs.char_count)%gs.char_count; break;
+            case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: selected_=(selected_+1)%total; break;
+            case SDL_CONTROLLER_BUTTON_DPAD_LEFT:  selected_=(selected_-1+total)%total; break;
+            case SDL_CONTROLLER_BUTTON_DPAD_DOWN:  selected_=(selected_+COLS)%total; break;
+            case SDL_CONTROLLER_BUTTON_DPAD_UP:    selected_=(selected_-COLS+total)%total; break;
             case SDL_CONTROLLER_BUTTON_A:
                 if (!gs.char_taken[selected_]) {
                     char buf[256];
@@ -57,7 +59,9 @@ void CharSelectScreen::handle_event(const SDL_Event& e) {
 
 void CharSelectScreen::update(uint32_t /*dt*/) {
     GameState& gs = app_.state();
-    if (gs.char_count == 0) return;
+    int total = gs.char_count;
+    if (total == 0) return;
+    if (selected_ >= total) selected_ = total - 1;
     // Keep scroll in sync with selected
     if (selected_ < scroll_) scroll_ = selected_;
     if (selected_ >= scroll_ + PAGE) scroll_ = selected_ - PAGE + 1;
@@ -71,8 +75,14 @@ void CharSelectScreen::render() {
     r.fill_rect({0, 0, Renderer::WIDTH, Renderer::HEIGHT}, {10, 10, 25, 255});
     // Title bar
     r.fill_rect({0, 0, Renderer::WIDTH, 60}, {25, 40, 80, 255});
+    app_.text().draw("Select Character", 20, 18, {220, 220, 255, 255});
 
-    // Character grid (placeholder coloured squares until Phase 4 textures)
+    if (gs.char_count == 0) {
+        app_.text().draw("Waiting for character list...", 40, 100, {160, 160, 160, 255});
+        return;
+    }
+
+    // Character grid
     static constexpr int CELL_W = 140;
     static constexpr int CELL_H = 140;
     static constexpr int START_X = 40;
@@ -94,6 +104,19 @@ void CharSelectScreen::render() {
                     : SDL_Color{30, 30, 55, 255});
             r.fill_rect(cell, bg);
             r.draw_rect(cell, {80, 80, 120, 255});
+
+            // Show character name if known, otherwise slot number
+            const char* name = gs.characters[idx].name;
+            char label[32];
+            if (name[0] != '\0') {
+                std::snprintf(label, sizeof(label), "%.12s", name);
+            } else {
+                std::snprintf(label, sizeof(label), "%d", idx);
+            }
+            SDL_Color tc = gs.char_taken[idx]
+                ? SDL_Color{120, 80, 80, 255}
+                : SDL_Color{200, 200, 220, 255};
+            app_.text().draw(label, x + 6, y + CELL_H - 22, tc);
         }
     }
 }

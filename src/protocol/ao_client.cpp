@@ -446,8 +446,13 @@ void AOClient::on_le(const Packet& p) {
 }
 
 void AOClient::on_chars_check(const Packet& p) {
-    for (int i = 0; i < p.field_count && i < GameState::MAX_CHARS; ++i)
+    int n = p.field_count < GameState::MAX_CHARS ? p.field_count : GameState::MAX_CHARS;
+    for (int i = 0; i < n; ++i)
         state_.char_taken[i] = (p.field(i)[0] == '1');
+    // When SC never arrived (Akashi direct-lobby), use CharsCheck field count
+    // as char_count so CharSelectScreen has slots to display.
+    if (state_.char_count == 0)
+        state_.char_count = n;
 
     // Akashi direct-lobby: CharsCheck arrives as a room broadcast without any
     // prior handshake (no ID/PN/SI/SC/SM/DONE ever sent by the server).
