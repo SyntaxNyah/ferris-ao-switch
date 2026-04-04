@@ -34,6 +34,7 @@ void AOClient::on_disconnected() {
     akashi_pr_seen_       = false;
     akashi_pr_ms_         = 0;
     akashi_decryptor_ms_  = 0;
+    waitsc_start_ms_      = 0;
     // Asset URL lifecycle is managed by App, not here.
     // App::disconnect() / App::connect() call set/clear_asset_url as needed.
 }
@@ -84,19 +85,32 @@ void AOClient::process(InQueue& in) {
         char buf[32];
         send(buf, cmd::rc(buf, sizeof(buf)));
         hs_state_ = HandshakeState::WaitSc;
+        waitsc_start_ms_ = SDL_GetTicks();
     }
 
     // Akashi post-decryptor: some servers send decryptor but then wait for
-    // the client to send RC rather than following up with ID/PN/FL/SI.
-    // If we've been in WaitId for 3 s after an Akashi decryptor, send RC.
+    // the client to drive. If we've been in WaitId for 3 s, send ID+askchaa
+    // to prompt the server to send SI. RC will follow naturally when SI
+    // arrives via on_si(), keeping the proper SI→RC→SC ordering.
     if (hs_state_ == HandshakeState::WaitId && akashi_decryptor_ms_ != 0 &&
         (int32_t)(SDL_GetTicks() - akashi_decryptor_ms_) > 3000) {
-        std::fprintf(stderr, "[ao_client] Akashi: no ID in 3s — sending ID+askchaa+RC\n");
+        std::fprintf(stderr, "[ao_client] Akashi: no ID in 3s — sending ID+askchaa, waiting for SI\n");
         akashi_decryptor_ms_ = 0; // fire once
         char buf1[128]; send(buf1, cmd::id(buf1, sizeof(buf1)));
         char buf2[32];  send(buf2, cmd::askchaa(buf2, sizeof(buf2)));
-        char buf3[32];  send(buf3, cmd::rc(buf3, sizeof(buf3)));
-        hs_state_ = HandshakeState::WaitSc;
+        hs_state_ = HandshakeState::WaitSi;
+    }
+
+    // Akashi WaitSc timeout: if SC hasn't arrived within 8 s of entering WaitSc,
+    // the server won't send it. Force InLobby so the user reaches the char select
+    // screen with whatever char_count was populated by CharsCheck.
+    if (hs_state_ == HandshakeState::WaitSc && waitsc_start_ms_ != 0 &&
+        (int32_t)(SDL_GetTicks() - waitsc_start_ms_) > 8000) {
+        std::fprintf(stderr, "[ao_client] Akashi: SC never arrived after 8s — forcing InLobby\n");
+        waitsc_start_ms_ = 0;
+        state_.in_lobby  = true;
+        state_.connected = true;
+        hs_state_ = HandshakeState::InLobby;
     }
 
     static InPacket raw; // static: 128 KB on the call stack is too large
@@ -255,6 +269,7 @@ void AOClient::on_si(const Packet& p) {
         char buf[32];
         send(buf, cmd::rc(buf, sizeof(buf)));
         hs_state_ = HandshakeState::WaitSc;
+        waitsc_start_ms_ = SDL_GetTicks();
     }
 }
 
@@ -483,6 +498,7 @@ void AOClient::on_chars_check(const Packet& p) {
         char buf2[32];
         send(buf2, cmd::rc(buf2, sizeof(buf2)));
         hs_state_ = HandshakeState::WaitSc;
+        waitsc_start_ms_ = SDL_GetTicks();
     } else if (hs_state_ == HandshakeState::WaitSc) {
         // CharsCheck arrived while waiting for SC (char list).
         // This is a broadcast that often arrives before SC — just record the

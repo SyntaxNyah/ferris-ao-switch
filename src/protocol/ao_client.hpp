@@ -90,8 +90,10 @@ private:
     bool     akashi_pr_seen_       = false;
     uint32_t akashi_pr_ms_         = 0;  // SDL_GetTicks() when last PR/PU was seen
     // After Akashi decryptor, if ID doesn't arrive within 3s the server wants
-    // us to drive — send RC ourselves and skip to WaitSc.
+    // us to drive — send ID+askchaa to prompt SI.
     uint32_t akashi_decryptor_ms_  = 0;  // 0 = not waiting
+    // Timestamp when we entered WaitSc; used to force InLobby if SC never arrives.
+    uint32_t waitsc_start_ms_      = 0;  // 0 = not in WaitSc
 };
 
 } // namespace ao
