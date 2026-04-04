@@ -433,15 +433,25 @@ void AOClient::on_chars_check(const Packet& p) {
     for (int i = 0; i < p.field_count && i < GameState::MAX_CHARS; ++i)
         state_.char_taken[i] = (p.field(i)[0] == '1');
 
-    // Akashi direct-lobby mode: CharsCheck arrives before any handshake.
-    // The server skips decryptor/ID/SI entirely. Request the character list
-    // now so the normal SC→RM→SM→RD→DONE chain can complete the handshake.
+    // Akashi direct-lobby: CharsCheck arrives as a room broadcast without any
+    // prior handshake (no ID/PN/SI/SC/SM/DONE ever sent by the server).
     if (hs_state_ == HandshakeState::WaitDecryptor ||
-        hs_state_ == HandshakeState::WaitId) {
-        std::fprintf(stderr, "[ao_client] Akashi direct: CharsCheck before handshake — requesting chars\n");
-        char buf[32];
-        send(buf, cmd::rc(buf, sizeof(buf)));
+        hs_state_ == HandshakeState::WaitId   ||
+        hs_state_ == HandshakeState::WaitSi) {
+        // First CharsCheck: identify ourselves and ask for the char list.
+        std::fprintf(stderr, "[ao_client] Akashi direct: CharsCheck pre-SC — sending ID+RC\n");
+        char buf[128];
+        send(buf, cmd::id(buf, sizeof(buf)));
+        char buf2[32];
+        send(buf2, cmd::rc(buf2, sizeof(buf2)));
         hs_state_ = HandshakeState::WaitSc;
+    } else if (hs_state_ == HandshakeState::WaitSc) {
+        // Second CharsCheck: RC went unanswered — this server never sends SC.
+        // Skip the rest of the handshake and enter the lobby with what we have.
+        std::fprintf(stderr, "[ao_client] Akashi direct: RC unanswered, forcing InLobby\n");
+        state_.in_lobby  = true;
+        state_.connected = true;
+        hs_state_ = HandshakeState::InLobby;
     }
 }
 
