@@ -85,8 +85,8 @@ void CharSelectScreen::update(uint32_t /*dt*/) {
 
     // Decode up to 8 prefetched icons per frame into the texture cache
     int decoded = 0;
-    int page_start = (scroll_ / PAGE) * PAGE;
-    int page_end   = page_start + PAGE;
+    int page_start = scroll_;
+    int page_end   = scroll_ + PAGE;
     if (page_end > total) page_end = total;
     for (int i = page_start; i < page_end && decoded < 8; ++i) {
         if (!gs.characters[i].name[0]) continue;
@@ -112,6 +112,18 @@ void CharSelectScreen::render() {
     // Title bar
     r.fill_rect({0, 0, Renderer::WIDTH, 60}, {25, 40, 80, 255});
     app_.text().draw("Select Character", 20, 18, {220, 220, 255, 255});
+
+    // Asset streaming status (bottom bar)
+    r.fill_rect({0, 690, Renderer::WIDTH, 30}, {15, 15, 30, 255});
+    if (AssetManager::has_asset_url()) {
+        char hint[300];
+        std::snprintf(hint, sizeof(hint), "Streaming assets from: %s", AssetManager::asset_url());
+        app_.text().draw(hint, 10, 697, {80, 180, 80, 255});
+    } else {
+        app_.text().draw(
+            "No asset URL — icons need servers.cfg or server ASS packet",
+            10, 697, {140, 100, 60, 255});
+    }
 
     if (gs.char_count == 0) {
         app_.text().draw("Waiting for character list...", 40, 100, {160, 160, 160, 255});

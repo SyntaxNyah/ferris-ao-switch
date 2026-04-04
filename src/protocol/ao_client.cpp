@@ -164,16 +164,21 @@ void AOClient::handle(const Packet& pkt) {
 
 void AOClient::on_decryptor(const Packet& /*p*/) {
     if (akashi_pr_seen_) {
-        // Akashi direct-lobby: server never sends ID/PN/SI/SC/SM/DONE and kicks
-        // on unexpected packets like RC/RM. Just enter the lobby silently.
-        // char_count will be populated when CharsCheck broadcasts arrive.
-        std::fprintf(stderr, "[ao_client] Akashi direct-lobby: entering lobby on decryptor\n");
+        // Akashi direct-lobby: server sent PR/PU before decryptor.
+        // Open the lobby UI immediately so CharSelectScreen shows "Waiting...",
+        // but continue the standard handshake (WaitId) so the server's ID
+        // response triggers on_id, which sends our ID back and proceeds to
+        // SI→RC→SC, populating the character list.
+        //
+        // Setting InLobby here was the bug: on_id only handles WaitId/WaitDecryptor,
+        // so the server's ID was silently dropped and SC never arrived.
+        std::fprintf(stderr, "[ao_client] Akashi: decryptor — opening lobby UI, continuing handshake for char list\n");
         state_.in_lobby  = true;
         state_.connected = true;
-        hs_state_ = HandshakeState::InLobby;
+        akashi_pr_seen_  = false; // prevent the 5-second RC timer from firing
+        hs_state_ = HandshakeState::WaitId; // same as standard path from here
     } else {
         // Standard servers: HI already sent, wait for server's ID packet.
-        // Do NOT resend HI — double HI causes KB/kick on tsuserver.
         hs_state_ = HandshakeState::WaitId;
     }
 }
