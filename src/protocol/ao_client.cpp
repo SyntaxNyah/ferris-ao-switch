@@ -164,15 +164,23 @@ void AOClient::handle(const Packet& pkt) {
 
 void AOClient::on_decryptor(const Packet& /*p*/) {
     // Server says NOENCRYPT — HI was already sent in on_connected().
-    // For Akashi servers that send PR/PU before decryptor: the server likely
-    // ignored our premature HI and is now waiting for HI in response to
-    // decryptor. Resend HI only in that case (akashi_pr_seen_ is the guard).
-    // Do NOT resend unconditionally — double HI causes KB/kick on tsuserver.
     if (akashi_pr_seen_) {
+        // Akashi direct-lobby: premature HI (from on_connected) was likely
+        // ignored because the server wasn't ready. Resend HI, then
+        // immediately send ID+askchaa — the server never sends us its own ID
+        // packet in this mode, so don't wait for WaitId; skip to WaitSi.
         char buf[256];
         send(buf, cmd::hi(buf, sizeof(buf), hdid_));
+        char buf2[128];
+        send(buf2, cmd::id(buf2, sizeof(buf2)));
+        char buf3[32];
+        send(buf3, cmd::askchaa(buf3, sizeof(buf3)));
+        hs_state_ = HandshakeState::WaitSi;
+    } else {
+        // Standard servers: we already sent HI; wait for server's ID packet.
+        // Do NOT resend HI here — double HI causes KB/kick on tsuserver.
+        hs_state_ = HandshakeState::WaitId;
     }
-    hs_state_ = HandshakeState::WaitId;
 }
 
 void AOClient::on_id(const Packet& p) {
