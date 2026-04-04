@@ -481,30 +481,12 @@ void AOClient::on_chars_check(const Packet& p) {
     int n = p.field_count < GameState::MAX_CHARS ? p.field_count : GameState::MAX_CHARS;
     for (int i = 0; i < n; ++i)
         state_.char_taken[i] = (p.field(i)[0] == '1');
-    // When SC never arrived (Akashi direct-lobby), use CharsCheck field count
-    // as char_count so CharSelectScreen has slots to display.
+    // When SC never arrived, use CharsCheck field count as char_count so
+    // CharSelectScreen has slots to display.
     if (state_.char_count == 0)
         state_.char_count = n;
-
-    // Akashi direct-lobby: CharsCheck arrives as a room broadcast without any
-    // prior handshake (no ID/PN/SI/SC/SM/DONE ever sent by the server).
-    if (hs_state_ == HandshakeState::WaitDecryptor ||
-        hs_state_ == HandshakeState::WaitId   ||
-        hs_state_ == HandshakeState::WaitSi) {
-        // First CharsCheck: identify ourselves and ask for the char list.
-        std::fprintf(stderr, "[ao_client] Akashi direct: CharsCheck pre-SC — sending ID+RC\n");
-        char buf[128];
-        send(buf, cmd::id(buf, sizeof(buf)));
-        char buf2[32];
-        send(buf2, cmd::rc(buf2, sizeof(buf2)));
-        hs_state_ = HandshakeState::WaitSc;
-        waitsc_start_ms_ = SDL_GetTicks();
-    } else if (hs_state_ == HandshakeState::WaitSc) {
-        // CharsCheck arrived while waiting for SC (char list).
-        // This is a broadcast that often arrives before SC — just record the
-        // taken flags and stay in WaitSc so SC can still populate char names.
-        std::fprintf(stderr, "[ao_client] CharsCheck in WaitSc — recording taken flags, waiting for SC\n");
-    }
+    // CharsCheck is a broadcast — never trigger handshake actions from here.
+    // The handshake is driven by on_decryptor/on_id/on_si and their timers.
 }
 
 void AOClient::on_pv(const Packet& p) {
