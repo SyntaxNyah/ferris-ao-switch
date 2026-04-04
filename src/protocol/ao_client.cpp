@@ -163,22 +163,10 @@ void AOClient::handle(const Packet& pkt) {
 // ── Handshake handlers ─────────────────────────────────────────────────────────
 
 void AOClient::on_decryptor(const Packet& /*p*/) {
-    // Server says NOENCRYPT — HI was already sent in on_connected().
-    if (akashi_pr_seen_) {
-        // Akashi direct-lobby: HI was already sent (and processed) in
-        // on_connected() — the server responded with the PR/PU+decryptor burst.
-        // Do NOT resend HI (double-HI resets server state). Just send ID+askchaa
-        // and jump to WaitSi — the server skips its own ID packet in this mode.
-        char buf2[128];
-        send(buf2, cmd::id(buf2, sizeof(buf2)));
-        char buf3[32];
-        send(buf3, cmd::askchaa(buf3, sizeof(buf3)));
-        hs_state_ = HandshakeState::WaitSi;
-    } else {
-        // Standard servers: we already sent HI; wait for server's ID packet.
-        // Do NOT resend HI here — double HI causes KB/kick on tsuserver.
-        hs_state_ = HandshakeState::WaitId;
-    }
+    // HI was already sent in on_connected(). Just wait for the server's ID.
+    // Do NOT resend HI here — double HI causes KB/kick on tsuserver.
+    // Do NOT send askchaa here — it must follow PN (see on_pn).
+    hs_state_ = HandshakeState::WaitId;
 }
 
 void AOClient::on_id(const Packet& p) {
@@ -191,17 +179,24 @@ void AOClient::on_id(const Packet& p) {
     // Accept ID from both WaitId and WaitDecryptor — some servers skip decryptor.
     if (hs_state_ == HandshakeState::WaitId ||
         hs_state_ == HandshakeState::WaitDecryptor) {
+        // Send our client ID. Do NOT send askchaa yet — wait for PN first
+        // (webAO sends askchaa in response to PN, not ID).
         char buf[128];
         send(buf, cmd::id(buf, sizeof(buf)));
-        char buf2[32];
-        send(buf2, cmd::askchaa(buf2, sizeof(buf2)));
         hs_state_ = HandshakeState::WaitSi;
     }
 }
 
 void AOClient::on_pn(const Packet& /*p*/) {
-    // Player count / server info packet — informational only.
-    // askchaa was already sent in on_id(), so no action needed here.
+    // PN is the server's "here's the player count" packet. Per webAO's protocol,
+    // askchaa is sent in response to PN (not to ID). Send it now if we're past
+    // the initial ID exchange and still waiting for SI.
+    if (hs_state_ == HandshakeState::WaitSi ||
+        hs_state_ == HandshakeState::WaitId) {
+        char buf[32];
+        send(buf, cmd::askchaa(buf, sizeof(buf)));
+        hs_state_ = HandshakeState::WaitSi;
+    }
 }
 
 void AOClient::on_fl(const Packet& /*p*/) {
