@@ -3,6 +3,7 @@
 #include "../../render/renderer.hpp"
 #include "../../input/virtual_keyboard.hpp"
 #include "../../net/http_fetch.hpp"
+#include "../../assets/asset_manager.hpp"
 #include <SDL2/SDL.h>
 #include <cstdio>
 #include <cstring>
@@ -301,6 +302,17 @@ void ConnectScreen::connect_to_server(const ServerEntry& s) {
         port = (uint16_t)s.port;
     }
 
+    // Pre-set asset URL from the server hostname using the Akashi/webAO convention.
+    // Akashi servers that go straight to direct-lobby never send an ASS packet,
+    // so we construct it here. on_ass() will override if the server sends its own.
+    if (mode == ConnMode::WSS || mode == ConnMode::WS) {
+        char asset_url[512];
+        std::snprintf(asset_url, sizeof(asset_url), "%s://%s/webfiles",
+            mode == ConnMode::WSS ? "https" : "http", host);
+        AssetManager::set_asset_url(asset_url);
+        std::fprintf(stderr, "[connect] asset URL: %s\n", asset_url);
+    }
+
     std::snprintf(status_, sizeof(status_), "Connecting to %s...", s.name);
     app_.connect(host, port, mode);
 }
@@ -314,6 +326,14 @@ void ConnectScreen::connect_direct() {
     uint16_t port;
     ConnMode mode;
     parse_url(host_, host, sizeof(host), &port, &mode);
+
+    if (mode == ConnMode::WSS || mode == ConnMode::WS) {
+        char asset_url[512];
+        std::snprintf(asset_url, sizeof(asset_url), "%s://%s/webfiles",
+            mode == ConnMode::WSS ? "https" : "http", host);
+        AssetManager::set_asset_url(asset_url);
+        std::fprintf(stderr, "[connect] asset URL: %s\n", asset_url);
+    }
 
     std::snprintf(status_, sizeof(status_), "Connecting to %s:%u...", host, (unsigned)port);
     app_.connect(host, port, mode);
