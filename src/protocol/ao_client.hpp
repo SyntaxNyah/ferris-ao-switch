@@ -84,6 +84,11 @@ private:
 
     // Handshake timeout — if we don't reach InLobby within 15s, disconnect.
     uint32_t hs_start_ms_ = 0;
+
+    // Akashi direct-lobby: track when last PR/PU arrived so we can send RC
+    // proactively if CharsCheck never comes.
+    bool     akashi_pr_seen_ = false;
+    uint32_t akashi_pr_ms_   = 0;   // SDL_GetTicks() when last PR/PU was seen
 };
 
 } // namespace ao

@@ -306,6 +306,11 @@ void NetworkThread::extract_packets() {
                 std::memcpy(pkt.data, recv_buf_ + start, pkt_len);
                 pkt.data[pkt_len] = '\0';
                 pkt.len = pkt_len;
+                // Log the first token (header) of each extracted packet so we
+                // can diagnose dropped/missing packets from the network thread.
+                const char* hash = std::strchr(pkt.data, '#');
+                int hlen = hash ? (int)(hash - pkt.data) : pkt_len;
+                std::fprintf(stderr, "[net] extracted: %.*s\n", hlen, pkt.data);
                 in_queue_.push(pkt);
             }
             start = i + 1;

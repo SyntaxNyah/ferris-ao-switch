@@ -16,7 +16,9 @@ void AOClient::on_connected(const char* hdid) {
     std::strncpy(hdid_, hdid, sizeof(hdid_) - 1);
     hs_state_ = HandshakeState::WaitDecryptor;
     parse_len_ = 0;
-    hs_start_ms_ = SDL_GetTicks();
+    hs_start_ms_   = SDL_GetTicks();
+    akashi_pr_seen_ = false;
+    akashi_pr_ms_   = 0;
     // Send HI immediately — some servers skip decryptor and go straight to ID.
     // Traditional servers send decryptor first; on_decryptor() will send HI again
     // (redundant but harmless) and transition us to WaitId.
@@ -29,6 +31,8 @@ void AOClient::on_disconnected() {
     state_.connected  = false;
     state_.in_lobby   = false;
     parse_len_ = 0;
+    akashi_pr_seen_ = false;
+    akashi_pr_ms_   = 0;
     AssetManager::clear_asset_url();
 }
 
@@ -65,6 +69,19 @@ void AOClient::process(InQueue& in) {
         disc.len = (int)std::strlen(disc.data);
         in.push(disc);
         return;
+    }
+
+    // Akashi direct-lobby: if we've seen PR/PU but no handshake progress for
+    // 5 s, send RC directly to request the character list. This handles servers
+    // that skip decryptor/ID/SI/CharsCheck entirely and just wait for the
+    // client to ask for data.
+    if (hs_state_ == HandshakeState::WaitDecryptor && akashi_pr_seen_ &&
+        (int32_t)(SDL_GetTicks() - akashi_pr_ms_) > 5000) {
+        std::fprintf(stderr, "[ao_client] Akashi direct: PR dump settled, requesting chars\n");
+        akashi_pr_seen_ = false; // fire once
+        char buf[32];
+        send(buf, cmd::rc(buf, sizeof(buf)));
+        hs_state_ = HandshakeState::WaitSc;
     }
 
     static InPacket raw; // static: 128 KB on the call stack is too large
@@ -479,11 +496,18 @@ void AOClient::on_fa(const Packet& p) {
 
 void AOClient::on_pr(const Packet& /*p*/) {
     // PR#uid#type#% — player roster add/remove broadcast. Informational only.
+    // In WaitDecryptor state this signals Akashi direct-lobby mode.
+    if (hs_state_ == HandshakeState::WaitDecryptor) {
+        akashi_pr_seen_ = true;
+        akashi_pr_ms_   = SDL_GetTicks();
+    }
 }
 
 void AOClient::on_pu(const Packet& /*p*/) {
     // PU#uid#data_type#value#% — player state update (name/char/showname/area).
-    // Informational only; we don't display a player list yet.
+    // Keep the PR/PU arrival timer fresh so we don't fire RC mid-dump.
+    if (hs_state_ == HandshakeState::WaitDecryptor && akashi_pr_seen_)
+        akashi_pr_ms_ = SDL_GetTicks();
 }
 
 void AOClient::on_ti(const Packet& /*p*/) {
