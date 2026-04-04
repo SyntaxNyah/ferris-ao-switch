@@ -12,8 +12,17 @@
 #include "../../assets/extensions_config.hpp"
 #include <SDL2/SDL.h>
 #include <cstdio>
+#include <cctype>
 
 namespace ao {
+
+// webAO lowercases character names in asset paths: characters/${name.toLowerCase()}/...
+static void lower_copy(char* dst, const char* src, int cap) {
+    int i = 0;
+    for (; src[i] && i < cap - 1; ++i)
+        dst[i] = (char)std::tolower((unsigned char)src[i]);
+    dst[i] = '\0';
+}
 
 CharSelectScreen::CharSelectScreen(App& app) : Screen(app) {}
 
@@ -26,10 +35,11 @@ void CharSelectScreen::on_enter() {
     int end = gs.char_count < PAGE ? gs.char_count : PAGE;
     for (int i = 0; i < end; ++i) {
         if (!gs.characters[i].name[0]) continue;
+        char lname[64]; lower_copy(lname, gs.characters[i].name, sizeof(lname));
         for (int e = 0; e < ec.charicon_count; ++e) {
             char path[256];
             std::snprintf(path, sizeof(path), "characters/%s/char_icon%s",
-                gs.characters[i].name, ec.charicon[e]);
+                lname, ec.charicon[e]);
             app_.asset_stream().prefetch(path);
         }
     }
@@ -96,11 +106,12 @@ void CharSelectScreen::update(uint32_t /*dt*/) {
     if (page_end > total) page_end = total;
     for (int i = page_start; i < page_end && decoded < 8; ++i) {
         if (!gs.characters[i].name[0]) continue;
+        char lname[64]; lower_copy(lname, gs.characters[i].name, sizeof(lname));
         bool already_cached = false;
         for (int e = 0; e < ec.charicon_count; ++e) {
             char path[256];
             std::snprintf(path, sizeof(path), "characters/%s/char_icon%s",
-                gs.characters[i].name, ec.charicon[e]);
+                lname, ec.charicon[e]);
             if (app_.tex_cache().peek(path)) { already_cached = true; break; }
         }
         if (already_cached) continue;
@@ -109,7 +120,7 @@ void CharSelectScreen::update(uint32_t /*dt*/) {
         for (int e = 0; e < ec.charicon_count && !decoded_one; ++e) {
             char path[256];
             std::snprintf(path, sizeof(path), "characters/%s/char_icon%s",
-                gs.characters[i].name, ec.charicon[e]);
+                lname, ec.charicon[e]);
             if (AssetManager::has_prefetch(path)) {
                 app_.tex_cache().get(app_.renderer().raw(), path);
                 ++decoded;
@@ -173,12 +184,12 @@ void CharSelectScreen::render() {
             // Try to draw character icon — check each extension in order
             if (gs.characters[idx].name[0]) {
                 const ExtensionsConfig& ec2 = ExtensionsConfig::get();
+                char lname[64]; lower_copy(lname, gs.characters[idx].name, sizeof(lname));
                 SDL_Texture* icon = nullptr;
                 for (int e = 0; e < ec2.charicon_count && !icon; ++e) {
                     char icon_path[256];
                     std::snprintf(icon_path, sizeof(icon_path),
-                        "characters/%s/char_icon%s",
-                        gs.characters[idx].name, ec2.charicon[e]);
+                        "characters/%s/char_icon%s", lname, ec2.charicon[e]);
                     icon = app_.tex_cache().peek(icon_path);
                 }
                 if (icon) {

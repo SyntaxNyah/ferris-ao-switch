@@ -195,6 +195,42 @@ void App::update(uint32_t dt_ms) {
                 fallback_asset_url_);
         }
         ExtensionsConfig::fetch_and_apply();
+        // If SC never populated the character list (Akashi servers), fetch
+        // characters.json from the asset base — a JSON array of name strings,
+        // e.g. ["Phoenix","Maya",...].  Same format webAO uses.
+        if (game_state_->char_count == 0 && AssetManager::has_asset_url()) {
+            int size = 0;
+            uint8_t* data = AssetManager::fetch_bytes("characters.json", &size);
+            if (data) {
+                std::fprintf(stderr, "[app] Loading character list from characters.json\n");
+                int count = 0;
+                // Parse JSON array of strings: scan for each "value" between [ and ]
+                const char* p = reinterpret_cast<const char*>(data);
+                const char* end = p + size;
+                // skip to '['
+                while (p < end && *p != '[') ++p;
+                while (p < end && count < GameState::MAX_CHARS) {
+                    // find next '"'
+                    while (p < end && *p != '"' && *p != ']') ++p;
+                    if (p >= end || *p == ']') break;
+                    ++p; // skip opening '"'
+                    const char* name_start = p;
+                    while (p < end && *p != '"') ++p;
+                    int len = (int)(p - name_start);
+                    if (len > 0 && len < (int)sizeof(game_state_->characters[0].name)) {
+                        std::memcpy(game_state_->characters[count].name, name_start, len);
+                        game_state_->characters[count].name[len] = '\0';
+                        ++count;
+                    }
+                    if (p < end) ++p; // skip closing '"'
+                }
+                game_state_->char_count = count;
+                SDL_free(data);
+                std::fprintf(stderr, "[app] characters.json: loaded %d characters\n", count);
+            } else {
+                std::fprintf(stderr, "[app] characters.json not found\n");
+            }
+        }
         push_screen(new CharSelectScreen(*this));
     }
 
