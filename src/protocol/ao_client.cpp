@@ -178,23 +178,26 @@ void AOClient::handle(const Packet& pkt) {
 // ── Handshake handlers ─────────────────────────────────────────────────────────
 
 void AOClient::on_decryptor(const Packet& /*p*/) {
+    // Always re-send HI in response to decryptor.
+    // The early HI sent by on_connected() may have arrived before the server
+    // was ready (e.g. Akashi sends PR/PU flood before decryptor, so the early
+    // HI is sent pre-handshake and silently ignored). Re-sending here is
+    // harmless for servers that already processed the early one.
+    char buf[256];
+    send(buf, cmd::hi(buf, sizeof(buf), hdid_));
+
     if (akashi_pr_seen_) {
         // Akashi direct-lobby: server sent PR/PU before decryptor.
         // Open the lobby UI immediately so CharSelectScreen shows "Waiting...",
-        // but continue the standard handshake (WaitId) so the server's ID
-        // response triggers on_id, which sends our ID back and proceeds to
-        // SI→RC→SC, populating the character list.
-        //
-        // Setting InLobby here was the bug: on_id only handles WaitId/WaitDecryptor,
-        // so the server's ID was silently dropped and SC never arrived.
-        std::fprintf(stderr, "[ao_client] Akashi: decryptor — opening lobby UI, continuing handshake for char list\n");
+        // then wait for the server's ID response to complete the char list.
+        std::fprintf(stderr, "[ao_client] Akashi: decryptor — re-sent HI, opening lobby UI\n");
         state_.in_lobby      = true;
         state_.connected     = true;
         akashi_pr_seen_      = false; // prevent the 5-second PR timer from firing
         akashi_decryptor_ms_ = SDL_GetTicks(); // start 3-second WaitId fallback
         hs_state_ = HandshakeState::WaitId;
     } else {
-        // Standard servers: HI already sent, wait for server's ID packet.
+        // Standard servers: re-sent HI, wait for server's ID packet.
         hs_state_ = HandshakeState::WaitId;
     }
 }
