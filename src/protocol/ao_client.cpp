@@ -165,12 +165,10 @@ void AOClient::handle(const Packet& pkt) {
 void AOClient::on_decryptor(const Packet& /*p*/) {
     // Server says NOENCRYPT — HI was already sent in on_connected().
     if (akashi_pr_seen_) {
-        // Akashi direct-lobby: premature HI (from on_connected) was likely
-        // ignored because the server wasn't ready. Resend HI, then
-        // immediately send ID+askchaa — the server never sends us its own ID
-        // packet in this mode, so don't wait for WaitId; skip to WaitSi.
-        char buf[256];
-        send(buf, cmd::hi(buf, sizeof(buf), hdid_));
+        // Akashi direct-lobby: HI was already sent (and processed) in
+        // on_connected() — the server responded with the PR/PU+decryptor burst.
+        // Do NOT resend HI (double-HI resets server state). Just send ID+askchaa
+        // and jump to WaitSi — the server skips its own ID packet in this mode.
         char buf2[128];
         send(buf2, cmd::id(buf2, sizeof(buf2)));
         char buf3[32];
