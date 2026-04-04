@@ -187,6 +187,12 @@ void App::update(uint32_t dt_ms) {
     // Detect transition to in_lobby (DONE packet received) → push CharSelectScreen
     if (game_state_ && game_state_->in_lobby && !was_in_lobby_) {
         was_in_lobby_ = true;
+        // Apply the fallback asset URL only if the server never sent ASS
+        if (!AssetManager::has_asset_url() && fallback_asset_url_[0] != '\0') {
+            AssetManager::set_asset_url(fallback_asset_url_);
+            std::fprintf(stderr, "[app] No ASS received — using fallback URL: %s\n",
+                fallback_asset_url_);
+        }
         push_screen(new CharSelectScreen(*this));
     }
 
@@ -241,20 +247,22 @@ bool App::connect(const char* host, uint16_t port, ConnMode mode) {
     disconnect();
 
     // Reset game state for a fresh connection
-    *game_state_  = GameState();
-    was_in_lobby_ = false;
+    *game_state_       = GameState();
+    was_in_lobby_      = false;
+    fallback_asset_url_[0] = '\0';
 
-    // For WS/WSS servers, derive the asset base URL from the host if nothing
-    // was configured via servers.cfg or a previous session.  This mirrors
-    // exactly how webAO works: assets live at the same origin as the socket.
-    // The server's ASS packet will override this if it provides a different URL.
-    if (!AssetManager::has_asset_url() &&
-        (mode == ConnMode::WS || mode == ConnMode::WSS)) {
-        char url[512];
-        std::snprintf(url, sizeof(url), "%s://%s/base",
+    // For WS/WSS servers, prepare a fallback asset URL derived from the host.
+    // We do NOT set it immediately — instead we wait until in_lobby is true
+    // (handshake complete) and only apply it if the server never sent an ASS
+    // packet with the real URL.  This prevents the wrong subdomain URL from
+    // polluting the failure cache before ASS arrives.
+    fallback_asset_url_[0] = '\0';
+    if (mode == ConnMode::WS || mode == ConnMode::WSS) {
+        std::snprintf(fallback_asset_url_, sizeof(fallback_asset_url_),
+            "%s://%s/base",
             (mode == ConnMode::WSS) ? "https" : "http", host);
-        AssetManager::set_asset_url(url);
-        std::fprintf(stderr, "[app] WS asset URL auto-set: %s\n", url);
+        std::fprintf(stderr, "[app] WS asset fallback URL prepared: %s\n",
+            fallback_asset_url_);
     }
 
     // Create fresh network objects

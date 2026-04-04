@@ -85,6 +85,9 @@ private:
     char           username_[64]  = "Switch";
     bool           was_in_lobby_  = false;  // edge detection for CharSelectScreen push
     char           pending_error_[256] = {};
+    // Fallback asset URL applied only if server never sends an ASS packet.
+    // Set at connect() time, consumed once in_lobby becomes true.
+    char           fallback_asset_url_[512] = {};
 
     Screen* screen_stack_[SCREEN_STACK_MAX] = {};
     int     screen_count_ = 0;

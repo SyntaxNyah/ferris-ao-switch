@@ -223,7 +223,7 @@ void AOClient::on_ass(const Packet& p) {
     const char* url = p.field(0);
     if (url && url[0] != '\0') {
         AssetManager::set_asset_url(url);
-        std::fprintf(stdout, "[ao_client] ASS asset URL: %s\n", url);
+        std::fprintf(stderr, "[ao_client] ASS asset URL: %s\n", url);
     } else {
         AssetManager::clear_asset_url();
     }
