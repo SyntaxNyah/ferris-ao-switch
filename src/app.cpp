@@ -108,6 +108,8 @@ bool App::init() {
     // Init text renderer — non-fatal if font is missing (text renders as nothing).
     text_renderer_.init(renderer_->raw(), "fonts/noto_sans.ttf", 18);
 
+    asset_stream_.start();
+
     running_ = true;
     return true;
 }

@@ -55,6 +55,10 @@ public:
     // data must be SDL_malloc'd — AssetManager takes ownership.
     static void store_prefetch(const char* relative, uint8_t* data, int size);
 
+    // Non-consuming peek: returns true if the prefetch cache contains this path.
+    // Does NOT consume the entry — subsequent fetch_bytes will still find it.
+    static bool has_prefetch(const char* relative);
+
     // Convenience helpers
     static const char* user_base();   // "sdmc:/switch/ferris-ao/base" (or "base" on desktop)
     static const char* romfs_base();  // "romfs:" (or "romfs" on desktop)

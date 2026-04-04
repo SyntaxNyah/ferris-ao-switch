@@ -62,38 +62,7 @@ static ParsedUrl parse_url(const char* url) {
     return r;
 }
 
-// ── Socket helpers ────────────────────────────────────────────────────────────
-
-// Read exactly `want` bytes. Returns bytes actually read (< want on timeout/close).
-static int recv_exact(TCPsocket sock, SDLNet_SocketSet set,
-                      char* buf, int want, int timeout_ms) {
-    int got = 0;
-    while (got < want) {
-        if (SDLNet_CheckSockets(set, timeout_ms) <= 0) break;
-        int n = SDLNet_TCP_Recv(sock, buf + got, want - got);
-        if (n <= 0) break;
-        got += n;
-    }
-    return got;
-}
-
-// Read one line (up to CRLF). Strips the CRLF. Returns length or -1 on error.
-static int recv_line(TCPsocket sock, SDLNet_SocketSet set,
-                     char* buf, int cap, int timeout_ms) {
-    int len = 0;
-    while (len < cap - 1) {
-        if (SDLNet_CheckSockets(set, timeout_ms) <= 0) return -1;
-        char c;
-        if (SDLNet_TCP_Recv(sock, &c, 1) != 1) return -1;
-        if (c == '\n') {
-            if (len > 0 && buf[len - 1] == '\r') --len;
-            buf[len] = '\0';
-            return len;
-        }
-        buf[len++] = c;
-    }
-    return -1;
-}
+// ── Helper ────────────────────────────────────────────────────────────────────
 
 // Case-insensitive prefix check; sets *val to the trimmed value after the colon.
 static bool header_match(const char* line, const char* name, const char** val) {
@@ -110,38 +79,105 @@ static bool header_match(const char* line, const char* name, const char** val) {
     return true;
 }
 
-// ── Chunked transfer decoder ──────────────────────────────────────────────────
+// ── Buffered reader — plain TCP ───────────────────────────────────────────────
+struct RecvBuf {
+    TCPsocket        sock;
+    SDLNet_SocketSet set;
+    int              timeout_ms;
+    char             buf[8192];
+    int              pos    = 0;
+    int              filled = 0;
 
-static bool read_chunked(TCPsocket sock, SDLNet_SocketSet set,
-                         uint8_t** out, int* out_size, int timeout_ms) {
+    bool refill() {
+        pos = filled = 0;
+        if (SDLNet_CheckSockets(set, timeout_ms) <= 0) return false;
+        int n = SDLNet_TCP_Recv(sock, buf, (int)sizeof(buf));
+        if (n <= 0) return false;
+        filled = n;
+        return true;
+    }
+    int read_line(char* out, int cap) {
+        int len = 0;
+        while (len < cap - 1) {
+            if (pos >= filled && !refill()) return -1;
+            char c = buf[pos++];
+            if (c == '\n') {
+                if (len > 0 && out[len - 1] == '\r') --len;
+                out[len] = '\0';
+                return len;
+            }
+            out[len++] = c;
+        }
+        return -1;
+    }
+    int read_exact(char* dst, int want) {
+        int got = 0;
+        while (got < want) {
+            if (pos >= filled && !refill()) break;
+            int avail = filled - pos;
+            int take  = (avail < want - got) ? avail : (want - got);
+            std::memcpy(dst + got, buf + pos, (size_t)take);
+            pos += take;
+            got += take;
+        }
+        return got;
+    }
+    // Read until server closes connection. Returns SDL_malloc'd buf or nullptr.
+    uint8_t* read_until_close(int* out_size) {
+        int   cap  = 65536;
+        auto* body = (uint8_t*)SDL_malloc(cap);
+        if (!body) return nullptr;
+        int total = 0;
+        // drain already-buffered bytes
+        if (pos < filled) {
+            int avail = filled - pos;
+            std::memcpy(body, buf + pos, (size_t)avail);
+            total = avail;
+            pos = filled = 0;
+        }
+        while (total < HTTP_MAX_BODY) {
+            if (SDLNet_CheckSockets(set, timeout_ms) <= 0) break;
+            if (total + 65536 > cap) {
+                cap *= 2;
+                auto* nb = (uint8_t*)SDL_realloc(body, cap);
+                if (!nb) break;
+                body = nb;
+            }
+            int n = SDLNet_TCP_Recv(sock, body + total, 65536);
+            if (n <= 0) break;
+            total += n;
+        }
+        if (total > 0) { *out_size = total; return body; }
+        SDL_free(body); return nullptr;
+    }
+};
+
+// ── Chunked transfer decoder (plain TCP) ─────────────────────────────────────
+
+static bool read_chunked(RecvBuf& rb, uint8_t** out, int* out_size) {
     int  cap  = 65536;
-    auto* buf = (uint8_t*)SDL_malloc(cap);
-    if (!buf) return false;
+    auto* body = (uint8_t*)SDL_malloc(cap);
+    if (!body) return false;
     int total = 0;
     char line[64];
 
     while (true) {
-        if (recv_line(sock, set, line, sizeof(line), timeout_ms) < 0) {
-            SDL_free(buf); return false;
-        }
+        if (rb.read_line(line, sizeof(line)) < 0) { SDL_free(body); return false; }
         int chunk_size = (int)std::strtol(line, nullptr, 16);
         if (chunk_size == 0) break;
-        if (chunk_size < 0 || total + chunk_size > HTTP_MAX_BODY) {
-            SDL_free(buf); return false;
-        }
+        if (chunk_size < 0 || total + chunk_size > HTTP_MAX_BODY) { SDL_free(body); return false; }
         while (total + chunk_size > cap) {
             cap *= 2;
-            auto* nb = (uint8_t*)SDL_realloc(buf, cap);
-            if (!nb) { SDL_free(buf); return false; }
-            buf = nb;
+            auto* nb = (uint8_t*)SDL_realloc(body, cap);
+            if (!nb) { SDL_free(body); return false; }
+            body = nb;
         }
-        int got = recv_exact(sock, set, (char*)(buf + total), chunk_size, timeout_ms);
-        if (got != chunk_size) { SDL_free(buf); return false; }
+        int got = rb.read_exact((char*)(body + total), chunk_size);
+        if (got != chunk_size) { SDL_free(body); return false; }
         total += chunk_size;
-        recv_line(sock, set, line, sizeof(line), timeout_ms); // trailing CRLF
+        rb.read_line(line, sizeof(line)); // trailing CRLF
     }
-    *out      = buf;
-    *out_size = total;
+    *out = body; *out_size = total;
     return true;
 }
 
@@ -195,9 +231,16 @@ HttpResult http_get(const char* url) {
         return res;
     }
 
+    RecvBuf rb;
+    rb.sock       = sock;
+    rb.set        = set;
+    rb.timeout_ms = HTTP_TIMEOUT_MS;
+    rb.pos        = 0;
+    rb.filled     = 0;
+
     // Read status line: "HTTP/1.x NNN reason"
     char line[512];
-    if (recv_line(sock, set, line, sizeof(line), HTTP_TIMEOUT_MS) < 0) {
+    if (rb.read_line(line, sizeof(line)) < 0) {
         std::snprintf(res.error, sizeof(res.error), "Timeout reading response");
         SDLNet_FreeSocketSet(set);
         SDLNet_TCP_Close(sock);
@@ -216,7 +259,7 @@ HttpResult http_get(const char* url) {
     int  content_length = -1;
     bool chunked        = false;
     while (true) {
-        int n = recv_line(sock, set, line, sizeof(line), HTTP_TIMEOUT_MS);
+        int n = rb.read_line(line, sizeof(line));
         if (n < 0) { SDLNet_FreeSocketSet(set); SDLNet_TCP_Close(sock); return res; }
         if (n == 0) break; // end of headers
 
@@ -231,7 +274,7 @@ HttpResult http_get(const char* url) {
     if (chunked) {
         uint8_t* body = nullptr;
         int      body_size = 0;
-        if (read_chunked(sock, set, &body, &body_size, HTTP_TIMEOUT_MS)) {
+        if (read_chunked(rb, &body, &body_size)) {
             res.data = body;
             res.size = body_size;
             res.ok   = true;
@@ -245,7 +288,7 @@ HttpResult http_get(const char* url) {
         } else {
             auto* body = (uint8_t*)SDL_malloc(content_length);
             if (body) {
-                int got = recv_exact(sock, set, (char*)body, content_length, HTTP_TIMEOUT_MS);
+                int got = rb.read_exact((char*)body, content_length);
                 if (got == content_length) {
                     res.data = body;
                     res.size = content_length;
@@ -259,29 +302,12 @@ HttpResult http_get(const char* url) {
         }
     } else {
         // No framing — read until server closes connection
-        int      cap  = 65536;
-        auto*    body = (uint8_t*)SDL_malloc(cap);
-        int      total = 0;
+        int body_size = 0;
+        uint8_t* body = rb.read_until_close(&body_size);
         if (body) {
-            while (total < HTTP_MAX_BODY) {
-                if (SDLNet_CheckSockets(set, HTTP_TIMEOUT_MS) <= 0) break;
-                if (total + 4096 > cap) {
-                    cap *= 2;
-                    auto* nb = (uint8_t*)SDL_realloc(body, cap);
-                    if (!nb) break;
-                    body = nb;
-                }
-                int n = SDLNet_TCP_Recv(sock, body + total, 4096);
-                if (n <= 0) break;
-                total += n;
-            }
-            if (total > 0) {
-                res.data = body;
-                res.size = total;
-                res.ok   = true;
-            } else {
-                SDL_free(body);
-            }
+            res.data = body;
+            res.size = body_size;
+            res.ok   = true;
         }
     }
 
@@ -294,44 +320,82 @@ HttpResult http_get(const char* url) {
 
 #ifdef AO_TLS
 
-// TLS recv helper: read from TlsConn using a spin-wait on WANT_READ.
-// Returns bytes read, or <0 on error/close.
-static int tls_recv_exact(TlsConn& tls, char* buf, int want, int timeout_ms) {
-    int got = 0;
-    uint32_t deadline = SDL_GetTicks() + (uint32_t)timeout_ms;
-    while (got < want) {
-        uint32_t now = SDL_GetTicks();
-        if ((int32_t)(deadline - now) <= 0) break;
-        if (!tls.poll(1)) continue;
-        int n = tls.recv(buf + got, want - got);
-        if (n < 0) return -1;
-        got += n;
-    }
-    return got;
-}
+// ── Buffered reader — TLS ─────────────────────────────────────────────────────
+struct TlsBuf {
+    TlsConn& tls;
+    int      timeout_ms;
+    char     buf[8192];
+    int      pos    = 0;
+    int      filled = 0;
 
-// Read one line (terminated by LF) from TlsConn.
-static int tls_recv_line(TlsConn& tls, char* buf, int cap, int timeout_ms) {
-    int len = 0;
-    uint32_t deadline = SDL_GetTicks() + (uint32_t)timeout_ms;
-    while (len < cap - 1) {
-        uint32_t now = SDL_GetTicks();
-        if ((int32_t)(deadline - now) <= 0) return -1;
-        char c;
-        int n = tls.recv(&c, 1);
-        if (n == 0) { tls.poll(1); continue; }
-        if (n < 0) return -1;
-        if (c == '\n') {
-            if (len > 0 && buf[len - 1] == '\r') --len;
-            buf[len] = '\0';
-            return len;
+    bool refill() {
+        pos = filled = 0;
+        uint32_t deadline = SDL_GetTicks() + (uint32_t)timeout_ms;
+        while (true) {
+            if ((int32_t)(deadline - SDL_GetTicks()) <= 0) return false;
+            int n = tls.recv(buf, (int)sizeof(buf));
+            if (n > 0) { filled = n; return true; }
+            if (n < 0) return false;
+            tls.poll(1);
         }
-        buf[len++] = c;
     }
-    return -1;
-}
+    int read_line(char* out, int cap) {
+        int len = 0;
+        while (len < cap - 1) {
+            if (pos >= filled && !refill()) return -1;
+            char c = buf[pos++];
+            if (c == '\n') {
+                if (len > 0 && out[len - 1] == '\r') --len;
+                out[len] = '\0';
+                return len;
+            }
+            out[len++] = c;
+        }
+        return -1;
+    }
+    int read_exact(char* dst, int want) {
+        int got = 0;
+        while (got < want) {
+            if (pos >= filled && !refill()) break;
+            int avail = filled - pos;
+            int take  = (avail < want - got) ? avail : (want - got);
+            std::memcpy(dst + got, buf + pos, (size_t)take);
+            pos += take;
+            got += take;
+        }
+        return got;
+    }
+    uint8_t* read_until_close(int* out_size) {
+        int   cap  = 65536;
+        auto* body = (uint8_t*)SDL_malloc(cap);
+        if (!body) return nullptr;
+        int total = 0;
+        if (pos < filled) {
+            int avail = filled - pos;
+            std::memcpy(body, buf + pos, (size_t)avail);
+            total = avail;
+            pos = filled = 0;
+        }
+        uint32_t deadline = SDL_GetTicks() + (uint32_t)timeout_ms;
+        while (total < HTTP_MAX_BODY) {
+            if ((int32_t)(deadline - SDL_GetTicks()) <= 0) break;
+            if (total + 65536 > cap) {
+                cap *= 2;
+                auto* nb = (uint8_t*)SDL_realloc(body, cap);
+                if (!nb) break;
+                body = nb;
+            }
+            int n = tls.recv(body + total, 65536);
+            if (n < 0) break;
+            if (n > 0) total += n;
+            else tls.poll(1);
+        }
+        if (total > 0) { *out_size = total; return body; }
+        SDL_free(body); return nullptr;
+    }
+};
 
-static bool tls_read_chunked(TlsConn& tls, uint8_t** out, int* out_size, int timeout_ms) {
+static bool tls_read_chunked(TlsBuf& tb, uint8_t** out, int* out_size) {
     int  cap  = 65536;
     auto* buf = (uint8_t*)SDL_malloc(cap);
     if (!buf) return false;
@@ -339,9 +403,7 @@ static bool tls_read_chunked(TlsConn& tls, uint8_t** out, int* out_size, int tim
     char line[64];
 
     while (true) {
-        if (tls_recv_line(tls, line, sizeof(line), timeout_ms) < 0) {
-            SDL_free(buf); return false;
-        }
+        if (tb.read_line(line, sizeof(line)) < 0) { SDL_free(buf); return false; }
         int chunk_size = (int)std::strtol(line, nullptr, 16);
         if (chunk_size == 0) break;
         if (chunk_size < 0 || total + chunk_size > HTTP_MAX_BODY) {
@@ -353,10 +415,10 @@ static bool tls_read_chunked(TlsConn& tls, uint8_t** out, int* out_size, int tim
             if (!nb) { SDL_free(buf); return false; }
             buf = nb;
         }
-        int got = tls_recv_exact(tls, (char*)(buf + total), chunk_size, timeout_ms);
+        int got = tb.read_exact((char*)(buf + total), chunk_size);
         if (got != chunk_size) { SDL_free(buf); return false; }
         total += chunk_size;
-        tls_recv_line(tls, line, sizeof(line), timeout_ms); // trailing CRLF
+        tb.read_line(line, sizeof(line)); // trailing CRLF
     }
     *out      = buf;
     *out_size = total;
@@ -397,9 +459,13 @@ HttpResult https_get(const char* url) {
         return res;
     }
 
+    TlsBuf tb = {tls, HTTP_TIMEOUT_MS};
+    tb.pos    = 0;
+    tb.filled = 0;
+
     // Read status line
     char line[512];
-    if (tls_recv_line(tls, line, sizeof(line), HTTP_TIMEOUT_MS) < 0) {
+    if (tb.read_line(line, sizeof(line)) < 0) {
         std::snprintf(res.error, sizeof(res.error), "TLS timeout reading response");
         tls.close();
         return res;
@@ -416,7 +482,7 @@ HttpResult https_get(const char* url) {
     int  content_length = -1;
     bool chunked        = false;
     while (true) {
-        int n = tls_recv_line(tls, line, sizeof(line), HTTP_TIMEOUT_MS);
+        int n = tb.read_line(line, sizeof(line));
         if (n < 0) { tls.close(); return res; }
         if (n == 0) break;
 
@@ -431,7 +497,7 @@ HttpResult https_get(const char* url) {
     if (chunked) {
         uint8_t* body = nullptr;
         int      body_size = 0;
-        if (tls_read_chunked(tls, &body, &body_size, HTTP_TIMEOUT_MS)) {
+        if (tls_read_chunked(tb, &body, &body_size)) {
             res.data = body;
             res.size = body_size;
             res.ok   = true;
@@ -445,7 +511,7 @@ HttpResult https_get(const char* url) {
         } else {
             auto* body = (uint8_t*)SDL_malloc(content_length);
             if (body) {
-                int got = tls_recv_exact(tls, (char*)body, content_length, HTTP_TIMEOUT_MS);
+                int got = tb.read_exact((char*)body, content_length);
                 if (got == content_length) {
                     res.data = body;
                     res.size = content_length;
@@ -459,32 +525,12 @@ HttpResult https_get(const char* url) {
         }
     } else {
         // No framing — read until server closes
-        int   cap  = 65536;
-        auto* body = (uint8_t*)SDL_malloc(cap);
-        int   total = 0;
+        int body_size = 0;
+        uint8_t* body = tb.read_until_close(&body_size);
         if (body) {
-            uint32_t deadline = SDL_GetTicks() + HTTP_TIMEOUT_MS;
-            while (total < HTTP_MAX_BODY) {
-                uint32_t now = SDL_GetTicks();
-                if ((int32_t)(deadline - now) <= 0) break;
-                if (!tls.poll(1)) continue;
-                if (total + 4096 > cap) {
-                    cap *= 2;
-                    auto* nb = (uint8_t*)SDL_realloc(body, cap);
-                    if (!nb) break;
-                    body = nb;
-                }
-                int n = tls.recv(body + total, 4096);
-                if (n < 0) break;
-                if (n > 0) total += n;
-            }
-            if (total > 0) {
-                res.data = body;
-                res.size = total;
-                res.ok   = true;
-            } else {
-                SDL_free(body);
-            }
+            res.data = body;
+            res.size = body_size;
+            res.ok   = true;
         }
     }
 

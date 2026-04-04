@@ -46,7 +46,8 @@ private:
     static int  thread_func(void* userdata);
     void        run();
 
-    SDL_Thread* thread_    = nullptr;
+    static constexpr int N_WORKERS = 4;
+    SDL_Thread* threads_[N_WORKERS] = {};
     bool        running_   = false;
 
     // Request queue (main → worker)

@@ -27,6 +27,9 @@ public:
     // Returns nullptr on failure.
     SDL_Texture* get(SDL_Renderer* r, const char* path);
 
+    // Cache-only lookup — does NOT load the asset. Returns nullptr if not cached.
+    SDL_Texture* peek(const char* path) const;
+
     // Explicitly release a texture by path.
     void release(const char* path);
 

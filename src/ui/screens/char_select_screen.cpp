@@ -6,6 +6,9 @@
 #include "../../input/input_manager.hpp"
 #include "../../net/packet_queue.hpp"
 #include "../../protocol/commands.hpp"
+#include "../../assets/texture_cache.hpp"
+#include "../../assets/asset_manager.hpp"
+#include "../../assets/asset_stream.hpp"
 #include <SDL2/SDL.h>
 #include <cstdio>
 
@@ -13,7 +16,20 @@ namespace ao {
 
 CharSelectScreen::CharSelectScreen(App& app) : Screen(app) {}
 
-void CharSelectScreen::on_enter() { selected_ = 0; scroll_ = 0; }
+void CharSelectScreen::on_enter() {
+    selected_ = 0;
+    scroll_   = 0;
+    // Prefetch icons for the first page
+    GameState& gs = app_.state();
+    int end = gs.char_count < PAGE ? gs.char_count : PAGE;
+    for (int i = 0; i < end; ++i) {
+        if (gs.characters[i].name[0]) {
+            char path[256];
+            std::snprintf(path, sizeof(path), "characters/%s/char_icon.png", gs.characters[i].name);
+            app_.asset_stream().prefetch(path);
+        }
+    }
+}
 
 void CharSelectScreen::handle_event(const SDL_Event& e) {
     GameState& gs = app_.state();
@@ -66,6 +82,26 @@ void CharSelectScreen::update(uint32_t /*dt*/) {
     if (selected_ < scroll_) scroll_ = selected_;
     if (selected_ >= scroll_ + PAGE) scroll_ = selected_ - PAGE + 1;
     if (scroll_ < 0) scroll_ = 0;
+
+    // Decode up to 8 prefetched icons per frame into the texture cache
+    int decoded = 0;
+    int page_start = (scroll_ / PAGE) * PAGE;
+    int page_end   = page_start + PAGE;
+    if (page_end > total) page_end = total;
+    for (int i = page_start; i < page_end && decoded < 8; ++i) {
+        if (!gs.characters[i].name[0]) continue;
+        char path[256];
+        std::snprintf(path, sizeof(path), "characters/%s/char_icon.png", gs.characters[i].name);
+        if (app_.tex_cache().peek(path)) continue; // already decoded
+        if (AssetManager::has_prefetch(path)) {
+            // In prefetch cache — consume and decode into tex cache (fast, no network)
+            app_.tex_cache().get(app_.renderer().raw(), path);
+            ++decoded;
+        } else {
+            // Not yet prefetched — request it
+            app_.asset_stream().prefetch(path);
+        }
+    }
 }
 
 void CharSelectScreen::render() {
@@ -104,6 +140,18 @@ void CharSelectScreen::render() {
                     : SDL_Color{30, 30, 55, 255});
             r.fill_rect(cell, bg);
             r.draw_rect(cell, {80, 80, 120, 255});
+
+            // Try to draw character icon
+            if (gs.characters[idx].name[0]) {
+                char icon_path[256];
+                std::snprintf(icon_path, sizeof(icon_path),
+                    "characters/%s/char_icon.png", gs.characters[idx].name);
+                SDL_Texture* icon = app_.tex_cache().peek(icon_path);
+                if (icon) {
+                    SDL_Rect icon_dst = {x + 4, y + 4, CELL_W - 8, CELL_H - 28};
+                    r.draw(icon, nullptr, &icon_dst);
+                }
+            }
 
             // Show character name if known, otherwise slot number
             const char* name = gs.characters[idx].name;

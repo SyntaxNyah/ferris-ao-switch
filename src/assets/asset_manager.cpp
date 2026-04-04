@@ -79,6 +79,19 @@ void AssetManager::store_prefetch(const char* relative, uint8_t* data, int size)
     SDL_UnlockMutex(get_prefetch_mutex());
 }
 
+bool AssetManager::has_prefetch(const char* relative) {
+    SDL_LockMutex(get_prefetch_mutex());
+    bool found = false;
+    for (int i = 0; i < PREFETCH_SLOTS; ++i) {
+        if (s_prefetch[i].occupied &&
+            std::strcmp(s_prefetch[i].rel, relative) == 0) {
+            found = true; break;
+        }
+    }
+    SDL_UnlockMutex(get_prefetch_mutex());
+    return found;
+}
+
 // Consume a prefetch entry (removes it from cache, transfers ownership to caller).
 static uint8_t* consume_prefetch(const char* relative, int* out_size) {
     SDL_LockMutex(get_prefetch_mutex());

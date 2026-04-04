@@ -67,6 +67,11 @@ SDL_Texture* TextureCache::get(SDL_Renderer* r, const char* path) {
     return tex;
 }
 
+SDL_Texture* TextureCache::peek(const char* path) const {
+    int idx = find_slot(path);
+    return (idx >= 0) ? slots_[idx].tex : nullptr;
+}
+
 void TextureCache::release(const char* path) {
     int idx = find_slot(path);
     if (idx < 0) return;

@@ -3,6 +3,8 @@
 #include <array>
 #include <cstdint>
 #include "assets/theme_manager.hpp"
+#include "assets/texture_cache.hpp"
+#include "assets/asset_stream.hpp"
 #include "render/text_renderer.hpp"
 #include "input/input_manager.hpp"
 #include "net/network_thread.hpp"
@@ -38,6 +40,8 @@ public:
     GameState&    state()        { return *game_state_; }
     ThemeManager& theme()        { return theme_manager_; }
     TextRenderer& text()         { return text_renderer_; }
+    TextureCache& tex_cache()    { return tex_cache_; }
+    AssetStream&  asset_stream() { return asset_stream_; }
     bool          running()      const { return running_; }
     void          quit()         { running_ = false; }
 
@@ -70,6 +74,8 @@ private:
     ThemeManager  theme_manager_;
     TextRenderer  text_renderer_;
     InputManager  input_manager_;
+    TextureCache  tex_cache_;
+    AssetStream   asset_stream_;
 
     // Networking
     InQueue        in_queue_;

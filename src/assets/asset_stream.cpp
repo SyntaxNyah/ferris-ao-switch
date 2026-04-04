@@ -14,21 +14,24 @@ void AssetStream::start() {
     req_head_   = req_tail_  = 0;
     done_head_  = done_tail_ = 0;
     running_    = true;
-    thread_     = SDL_CreateThread(thread_func, "AssetStream", this);
+    for (int i = 0; i < N_WORKERS; ++i)
+        threads_[i] = SDL_CreateThread(thread_func, "AssetStream", this);
 }
 
 void AssetStream::stop() {
     if (!running_) return;
     running_ = false;
 
-    // Wake the worker so it can see running_ == false
+    // Wake all workers so they can see running_ == false
     SDL_LockMutex(req_mutex_);
-    SDL_CondSignal(req_cond_);
+    SDL_CondBroadcast(req_cond_);
     SDL_UnlockMutex(req_mutex_);
 
-    if (thread_) {
-        SDL_WaitThread(thread_, nullptr);
-        thread_ = nullptr;
+    for (int i = 0; i < N_WORKERS; ++i) {
+        if (threads_[i]) {
+            SDL_WaitThread(threads_[i], nullptr);
+            threads_[i] = nullptr;
+        }
     }
 
     if (req_mutex_)  { SDL_DestroyMutex(req_mutex_);  req_mutex_  = nullptr; }
@@ -59,7 +62,7 @@ bool AssetStream::prefetch(const char* relative) {
     req_buf_[req_tail_][255] = '\0';
     req_tail_ = next;
 
-    SDL_CondSignal(req_cond_);
+    SDL_CondBroadcast(req_cond_);
     SDL_UnlockMutex(req_mutex_);
     return true;
 }
