@@ -22,17 +22,22 @@ const char* AssetManager::romfs_base() { return ROMFS_BASE; }
 
 static char s_asset_url[512] = {};
 
+// clear_failed() forward declaration — defined after the failure cache block below.
+static void clear_failed();
+
 void AssetManager::set_asset_url(const char* url) {
     std::strncpy(s_asset_url, url ? url : "", sizeof(s_asset_url) - 1);
     // Strip trailing slash(es)
     int len = (int)std::strlen(s_asset_url);
     while (len > 0 && s_asset_url[len - 1] == '/') s_asset_url[--len] = '\0';
-    std::fprintf(stdout, "[assets] streaming URL set: '%s'\n", s_asset_url);
+    clear_failed(); // URL changed — old failure entries are for a different server
+    std::fprintf(stderr, "[assets] streaming URL set: '%s'\n", s_asset_url);
 }
 
 void AssetManager::clear_asset_url() {
     s_asset_url[0] = '\0';
-    std::fprintf(stdout, "[assets] streaming URL cleared\n");
+    clear_failed(); // new server may have the same paths — reset failure cache
+    std::fprintf(stderr, "[assets] streaming URL cleared\n");
 }
 
 bool        AssetManager::has_asset_url() { return s_asset_url[0] != '\0'; }
@@ -110,6 +115,47 @@ static uint8_t* consume_prefetch(const char* relative, int* out_size) {
     return nullptr;
 }
 
+// ── HTTP failure cache ────────────────────────────────────────────────────────
+// Remembers paths that returned a 404/error so we never retry until the
+// asset URL changes (which resets the cache in clear_asset_url).
+
+static constexpr int FAIL_SLOTS = 512;
+static char          s_failed[FAIL_SLOTS][256] = {};
+static int           s_failed_count            = 0;
+// Reuse the prefetch mutex to guard this cache too.
+
+static bool check_failed(const char* relative) {
+    // Called with prefetch mutex already held.
+    for (int i = 0; i < s_failed_count; ++i)
+        if (std::strcmp(s_failed[i], relative) == 0) return true;
+    return false;
+}
+
+static void add_failed(const char* relative) {
+    SDL_LockMutex(get_prefetch_mutex());
+    if (!check_failed(relative)) {
+        if (s_failed_count < FAIL_SLOTS) {
+            std::strncpy(s_failed[s_failed_count], relative, 255);
+            s_failed[s_failed_count][255] = '\0';
+            ++s_failed_count;
+        }
+    }
+    SDL_UnlockMutex(get_prefetch_mutex());
+}
+
+static bool is_failed(const char* relative) {
+    SDL_LockMutex(get_prefetch_mutex());
+    bool found = check_failed(relative);
+    SDL_UnlockMutex(get_prefetch_mutex());
+    return found;
+}
+
+static void clear_failed() {
+    SDL_LockMutex(get_prefetch_mutex());
+    s_failed_count = 0;
+    SDL_UnlockMutex(get_prefetch_mutex());
+}
+
 // ── Local file helpers ────────────────────────────────────────────────────────
 
 static bool file_exists(const char* path) {
@@ -157,15 +203,21 @@ uint8_t* AssetManager::fetch_bytes(const char* relative, int* out_size) {
 
     // 1. HTTP streaming (if server provided an asset URL)
     if (s_asset_url[0] != '\0') {
-        char full_url[768];
-        std::snprintf(full_url, sizeof(full_url), "%s/%s", s_asset_url, relative);
-        HttpResult hr = http_get(full_url);
-        if (hr.ok) {
-            *out_size = hr.size;
-            return hr.data; // caller owns SDL_malloc'd buffer
+        // Skip paths we already know 404 on this server
+        if (is_failed(relative)) {
+            // silent — already logged on first miss
+        } else {
+            char full_url[768];
+            std::snprintf(full_url, sizeof(full_url), "%s/%s", s_asset_url, relative);
+            HttpResult hr = http_get(full_url);
+            if (hr.ok) {
+                *out_size = hr.size;
+                return hr.data; // caller owns SDL_malloc'd buffer
+            }
+            // Cache the failure so we never retry this path again
+            add_failed(relative);
+            std::fprintf(stderr, "[assets] HTTP miss '%s', trying local\n", relative);
         }
-        // Log and fall through to local
-        std::fprintf(stderr, "[assets] HTTP miss '%s', trying local\n", relative);
     }
 
     // 2. sdmc: user base
