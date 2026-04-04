@@ -91,10 +91,11 @@ void AOClient::process(InQueue& in) {
     // If we've been in WaitId for 3 s after an Akashi decryptor, send RC.
     if (hs_state_ == HandshakeState::WaitId && akashi_decryptor_ms_ != 0 &&
         (int32_t)(SDL_GetTicks() - akashi_decryptor_ms_) > 3000) {
-        std::fprintf(stderr, "[ao_client] Akashi: no ID in 3s — sending RC to drive char list\n");
+        std::fprintf(stderr, "[ao_client] Akashi: no ID in 3s — sending ID+askchaa+RC\n");
         akashi_decryptor_ms_ = 0; // fire once
-        char buf[32];
-        send(buf, cmd::rc(buf, sizeof(buf)));
+        char buf1[128]; send(buf1, cmd::id(buf1, sizeof(buf1)));
+        char buf2[32];  send(buf2, cmd::askchaa(buf2, sizeof(buf2)));
+        char buf3[32];  send(buf3, cmd::rc(buf3, sizeof(buf3)));
         hs_state_ = HandshakeState::WaitSc;
     }
 
@@ -480,12 +481,10 @@ void AOClient::on_chars_check(const Packet& p) {
         send(buf2, cmd::rc(buf2, sizeof(buf2)));
         hs_state_ = HandshakeState::WaitSc;
     } else if (hs_state_ == HandshakeState::WaitSc) {
-        // Second CharsCheck: RC went unanswered — this server never sends SC.
-        // Skip the rest of the handshake and enter the lobby with what we have.
-        std::fprintf(stderr, "[ao_client] Akashi direct: RC unanswered, forcing InLobby\n");
-        state_.in_lobby  = true;
-        state_.connected = true;
-        hs_state_ = HandshakeState::InLobby;
+        // CharsCheck arrived while waiting for SC (char list).
+        // This is a broadcast that often arrives before SC — just record the
+        // taken flags and stay in WaitSc so SC can still populate char names.
+        std::fprintf(stderr, "[ao_client] CharsCheck in WaitSc — recording taken flags, waiting for SC\n");
     }
 }
 
