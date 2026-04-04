@@ -254,13 +254,29 @@ bool App::connect(const char* host, uint16_t port, ConnMode mode) {
     // For WS/WSS servers, prepare a fallback asset URL derived from the host.
     // We do NOT set it immediately — instead we wait until in_lobby is true
     // (handshake complete) and only apply it if the server never sent an ASS
-    // packet with the real URL.  This prevents the wrong subdomain URL from
-    // polluting the failure cache before ASS arrives.
+    // packet with the real URL.
+    //
+    // Akashi servers follow the pattern: WebSocket on ao.<domain>, webAO (and
+    // assets) served from <domain>.  Strip known AO subdomain prefixes so the
+    // fallback points at the parent domain, matching what webAO's same-origin
+    // behaviour produces in the browser.
     fallback_asset_url_[0] = '\0';
     if (mode == ConnMode::WS || mode == ConnMode::WSS) {
+        const char* scheme = (mode == ConnMode::WSS) ? "https" : "http";
+        // Check for common AO subdomain prefixes: "ao.", "ws.", "wss."
+        const char* asset_host = host;
+        const char* dot = std::strchr(host, '.');
+        if (dot && std::strchr(dot + 1, '.')) {  // at least 3 components
+            int prefix_len = (int)(dot - host);
+            bool is_ao_prefix =
+                (prefix_len == 2 && std::strncmp(host, "ao", 2) == 0) ||
+                (prefix_len == 2 && std::strncmp(host, "ws", 2) == 0) ||
+                (prefix_len == 3 && std::strncmp(host, "wss", 3) == 0);
+            if (is_ao_prefix)
+                asset_host = dot + 1;  // e.g. "ao.umineko.online" → "umineko.online"
+        }
         std::snprintf(fallback_asset_url_, sizeof(fallback_asset_url_),
-            "%s://%s/base",
-            (mode == ConnMode::WSS) ? "https" : "http", host);
+            "%s://%s/base", scheme, asset_host);
         std::fprintf(stderr, "[app] WS asset fallback URL prepared: %s\n",
             fallback_asset_url_);
     }
