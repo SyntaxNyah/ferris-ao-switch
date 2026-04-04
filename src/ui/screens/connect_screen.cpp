@@ -121,6 +121,7 @@ static int parse_servers(const char* json, int len,
         json_find_key(obj_start, obj_end, "name",        e.name,        sizeof(e.name));
         json_find_key(obj_start, obj_end, "ip",          e.ip,          sizeof(e.ip));
         json_find_key(obj_start, obj_end, "description", e.description, sizeof(e.description));
+        json_find_key(obj_start, obj_end, "asset_url",   e.asset_url,   sizeof(e.asset_url));
 
         if (json_find_key(obj_start, obj_end, "port", tmp, sizeof(tmp)))
             e.port = std::atoi(tmp);
@@ -394,11 +395,14 @@ void ConnectScreen::connect_to_server(const ServerEntry& s) {
         port = (uint16_t)s.port;
     }
 
-    // Apply per-server asset URL from servers.cfg if present
-    const char* asset_url = lookup_asset_url(host);
-    if (asset_url) {
-        AssetManager::set_asset_url(asset_url);
-        std::fprintf(stderr, "[connect] asset URL set to %s\n", asset_url);
+    // Priority: servers.cfg override > master-server JSON asset_url > nothing (ASS packet / auto)
+    const char* cfg_url = lookup_asset_url(host);
+    if (cfg_url) {
+        AssetManager::set_asset_url(cfg_url);
+        std::fprintf(stderr, "[connect] asset URL from servers.cfg: %s\n", cfg_url);
+    } else if (s.asset_url[0] != '\0') {
+        AssetManager::set_asset_url(s.asset_url);
+        std::fprintf(stderr, "[connect] asset URL from server list: %s\n", s.asset_url);
     } else {
         AssetManager::clear_asset_url();
     }

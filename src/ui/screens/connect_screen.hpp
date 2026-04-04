@@ -9,6 +9,7 @@ struct ServerEntry {
     char name[128];
     char ip[256];
     char description[512];
+    char asset_url[512];
     int  port     = 27017;
     int  ws_port  = 0;
     int  wss_port = 0;
@@ -35,6 +36,14 @@ private:
     void open_keyboard(const char* hint, const char* initial, char* buf, int buf_sz, int max_len);
     void parse_url(const char* src, char* out_host, int host_cap,
                    uint16_t* out_port, ConnMode* out_mode) const;
+    void load_server_cfg();
+    const char* lookup_asset_url(const char* host) const;
+
+    // ── Per-server asset URL config (sdmc:/switch/ferris-ao/servers.cfg) ───────
+    static constexpr int MAX_CFG_ENTRIES = 64;
+    struct CfgEntry { char host[256]; char asset_url[512]; };
+    CfgEntry cfg_[MAX_CFG_ENTRIES];
+    int      cfg_count_ = 0;
 
     // ── Tab 0: Server browser ──────────────────────────────────────────────────
     char ms_url_[256]   = "https://servers.aceattorneyonline.com/servers";
