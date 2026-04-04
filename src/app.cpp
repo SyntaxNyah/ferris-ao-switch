@@ -4,6 +4,7 @@
 #include "ui/screen.hpp"
 #include "ui/screens/char_select_screen.hpp"
 #include "assets/asset_manager.hpp"
+#include "assets/extensions_config.hpp"
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_ttf.h>
 #include <SDL2/SDL_image.h>
@@ -193,6 +194,7 @@ void App::update(uint32_t dt_ms) {
             std::fprintf(stderr, "[app] No ASS received — using fallback URL: %s\n",
                 fallback_asset_url_);
         }
+        ExtensionsConfig::fetch_and_apply();
         push_screen(new CharSelectScreen(*this));
     }
 
@@ -310,6 +312,7 @@ void App::disconnect() {
     was_in_lobby_ = false;
     fallback_asset_url_[0] = '\0';
     AssetManager::clear_asset_url();
+    ExtensionsConfig::reset();
     if (game_state_) {
         game_state_->connected = false;
         game_state_->in_lobby  = false;

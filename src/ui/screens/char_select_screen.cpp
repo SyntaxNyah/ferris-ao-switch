@@ -9,6 +9,7 @@
 #include "../../assets/texture_cache.hpp"
 #include "../../assets/asset_manager.hpp"
 #include "../../assets/asset_stream.hpp"
+#include "../../assets/extensions_config.hpp"
 #include <SDL2/SDL.h>
 #include <cstdio>
 
@@ -19,13 +20,16 @@ CharSelectScreen::CharSelectScreen(App& app) : Screen(app) {}
 void CharSelectScreen::on_enter() {
     selected_ = 0;
     scroll_   = 0;
-    // Prefetch icons for the first page
+    // Prefetch icons for the first page (try each configured extension)
     GameState& gs = app_.state();
+    const ExtensionsConfig& ec = ExtensionsConfig::get();
     int end = gs.char_count < PAGE ? gs.char_count : PAGE;
     for (int i = 0; i < end; ++i) {
-        if (gs.characters[i].name[0]) {
+        if (!gs.characters[i].name[0]) continue;
+        for (int e = 0; e < ec.charicon_count; ++e) {
             char path[256];
-            std::snprintf(path, sizeof(path), "characters/%s/char_icon.png", gs.characters[i].name);
+            std::snprintf(path, sizeof(path), "characters/%s/char_icon%s",
+                gs.characters[i].name, ec.charicon[e]);
             app_.asset_stream().prefetch(path);
         }
     }
@@ -83,23 +87,36 @@ void CharSelectScreen::update(uint32_t /*dt*/) {
     if (selected_ >= scroll_ + PAGE) scroll_ = selected_ - PAGE + 1;
     if (scroll_ < 0) scroll_ = 0;
 
-    // Decode up to 8 prefetched icons per frame into the texture cache
+    // Decode up to 8 prefetched icons per frame into the texture cache.
+    // Try each charicon extension in order; use the first one that is ready.
+    const ExtensionsConfig& ec = ExtensionsConfig::get();
     int decoded = 0;
     int page_start = scroll_;
     int page_end   = scroll_ + PAGE;
     if (page_end > total) page_end = total;
     for (int i = page_start; i < page_end && decoded < 8; ++i) {
         if (!gs.characters[i].name[0]) continue;
-        char path[256];
-        std::snprintf(path, sizeof(path), "characters/%s/char_icon.png", gs.characters[i].name);
-        if (app_.tex_cache().peek(path)) continue; // already decoded
-        if (AssetManager::has_prefetch(path)) {
-            // In prefetch cache — consume and decode into tex cache (fast, no network)
-            app_.tex_cache().get(app_.renderer().raw(), path);
-            ++decoded;
-        } else {
-            // Not yet prefetched — request it
-            app_.asset_stream().prefetch(path);
+        bool already_cached = false;
+        for (int e = 0; e < ec.charicon_count; ++e) {
+            char path[256];
+            std::snprintf(path, sizeof(path), "characters/%s/char_icon%s",
+                gs.characters[i].name, ec.charicon[e]);
+            if (app_.tex_cache().peek(path)) { already_cached = true; break; }
+        }
+        if (already_cached) continue;
+        // Try to decode whichever extension is already prefetched
+        bool decoded_one = false;
+        for (int e = 0; e < ec.charicon_count && !decoded_one; ++e) {
+            char path[256];
+            std::snprintf(path, sizeof(path), "characters/%s/char_icon%s",
+                gs.characters[i].name, ec.charicon[e]);
+            if (AssetManager::has_prefetch(path)) {
+                app_.tex_cache().get(app_.renderer().raw(), path);
+                ++decoded;
+                decoded_one = true;
+            } else {
+                app_.asset_stream().prefetch(path);
+            }
         }
     }
 }
@@ -153,12 +170,17 @@ void CharSelectScreen::render() {
             r.fill_rect(cell, bg);
             r.draw_rect(cell, {80, 80, 120, 255});
 
-            // Try to draw character icon
+            // Try to draw character icon — check each extension in order
             if (gs.characters[idx].name[0]) {
-                char icon_path[256];
-                std::snprintf(icon_path, sizeof(icon_path),
-                    "characters/%s/char_icon.png", gs.characters[idx].name);
-                SDL_Texture* icon = app_.tex_cache().peek(icon_path);
+                const ExtensionsConfig& ec2 = ExtensionsConfig::get();
+                SDL_Texture* icon = nullptr;
+                for (int e = 0; e < ec2.charicon_count && !icon; ++e) {
+                    char icon_path[256];
+                    std::snprintf(icon_path, sizeof(icon_path),
+                        "characters/%s/char_icon%s",
+                        gs.characters[idx].name, ec2.charicon[e]);
+                    icon = app_.tex_cache().peek(icon_path);
+                }
                 if (icon) {
                     SDL_Rect icon_dst = {x + 4, y + 4, CELL_W - 8, CELL_H - 28};
                     r.draw(icon, nullptr, &icon_dst);
