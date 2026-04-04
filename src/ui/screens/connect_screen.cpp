@@ -3,6 +3,7 @@
 #include "../../render/renderer.hpp"
 #include "../../input/virtual_keyboard.hpp"
 #include "../../net/http_fetch.hpp"
+#include "../../assets/asset_manager.hpp"
 #include <SDL2/SDL.h>
 #include <cstdio>
 #include <cstring>
@@ -185,9 +186,101 @@ int SDLCALL ConnectScreen::fetch_thread_fn(void* ud) {
 
 // ── ConnectScreen ─────────────────────────────────────────────────────────────
 
+// Parse sdmc:/switch/ferris-ao/servers.cfg for per-server asset URLs.
+// Format: one entry per line, "hostname=https://asset-base-url"
+// Lines starting with '#' or ';' are comments. Blank lines ignored.
+void ConnectScreen::load_server_cfg() {
+    cfg_count_ = 0;
+
+    // Derive cfg path from user_base: strip trailing "/base" if present
+    char cfg_path[512];
+    const char* base = AssetManager::user_base(); // e.g. "sdmc:/switch/ferris-ao/base"
+    std::strncpy(cfg_path, base, sizeof(cfg_path) - 20);
+    cfg_path[sizeof(cfg_path) - 20] = '\0';
+
+    // Strip "/base" suffix
+    int len = (int)std::strlen(cfg_path);
+    if (len >= 5 && std::strcmp(cfg_path + len - 5, "/base") == 0)
+        cfg_path[len - 5] = '\0';
+
+    std::strncat(cfg_path, "/servers.cfg", sizeof(cfg_path) - std::strlen(cfg_path) - 1);
+
+    SDL_RWops* f = SDL_RWFromFile(cfg_path, "r");
+    if (!f) {
+        std::fprintf(stderr, "[servers.cfg] not found at %s\n", cfg_path);
+        return;
+    }
+
+    Sint64 sz = SDL_RWsize(f);
+    if (sz <= 0 || sz > 65536) { SDL_RWclose(f); return; }
+
+    char* buf = (char*)SDL_malloc((int)sz + 1);
+    if (!buf) { SDL_RWclose(f); return; }
+
+    SDL_RWread(f, buf, 1, (int)sz);
+    buf[sz] = '\0';
+    SDL_RWclose(f);
+
+    // Parse line by line
+    char* line = buf;
+    while (*line && cfg_count_ < MAX_CFG_ENTRIES) {
+        // Find end of line
+        char* eol = line;
+        while (*eol && *eol != '\n' && *eol != '\r') ++eol;
+        char saved = *eol;
+        *eol = '\0';
+
+        // Trim leading whitespace
+        while (*line == ' ' || *line == '\t') ++line;
+
+        if (*line && *line != '#' && *line != ';') {
+            char* eq = std::strchr(line, '=');
+            if (eq) {
+                *eq = '\0';
+                const char* host_part = line;
+                const char* url_part  = eq + 1;
+
+                // Trim trailing whitespace from host
+                char* host_end = eq - 1;
+                while (host_end >= line && (*host_end == ' ' || *host_end == '\t'))
+                    *host_end-- = '\0';
+
+                // Trim leading whitespace from url
+                while (*url_part == ' ' || *url_part == '\t') ++url_part;
+
+                if (host_part[0] && url_part[0]) {
+                    std::strncpy(cfg_[cfg_count_].host,      host_part, sizeof(CfgEntry::host) - 1);
+                    std::strncpy(cfg_[cfg_count_].asset_url, url_part,  sizeof(CfgEntry::asset_url) - 1);
+                    cfg_[cfg_count_].host[sizeof(CfgEntry::host) - 1]           = '\0';
+                    cfg_[cfg_count_].asset_url[sizeof(CfgEntry::asset_url) - 1] = '\0';
+                    ++cfg_count_;
+                    std::fprintf(stderr, "[servers.cfg] %s -> %s\n", host_part, url_part);
+                }
+            }
+        }
+
+        // Advance past end-of-line chars
+        *eol = saved;
+        line = eol;
+        while (*line == '\n' || *line == '\r') ++line;
+    }
+
+    SDL_free(buf);
+    std::fprintf(stderr, "[servers.cfg] loaded %d entries\n", cfg_count_);
+}
+
+const char* ConnectScreen::lookup_asset_url(const char* host) const {
+    for (int i = 0; i < cfg_count_; ++i) {
+        if (std::strcmp(cfg_[i].host, host) == 0)
+            return cfg_[i].asset_url;
+    }
+    return nullptr;
+}
+
 ConnectScreen::ConnectScreen(App& app) : Screen(app) {
     fetch_mutex_ = SDL_CreateMutex();
     SDL_AtomicSet(&fetch_state_atom_, (int)FetchState::Idle);
+    load_server_cfg();
 }
 
 ConnectScreen::~ConnectScreen() {
@@ -301,6 +394,15 @@ void ConnectScreen::connect_to_server(const ServerEntry& s) {
         port = (uint16_t)s.port;
     }
 
+    // Apply per-server asset URL from servers.cfg if present
+    const char* asset_url = lookup_asset_url(host);
+    if (asset_url) {
+        AssetManager::set_asset_url(asset_url);
+        std::fprintf(stderr, "[connect] asset URL set to %s\n", asset_url);
+    } else {
+        AssetManager::clear_asset_url();
+    }
+
     std::snprintf(status_, sizeof(status_), "Connecting to %s...", s.name);
     app_.connect(host, port, mode);
 }
@@ -314,6 +416,15 @@ void ConnectScreen::connect_direct() {
     uint16_t port;
     ConnMode mode;
     parse_url(host_, host, sizeof(host), &port, &mode);
+
+    // Apply per-server asset URL from servers.cfg if present
+    const char* asset_url = lookup_asset_url(host);
+    if (asset_url) {
+        AssetManager::set_asset_url(asset_url);
+        std::fprintf(stderr, "[connect] asset URL set to %s\n", asset_url);
+    } else {
+        AssetManager::clear_asset_url();
+    }
 
     std::snprintf(status_, sizeof(status_), "Connecting to %s:%u...", host, (unsigned)port);
     app_.connect(host, port, mode);
