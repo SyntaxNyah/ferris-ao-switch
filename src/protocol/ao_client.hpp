@@ -87,8 +87,11 @@ private:
 
     // Akashi direct-lobby: track when last PR/PU arrived so we can send RC
     // proactively if CharsCheck never comes.
-    bool     akashi_pr_seen_ = false;
-    uint32_t akashi_pr_ms_   = 0;   // SDL_GetTicks() when last PR/PU was seen
+    bool     akashi_pr_seen_       = false;
+    uint32_t akashi_pr_ms_         = 0;  // SDL_GetTicks() when last PR/PU was seen
+    // After Akashi decryptor, if ID doesn't arrive within 3s the server wants
+    // us to drive — send RC ourselves and skip to WaitSc.
+    uint32_t akashi_decryptor_ms_  = 0;  // 0 = not waiting
 };
 
 } // namespace ao

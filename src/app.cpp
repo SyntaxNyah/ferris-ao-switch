@@ -308,6 +308,8 @@ void App::disconnect() {
         ao_client_ = nullptr;
     }
     was_in_lobby_ = false;
+    fallback_asset_url_[0] = '\0';
+    AssetManager::clear_asset_url();
     if (game_state_) {
         game_state_->connected = false;
         game_state_->in_lobby  = false;

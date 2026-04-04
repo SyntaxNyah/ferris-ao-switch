@@ -28,12 +28,14 @@ void AOClient::on_connected(const char* hdid) {
 
 void AOClient::on_disconnected() {
     hs_state_ = HandshakeState::Idle;
-    state_.connected  = false;
-    state_.in_lobby   = false;
-    parse_len_ = 0;
-    akashi_pr_seen_ = false;
-    akashi_pr_ms_   = 0;
-    AssetManager::clear_asset_url();
+    state_.connected      = false;
+    state_.in_lobby       = false;
+    parse_len_            = 0;
+    akashi_pr_seen_       = false;
+    akashi_pr_ms_         = 0;
+    akashi_decryptor_ms_  = 0;
+    // Asset URL lifecycle is managed by App, not here.
+    // App::disconnect() / App::connect() call set/clear_asset_url as needed.
 }
 
 void AOClient::send(const char* buf, int len) {
@@ -79,6 +81,18 @@ void AOClient::process(InQueue& in) {
         (int32_t)(SDL_GetTicks() - akashi_pr_ms_) > 5000) {
         std::fprintf(stderr, "[ao_client] Akashi direct: PR dump settled, requesting chars\n");
         akashi_pr_seen_ = false; // fire once
+        char buf[32];
+        send(buf, cmd::rc(buf, sizeof(buf)));
+        hs_state_ = HandshakeState::WaitSc;
+    }
+
+    // Akashi post-decryptor: some servers send decryptor but then wait for
+    // the client to send RC rather than following up with ID/PN/FL/SI.
+    // If we've been in WaitId for 3 s after an Akashi decryptor, send RC.
+    if (hs_state_ == HandshakeState::WaitId && akashi_decryptor_ms_ != 0 &&
+        (int32_t)(SDL_GetTicks() - akashi_decryptor_ms_) > 3000) {
+        std::fprintf(stderr, "[ao_client] Akashi: no ID in 3s — sending RC to drive char list\n");
+        akashi_decryptor_ms_ = 0; // fire once
         char buf[32];
         send(buf, cmd::rc(buf, sizeof(buf)));
         hs_state_ = HandshakeState::WaitSc;
@@ -173,10 +187,11 @@ void AOClient::on_decryptor(const Packet& /*p*/) {
         // Setting InLobby here was the bug: on_id only handles WaitId/WaitDecryptor,
         // so the server's ID was silently dropped and SC never arrived.
         std::fprintf(stderr, "[ao_client] Akashi: decryptor — opening lobby UI, continuing handshake for char list\n");
-        state_.in_lobby  = true;
-        state_.connected = true;
-        akashi_pr_seen_  = false; // prevent the 5-second RC timer from firing
-        hs_state_ = HandshakeState::WaitId; // same as standard path from here
+        state_.in_lobby      = true;
+        state_.connected     = true;
+        akashi_pr_seen_      = false; // prevent the 5-second PR timer from firing
+        akashi_decryptor_ms_ = SDL_GetTicks(); // start 3-second WaitId fallback
+        hs_state_ = HandshakeState::WaitId;
     } else {
         // Standard servers: HI already sent, wait for server's ID packet.
         hs_state_ = HandshakeState::WaitId;
@@ -193,8 +208,7 @@ void AOClient::on_id(const Packet& p) {
     // Accept ID from both WaitId and WaitDecryptor — some servers skip decryptor.
     if (hs_state_ == HandshakeState::WaitId ||
         hs_state_ == HandshakeState::WaitDecryptor) {
-        // Send our client ID. Do NOT send askchaa yet — wait for PN first
-        // (webAO sends askchaa in response to PN, not ID).
+        akashi_decryptor_ms_ = 0; // ID arrived — cancel the 3s RC fallback timer
         char buf[128];
         send(buf, cmd::id(buf, sizeof(buf)));
         hs_state_ = HandshakeState::WaitSi;
@@ -251,7 +265,8 @@ void AOClient::on_sc(const Packet& p) {
         state_.characters[i].showname[0] = '\0';
         ++state_.char_count;
     }
-    if (hs_state_ == HandshakeState::WaitSc) {
+    if (hs_state_ == HandshakeState::WaitSc ||
+        hs_state_ == HandshakeState::WaitId) {  // server responded to early RC
         char buf[32];
         send(buf, cmd::rm(buf, sizeof(buf)));
         hs_state_ = HandshakeState::WaitSm;
