@@ -164,7 +164,14 @@ void AOClient::handle(const Packet& pkt) {
 
 void AOClient::on_decryptor(const Packet& /*p*/) {
     // Server says NOENCRYPT — HI was already sent in on_connected().
-    // Just advance the state; do NOT send HI again (double HI causes KB/kick).
+    // For Akashi servers that send PR/PU before decryptor: the server likely
+    // ignored our premature HI and is now waiting for HI in response to
+    // decryptor. Resend HI only in that case (akashi_pr_seen_ is the guard).
+    // Do NOT resend unconditionally — double HI causes KB/kick on tsuserver.
+    if (akashi_pr_seen_) {
+        char buf[256];
+        send(buf, cmd::hi(buf, sizeof(buf), hdid_));
+    }
     hs_state_ = HandshakeState::WaitId;
 }
 

@@ -63,6 +63,6 @@ struct InPacket {
 };
 
 using OutQueue = SPSCQueue<OutPacket, 64>;
-using InQueue  = SPSCQueue<InPacket,  16>; // 16 × 128 KB ≈ 2 MB
+using InQueue  = SPSCQueue<InPacket,  64>; // 64 × 128 KB ≈ 8 MB — large enough for Akashi's 36-packet initial burst
 
 } // namespace ao
