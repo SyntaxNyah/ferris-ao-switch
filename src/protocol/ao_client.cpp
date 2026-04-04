@@ -35,6 +35,7 @@ void AOClient::on_disconnected() {
     akashi_pr_ms_         = 0;
     akashi_decryptor_ms_  = 0;
     waitsc_start_ms_      = 0;
+    waitsi_start_ms_      = 0;
     // Asset URL lifecycle is managed by App, not here.
     // App::disconnect() / App::connect() call set/clear_asset_url as needed.
 }
@@ -99,6 +100,20 @@ void AOClient::process(InQueue& in) {
         char buf1[128]; send(buf1, cmd::id(buf1, sizeof(buf1)));
         char buf2[32];  send(buf2, cmd::askchaa(buf2, sizeof(buf2)));
         hs_state_ = HandshakeState::WaitSi;
+        waitsi_start_ms_ = SDL_GetTicks();
+    }
+
+    // Akashi WaitSi timeout: if SI hasn't arrived within 8 s of entering WaitSi
+    // (e.g. the server ignores our ID+askchaa), force InLobby with whatever
+    // char names we've accumulated from PU packets.
+    if (hs_state_ == HandshakeState::WaitSi && waitsi_start_ms_ != 0 &&
+        (int32_t)(SDL_GetTicks() - waitsi_start_ms_) > 8000) {
+        std::fprintf(stderr, "[ao_client] Akashi: SI never arrived after 8s — forcing InLobby (chars from PU: %d)\n",
+            state_.char_count);
+        waitsi_start_ms_ = 0;
+        state_.in_lobby  = true;
+        state_.connected = true;
+        hs_state_ = HandshakeState::InLobby;
     }
 
     // Akashi WaitSc timeout: if SC hasn't arrived within 8 s of entering WaitSc,
@@ -555,11 +570,32 @@ void AOClient::on_pr(const Packet& /*p*/) {
     }
 }
 
-void AOClient::on_pu(const Packet& /*p*/) {
+void AOClient::on_pu(const Packet& p) {
     // PU#uid#data_type#value#% — player state update (name/char/showname/area).
     // Keep the PR/PU arrival timer fresh so we don't fire RC mid-dump.
     if (hs_state_ == HandshakeState::WaitDecryptor && akashi_pr_seen_)
         akashi_pr_ms_ = SDL_GetTicks();
+
+    // In Akashi, uid == char slot index.  type 0 = character assignment.
+    // Parse the PU flood to build char names even when SC never arrives.
+    if (p.field_count >= 3) {
+        int uid  = p.field_int(0);
+        int type = p.field_int(1);
+        if (type == 0 && uid >= 0 && uid < GameState::MAX_CHARS) {
+            const char* char_name = p.field(2);
+            if (char_name[0] != '\0') {
+                char tmp[64];
+                std::strncpy(tmp, char_name, sizeof(tmp) - 1);
+                tmp[sizeof(tmp) - 1] = '\0';
+                Packet::unescape(tmp);
+                std::strncpy(state_.characters[uid].name, tmp,
+                    sizeof(state_.characters[0].name) - 1);
+                // Extend char_count to cover this slot if needed
+                if (uid + 1 > state_.char_count)
+                    state_.char_count = uid + 1;
+            }
+        }
+    }
 }
 
 void AOClient::on_ti(const Packet& /*p*/) {

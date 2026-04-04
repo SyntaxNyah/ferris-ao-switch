@@ -94,6 +94,8 @@ private:
     uint32_t akashi_decryptor_ms_  = 0;  // 0 = not waiting
     // Timestamp when we entered WaitSc; used to force InLobby if SC never arrives.
     uint32_t waitsc_start_ms_      = 0;  // 0 = not in WaitSc
+    // Timestamp when we entered WaitSi; used to force InLobby if SI never arrives.
+    uint32_t waitsi_start_ms_      = 0;  // 0 = not in WaitSi
 };
 
 } // namespace ao
