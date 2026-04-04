@@ -3,6 +3,7 @@
 #include "state/game_state.hpp"
 #include "ui/screen.hpp"
 #include "ui/screens/char_select_screen.hpp"
+#include "assets/asset_manager.hpp"
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_ttf.h>
 #include <SDL2/SDL_image.h>
@@ -242,6 +243,19 @@ bool App::connect(const char* host, uint16_t port, ConnMode mode) {
     // Reset game state for a fresh connection
     *game_state_  = GameState();
     was_in_lobby_ = false;
+
+    // For WS/WSS servers, derive the asset base URL from the host if nothing
+    // was configured via servers.cfg or a previous session.  This mirrors
+    // exactly how webAO works: assets live at the same origin as the socket.
+    // The server's ASS packet will override this if it provides a different URL.
+    if (!AssetManager::has_asset_url() &&
+        (mode == ConnMode::WS || mode == ConnMode::WSS)) {
+        char url[512];
+        std::snprintf(url, sizeof(url), "%s://%s/base",
+            (mode == ConnMode::WSS) ? "https" : "http", host);
+        AssetManager::set_asset_url(url);
+        std::fprintf(stderr, "[app] WS asset URL auto-set: %s\n", url);
+    }
 
     // Create fresh network objects
     net_thread_ = new NetworkThread(in_queue_, out_queue_);
