@@ -163,10 +163,26 @@ void AOClient::handle(const Packet& pkt) {
 // ── Handshake handlers ─────────────────────────────────────────────────────────
 
 void AOClient::on_decryptor(const Packet& /*p*/) {
-    // HI was already sent in on_connected(). Just wait for the server's ID.
-    // Do NOT resend HI here — double HI causes KB/kick on tsuserver.
-    // Do NOT send askchaa here — it must follow PN (see on_pn).
-    hs_state_ = HandshakeState::WaitId;
+    if (akashi_pr_seen_) {
+        // Akashi direct-lobby: the server will never send ID/PN/SI/SC/SM/DONE.
+        // Identify ourselves and speculatively request the char+music lists,
+        // then enter the lobby immediately — don't wait for packets that won't come.
+        // on_sc/on_sm will populate chars[]/music[] if the server responds.
+        char buf[128];
+        send(buf, cmd::id(buf, sizeof(buf)));
+        char buf2[32];
+        send(buf2, cmd::rc(buf2, sizeof(buf2)));
+        char buf3[32];
+        send(buf3, cmd::rm(buf3, sizeof(buf3)));
+        std::fprintf(stderr, "[ao_client] Akashi direct-lobby: entering lobby on decryptor\n");
+        state_.in_lobby  = true;
+        state_.connected = true;
+        hs_state_ = HandshakeState::InLobby;
+    } else {
+        // Standard servers: HI already sent, wait for server's ID packet.
+        // Do NOT resend HI — double HI causes KB/kick on tsuserver.
+        hs_state_ = HandshakeState::WaitId;
+    }
 }
 
 void AOClient::on_id(const Packet& p) {
