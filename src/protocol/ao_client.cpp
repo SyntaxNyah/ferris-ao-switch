@@ -16,14 +16,12 @@ void AOClient::on_connected(const char* hdid) {
     std::strncpy(hdid_, hdid, sizeof(hdid_) - 1);
     hs_state_ = HandshakeState::WaitDecryptor;
     parse_len_ = 0;
-    hs_start_ms_   = SDL_GetTicks();
-    akashi_pr_seen_ = false;
-    akashi_pr_ms_   = 0;
-    // Send HI immediately — some servers skip decryptor and go straight to ID.
-    // Traditional servers send decryptor first; on_decryptor() will send HI again
-    // (redundant but harmless) and transition us to WaitId.
-    char buf[256];
-    send(buf, cmd::hi(buf, sizeof(buf), hdid_));
+    hs_start_ms_      = SDL_GetTicks();
+    akashi_pr_seen_   = false;
+    akashi_pr_ms_     = 0;
+    client_id_sent_   = false;
+    // Do NOT send HI here — AO-SDL reference sends nothing on connect.
+    // HI is sent only in on_decryptor() when the server prompts us.
 }
 
 void AOClient::on_disconnected() {
@@ -33,9 +31,9 @@ void AOClient::on_disconnected() {
     parse_len_            = 0;
     akashi_pr_seen_       = false;
     akashi_pr_ms_         = 0;
-    akashi_decryptor_ms_  = 0;
     waitsc_start_ms_      = 0;
     waitsi_start_ms_      = 0;
+    client_id_sent_       = false;
     // Asset URL lifecycle is managed by App, not here.
     // App::disconnect() / App::connect() call set/clear_asset_url as needed.
 }
@@ -59,91 +57,25 @@ void AOClient::send_fmt(const char* fmt, ...) {
 }
 
 void AOClient::process(InQueue& in) {
-    // Handshake timeout — give up after 15 s if we never reach InLobby
-    if (hs_state_ != HandshakeState::Idle &&
-        hs_state_ != HandshakeState::InLobby &&
-        hs_start_ms_ != 0 &&
-        (int32_t)(SDL_GetTicks() - hs_start_ms_) > 60000) {
-        std::fprintf(stderr, "[ao_client] handshake timed out (state=%d)\n",
-            (int)hs_state_);
-        on_disconnected();
-        // Push synthetic disconnect so App tears down the connection
-        static InPacket disc;
-        std::strncpy(disc.data, "__DISCONNECT#%", sizeof(disc.data));
-        disc.len = (int)std::strlen(disc.data);
-        in.push(disc);
-        return;
-    }
-
-    // Akashi direct-lobby: if we've seen PR/PU but no handshake progress for
-    // 5 s, send RC directly to request the character list. This handles servers
-    // that skip decryptor/ID/SI/CharsCheck entirely and just wait for the
-    // client to ask for data.
-    if (hs_state_ == HandshakeState::WaitDecryptor && akashi_pr_seen_ &&
-        (int32_t)(SDL_GetTicks() - akashi_pr_ms_) > 5000) {
-        std::fprintf(stderr, "[ao_client] Akashi direct: PR dump settled, requesting chars\n");
-        akashi_pr_seen_ = false; // fire once
-        char buf[32];
-        send(buf, cmd::rc(buf, sizeof(buf)));
-        hs_state_ = HandshakeState::WaitSc;
-        waitsc_start_ms_ = SDL_GetTicks();
-    }
-
-    // Akashi post-decryptor: some servers send decryptor but then wait for
-    // the client to drive. If we've been in WaitId for 3 s, send ID+askchaa
-    // to prompt the server to send SI. RC will follow naturally when SI
-    // arrives via on_si(), keeping the proper SI→RC→SC ordering.
-    if (hs_state_ == HandshakeState::WaitId && akashi_decryptor_ms_ != 0 &&
-        (int32_t)(SDL_GetTicks() - akashi_decryptor_ms_) > 3000) {
-        std::fprintf(stderr, "[ao_client] Akashi: no ID in 3s — sending ID+askchaa, waiting for SI\n");
-        akashi_decryptor_ms_ = 0; // fire once
-        char buf1[128]; send(buf1, cmd::id(buf1, sizeof(buf1)));
-        char buf2[32];  send(buf2, cmd::askchaa(buf2, sizeof(buf2)));
-        hs_state_ = HandshakeState::WaitSi;
-        waitsi_start_ms_ = SDL_GetTicks();
-    }
-
-    // Akashi WaitSi timeout: if SI hasn't arrived within 8 s of entering WaitSi
-    // (e.g. the server ignores our ID+askchaa), force InLobby with whatever
-    // char names we've accumulated from PU packets.
-    if (hs_state_ == HandshakeState::WaitSi && waitsi_start_ms_ != 0 &&
-        (int32_t)(SDL_GetTicks() - waitsi_start_ms_) > 8000) {
-        std::fprintf(stderr, "[ao_client] Akashi: SI never arrived after 8s — forcing InLobby (chars from PU: %d)\n",
-            state_.char_count);
-        waitsi_start_ms_ = 0;
-        state_.in_lobby  = true;
-        state_.connected = true;
-        hs_state_ = HandshakeState::InLobby;
-    }
-
-    // Akashi WaitSc timeout: if SC hasn't arrived within 8 s of entering WaitSc,
-    // the server won't send it. Force InLobby so the user reaches the char select
-    // screen with whatever char_count was populated by CharsCheck.
-    if (hs_state_ == HandshakeState::WaitSc && waitsc_start_ms_ != 0 &&
-        (int32_t)(SDL_GetTicks() - waitsc_start_ms_) > 8000) {
-        std::fprintf(stderr, "[ao_client] Akashi: SC never arrived after 8s — forcing InLobby\n");
-        waitsc_start_ms_ = 0;
-        state_.in_lobby  = true;
-        state_.connected = true;
-        hs_state_ = HandshakeState::InLobby;
-    }
-
+    // ── Drain the incoming queue FIRST ────────────────────────────────────────
+    // IMPORTANT: drain before checking ANY timers (including the global timeout).
+    // on_pr() and on_decryptor() reset hs_start_ms_ — if we checked the timeout
+    // before draining, those resets wouldn't have happened yet and the timeout
+    // would fire one frame too early even though decryptor just arrived.
+    // Also: blocking HTTP fetches in App::update() can stall the main thread 2-4 s;
+    // draining first ensures queued packets are never discarded by stale timers.
     static InPacket raw; // static: 128 KB on the call stack is too large
     while (in.pop(raw)) {
-        // Synthetic disconnect signal from network thread
         if (std::strcmp(raw.data, "__DISCONNECT#%") == 0) {
             on_disconnected();
             continue;
         }
-
-        // Append to parse buffer
         int space = (int)sizeof(parse_buf_) - parse_len_ - 1;
         int copy  = raw.len < space ? raw.len : space;
         std::memcpy(parse_buf_ + parse_len_, raw.data, copy);
         parse_len_ += copy;
         parse_buf_[parse_len_] = '\0';
 
-        // Extract and handle complete packets
         int consumed = 0;
         while (consumed < parse_len_) {
             Packet pkt;
@@ -158,6 +90,57 @@ void AOClient::process(InQueue& in) {
             parse_len_ -= consumed;
             parse_buf_[parse_len_] = '\0';
         }
+    }
+
+    // ── Global handshake timeout (checked AFTER drain so resets take effect) ──
+    // on_decryptor() resets hs_start_ms_ so this 60 s window is measured from
+    // when the actual handshake began, not from thread/TLS startup.
+    if (hs_state_ != HandshakeState::Idle &&
+        hs_state_ != HandshakeState::InLobby &&
+        hs_start_ms_ != 0 &&
+        (int32_t)(SDL_GetTicks() - hs_start_ms_) > 60000) {
+        std::fprintf(stderr, "[ao_client] handshake timed out (state=%d)\n",
+            (int)hs_state_);
+        on_disconnected();
+        static InPacket disc;
+        std::strncpy(disc.data, "__DISCONNECT#%", sizeof(disc.data));
+        disc.len = (int)std::strlen(disc.data);
+        in.push(disc);
+        return;
+    }
+
+    // ── Fallback timers (only fire if queue was empty / server didn't respond)
+
+    // Akashi direct-lobby: PR/PU flood with no decryptor after 5 s → skip to RC.
+    if (hs_state_ == HandshakeState::WaitDecryptor && akashi_pr_seen_ &&
+        (int32_t)(SDL_GetTicks() - akashi_pr_ms_) > 5000) {
+        std::fprintf(stderr, "[ao_client] Akashi direct: PR dump settled, requesting chars\n");
+        akashi_pr_seen_ = false;
+        char buf[32];
+        send(buf, cmd::rc(buf, sizeof(buf)));
+        hs_state_ = HandshakeState::WaitSc;
+        waitsc_start_ms_ = SDL_GetTicks();
+    }
+
+    // If SI never arrived within 10 s of WaitSi, send RC directly.
+    if (hs_state_ == HandshakeState::WaitSi && waitsi_start_ms_ != 0 &&
+        (int32_t)(SDL_GetTicks() - waitsi_start_ms_) > 10000) {
+        std::fprintf(stderr, "[ao_client] Akashi: SI timeout — sending RC directly\n");
+        waitsi_start_ms_ = 0;
+        char buf[32];
+        send(buf, cmd::rc(buf, sizeof(buf)));
+        hs_state_ = HandshakeState::WaitSc;
+        waitsc_start_ms_ = SDL_GetTicks();
+    }
+
+    // If SC never arrived within 20 s of WaitSc, give up and force InLobby.
+    if (hs_state_ == HandshakeState::WaitSc && waitsc_start_ms_ != 0 &&
+        (int32_t)(SDL_GetTicks() - waitsc_start_ms_) > 20000) {
+        std::fprintf(stderr, "[ao_client] Akashi: SC never arrived — forcing InLobby\n");
+        waitsc_start_ms_ = 0;
+        state_.in_lobby  = true;
+        state_.connected = true;
+        hs_state_ = HandshakeState::InLobby;
     }
 }
 
@@ -207,28 +190,20 @@ void AOClient::handle(const Packet& pkt) {
 // ── Handshake handlers ─────────────────────────────────────────────────────────
 
 void AOClient::on_decryptor(const Packet& /*p*/) {
-    // Always re-send HI in response to decryptor.
-    // The early HI sent by on_connected() may have arrived before the server
-    // was ready (e.g. Akashi sends PR/PU flood before decryptor, so the early
-    // HI is sent pre-handshake and silently ignored). Re-sending here is
-    // harmless for servers that already processed the early one.
+    // Reset timeout so TLS/WS startup time doesn't eat the budget.
+    hs_start_ms_ = SDL_GetTicks();
+
+    // Always send HI here. Even if the server sent a PR/PU flood before
+    // decryptor (as umineko-style servers do), the server only processes HI
+    // after it finishes sending the initial burst and enters its "waiting for HI"
+    // state. Sending HI early (on the first PR) would arrive while the server
+    // was still broadcasting and get ignored. Cancel the PR-flood-only timer
+    // path and do a proper handshake response now.
+    akashi_pr_seen_ = false; // decryptor arrived — suppress the 5s RC timer
     char buf[256];
     send(buf, cmd::hi(buf, sizeof(buf), hdid_));
-
-    if (akashi_pr_seen_) {
-        // Akashi direct-lobby: server sent PR/PU before decryptor.
-        // Open the lobby UI immediately so CharSelectScreen shows "Waiting...",
-        // then wait for the server's ID response to complete the char list.
-        std::fprintf(stderr, "[ao_client] Akashi: decryptor — re-sent HI, opening lobby UI\n");
-        state_.in_lobby      = true;
-        state_.connected     = true;
-        akashi_pr_seen_      = false; // prevent the 5-second PR timer from firing
-        akashi_decryptor_ms_ = SDL_GetTicks(); // start 3-second WaitId fallback
-        hs_state_ = HandshakeState::WaitId;
-    } else {
-        // Standard servers: re-sent HI, wait for server's ID packet.
-        hs_state_ = HandshakeState::WaitId;
-    }
+    hs_state_ = HandshakeState::WaitId;
+    std::fprintf(stderr, "[ao_client] decryptor received — sent HI\n");
 }
 
 void AOClient::on_id(const Packet& p) {
@@ -238,13 +213,20 @@ void AOClient::on_id(const Packet& p) {
     std::strncpy(state_.server_name,    p.field(1), sizeof(state_.server_name) - 1);
     std::strncpy(state_.server_version, p.field(2), sizeof(state_.server_version) - 1);
 
-    // Accept ID from both WaitId and WaitDecryptor — some servers skip decryptor.
-    if (hs_state_ == HandshakeState::WaitId ||
-        hs_state_ == HandshakeState::WaitDecryptor) {
-        akashi_decryptor_ms_ = 0; // ID arrived — cancel the 3s RC fallback timer
-        char buf[128];
-        send(buf, cmd::id(buf, sizeof(buf)));
-        hs_state_ = HandshakeState::WaitSi;
+    // Accept ID from WaitId, WaitDecryptor, or WaitSi.
+    if (hs_state_ == HandshakeState::WaitId      ||
+        hs_state_ == HandshakeState::WaitDecryptor||
+        hs_state_ == HandshakeState::WaitSi) {
+        // Guard against duplicate ID sends if server repeats the ID packet.
+        if (!client_id_sent_) {
+            char buf[128];
+            send(buf, cmd::id(buf, sizeof(buf)));
+            client_id_sent_ = true;
+        }
+        if (hs_state_ != HandshakeState::WaitSi) {
+            hs_state_ = HandshakeState::WaitSi;
+            waitsi_start_ms_ = SDL_GetTicks();
+        }
     }
 }
 
@@ -299,8 +281,13 @@ void AOClient::on_sc(const Packet& p) {
         state_.characters[i].showname[0] = '\0';
         ++state_.char_count;
     }
+    std::fprintf(stderr, "[ao_client] SC: %d characters\n", state_.char_count);
+    // Accept SC from WaitSc, WaitId (early RC), or WaitSi (server skipped SI).
     if (hs_state_ == HandshakeState::WaitSc ||
-        hs_state_ == HandshakeState::WaitId) {  // server responded to early RC
+        hs_state_ == HandshakeState::WaitId  ||
+        hs_state_ == HandshakeState::WaitSi) {
+        waitsc_start_ms_ = 0;
+        waitsi_start_ms_ = 0;
         char buf[32];
         send(buf, cmd::rm(buf, sizeof(buf)));
         hs_state_ = HandshakeState::WaitSm;
@@ -563,39 +550,26 @@ void AOClient::on_fa(const Packet& p) {
 
 void AOClient::on_pr(const Packet& /*p*/) {
     // PR#uid#type#% — player roster add/remove broadcast. Informational only.
-    // In WaitDecryptor state this signals Akashi direct-lobby mode.
+    // In WaitDecryptor state this signals an Akashi-style server: it is sending
+    // an initial PR/PU player-state flood before the handshake. Mark the flag and
+    // refresh the timer. If decryptor arrives, on_decryptor sends HI properly.
+    // If no decryptor ever arrives (pure Akashi direct-lobby), the 5s timer in
+    // process() fires and skips straight to RC.
     if (hs_state_ == HandshakeState::WaitDecryptor) {
+        if (!akashi_pr_seen_) {
+            hs_start_ms_ = SDL_GetTicks(); // first PR resets the handshake clock
+            std::fprintf(stderr, "[ao_client] Akashi: first PR — PR/PU flood started, waiting for decryptor\n");
+        }
         akashi_pr_seen_ = true;
         akashi_pr_ms_   = SDL_GetTicks();
     }
 }
 
-void AOClient::on_pu(const Packet& p) {
+void AOClient::on_pu(const Packet& /*p*/) {
     // PU#uid#data_type#value#% — player state update (name/char/showname/area).
     // Keep the PR/PU arrival timer fresh so we don't fire RC mid-dump.
     if (hs_state_ == HandshakeState::WaitDecryptor && akashi_pr_seen_)
         akashi_pr_ms_ = SDL_GetTicks();
-
-    // In Akashi, uid == char slot index.  type 0 = character assignment.
-    // Parse the PU flood to build char names even when SC never arrives.
-    if (p.field_count >= 3) {
-        int uid  = p.field_int(0);
-        int type = p.field_int(1);
-        if (type == 0 && uid >= 0 && uid < GameState::MAX_CHARS) {
-            const char* char_name = p.field(2);
-            if (char_name[0] != '\0') {
-                char tmp[64];
-                std::strncpy(tmp, char_name, sizeof(tmp) - 1);
-                tmp[sizeof(tmp) - 1] = '\0';
-                Packet::unescape(tmp);
-                std::strncpy(state_.characters[uid].name, tmp,
-                    sizeof(state_.characters[0].name) - 1);
-                // Extend char_count to cover this slot if needed
-                if (uid + 1 > state_.char_count)
-                    state_.char_count = uid + 1;
-            }
-        }
-    }
 }
 
 void AOClient::on_ti(const Packet& /*p*/) {
