@@ -111,15 +111,17 @@ void AOClient::process(InQueue& in) {
 
     // ── Fallback timers (only fire if queue was empty / server didn't respond)
 
-    // Akashi direct-lobby: PR/PU flood with no decryptor after 5 s → skip to RC.
+    // Akashi/Umineko: PR/PU flood settled (5 s since last PU) → start handshake.
+    // Send askchaa first (the proper trigger for SI, which leads to SC).
+    // If SI never arrives, the WaitSi 10s timer falls back to RC directly.
     if (hs_state_ == HandshakeState::WaitDecryptor && akashi_pr_seen_ &&
         (int32_t)(SDL_GetTicks() - akashi_pr_ms_) > 5000) {
-        std::fprintf(stderr, "[ao_client] Akashi direct: PR dump settled, requesting chars\n");
+        std::fprintf(stderr, "[ao_client] Akashi direct: PR dump settled, sending askchaa\n");
         akashi_pr_seen_ = false;
         char buf[32];
-        send(buf, cmd::rc(buf, sizeof(buf)));
-        hs_state_ = HandshakeState::WaitSc;
-        waitsc_start_ms_ = SDL_GetTicks();
+        send(buf, cmd::askchaa(buf, sizeof(buf)));
+        hs_state_ = HandshakeState::WaitSi;
+        waitsi_start_ms_ = SDL_GetTicks();
     }
 
     // If SI never arrived within 10 s of WaitSi, send RC directly.
@@ -570,11 +572,19 @@ void AOClient::on_pr(const Packet& /*p*/) {
     }
 }
 
-void AOClient::on_pu(const Packet& /*p*/) {
+void AOClient::on_pu(const Packet& p) {
     // PU#uid#data_type#value#% — player state update (name/char/showname/area).
     // Keep the PR/PU arrival timer fresh so we don't fire RC mid-dump.
-    if (hs_state_ == HandshakeState::WaitDecryptor && akashi_pr_seen_)
+    if (hs_state_ == HandshakeState::WaitDecryptor && akashi_pr_seen_) {
         akashi_pr_ms_ = SDL_GetTicks();
+        // Log a few early PU packets so we can learn the data_type encoding
+        static int pu_log_count = 0;
+        if (pu_log_count < 12) {
+            std::fprintf(stderr, "[pu] uid=%s type=%s val=%s\n",
+                p.field(0), p.field(1), p.field(2));
+            ++pu_log_count;
+        }
+    }
 }
 
 void AOClient::on_ti(const Packet& /*p*/) {
