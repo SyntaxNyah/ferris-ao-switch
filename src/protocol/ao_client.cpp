@@ -124,10 +124,10 @@ void AOClient::process(InQueue& in) {
         waitsi_start_ms_ = SDL_GetTicks();
     }
 
-    // If SI never arrived within 10 s of WaitSi, send RC directly.
+    // If SI never arrived within 3 s of WaitSi, send RC directly.
     if (hs_state_ == HandshakeState::WaitSi && waitsi_start_ms_ != 0 &&
-        (int32_t)(SDL_GetTicks() - waitsi_start_ms_) > 10000) {
-        std::fprintf(stderr, "[ao_client] Akashi: SI timeout — sending RC directly\n");
+        (int32_t)(SDL_GetTicks() - waitsi_start_ms_) > 3000) {
+        std::fprintf(stderr, "[ao_client] SI timeout — sending RC directly\n");
         waitsi_start_ms_ = 0;
         char buf[32];
         send(buf, cmd::rc(buf, sizeof(buf)));
@@ -135,10 +135,12 @@ void AOClient::process(InQueue& in) {
         waitsc_start_ms_ = SDL_GetTicks();
     }
 
-    // If SC never arrived within 20 s of WaitSc, give up and force InLobby.
+    // If SC never arrived within 5 s of WaitSc, force InLobby.
+    // SC may still arrive later (e.g. a large WS frame still assembling);
+    // on_sc handles late SC in InLobby state.
     if (hs_state_ == HandshakeState::WaitSc && waitsc_start_ms_ != 0 &&
-        (int32_t)(SDL_GetTicks() - waitsc_start_ms_) > 20000) {
-        std::fprintf(stderr, "[ao_client] Akashi: SC never arrived — forcing InLobby\n");
+        (int32_t)(SDL_GetTicks() - waitsc_start_ms_) > 5000) {
+        std::fprintf(stderr, "[ao_client] SC timeout — forcing InLobby (SC may still arrive)\n");
         waitsc_start_ms_ = 0;
         state_.in_lobby  = true;
         state_.connected = true;
@@ -289,7 +291,7 @@ void AOClient::on_sc(const Packet& p) {
         ++state_.char_count;
     }
     std::fprintf(stderr, "[ao_client] SC: %d characters\n", state_.char_count);
-    // Accept SC from WaitSc, WaitId (early RC), or WaitSi (server skipped SI).
+    // Accept SC from any handshake state or even InLobby (late arrival after timeout).
     if (hs_state_ == HandshakeState::WaitSc ||
         hs_state_ == HandshakeState::WaitId  ||
         hs_state_ == HandshakeState::WaitSi) {
@@ -299,6 +301,8 @@ void AOClient::on_sc(const Packet& p) {
         send(buf, cmd::rm(buf, sizeof(buf)));
         hs_state_ = HandshakeState::WaitSm;
     }
+    // InLobby: SC arrived late (after timeout forced us in); just update the list.
+    // The CharSelectScreen will pick up the new char_count on the next frame.
 }
 
 void AOClient::on_sm(const Packet& p) {
@@ -338,6 +342,7 @@ void AOClient::on_sm(const Packet& p) {
         send(buf, cmd::rd(buf, sizeof(buf)));
         hs_state_ = HandshakeState::WaitDone;
     }
+    // InLobby: SM arrived late; areas/music already updated above, nothing else needed.
 }
 
 void AOClient::on_done(const Packet& /*p*/) {
@@ -575,16 +580,8 @@ void AOClient::on_pr(const Packet& /*p*/) {
 void AOClient::on_pu(const Packet& p) {
     // PU#uid#data_type#value#% — player state update (name/char/showname/area).
     // Keep the PR/PU arrival timer fresh so we don't fire RC mid-dump.
-    if (hs_state_ == HandshakeState::WaitDecryptor && akashi_pr_seen_) {
+    if (hs_state_ == HandshakeState::WaitDecryptor && akashi_pr_seen_)
         akashi_pr_ms_ = SDL_GetTicks();
-        // Log a few early PU packets so we can learn the data_type encoding
-        static int pu_log_count = 0;
-        if (pu_log_count < 12) {
-            std::fprintf(stderr, "[pu] uid=%s type=%s val=%s\n",
-                p.field(0), p.field(1), p.field(2));
-            ++pu_log_count;
-        }
-    }
 }
 
 void AOClient::on_ti(const Packet& /*p*/) {
