@@ -196,65 +196,6 @@ void App::update(uint32_t dt_ms) {
                 fallback_asset_url_);
         }
         ExtensionsConfig::fetch_and_apply();
-        // Fetch characters.json from the asset base — a JSON array of name
-        // strings, e.g. ["Phoenix","Maya",...].  Same format webAO uses.
-        //
-        // This is the authoritative list of EVERY character installed on the
-        // server's CDN, not just the ones currently online. When present it
-        // REPLACES whatever SC (or the Akashi PR/PU flood) populated, so the
-        // char select shows the entire asset roster instead of just online
-        // players. Servers without characters.json fall back to the SC list.
-        if (AssetManager::has_asset_url()) {
-            int size = 0;
-            uint8_t* data = AssetManager::fetch_bytes("characters.json", &size);
-            if (data) {
-                int count = 0;
-                // Parse JSON array of strings: scan for each "value" between [ and ]
-                const char* p = reinterpret_cast<const char*>(data);
-                const char* end = p + size;
-                // skip to '['
-                while (p < end && *p != '[') ++p;
-                while (p < end && count < GameState::MAX_CHARS) {
-                    // find next '"'
-                    while (p < end && *p != '"' && *p != ']') ++p;
-                    if (p >= end || *p == ']') break;
-                    ++p; // skip opening '"'
-                    const char* name_start = p;
-                    while (p < end && *p != '"') ++p;
-                    int len = (int)(p - name_start);
-                    if (len > 0 && len < (int)sizeof(game_state_->characters[0].name)) {
-                        // Overwrite slot `count` with the full-roster name.
-                        std::memset(&game_state_->characters[count], 0,
-                            sizeof(game_state_->characters[count]));
-                        std::memcpy(game_state_->characters[count].name, name_start, len);
-                        game_state_->characters[count].name[len] = '\0';
-                        ++count;
-                    }
-                    if (p < end) ++p; // skip closing '"'
-                }
-                if (count > 0) {
-                    // Clear any trailing entries the old (shorter) list left behind.
-                    for (int i = count; i < game_state_->char_count &&
-                                         i < GameState::MAX_CHARS; ++i) {
-                        std::memset(&game_state_->characters[i], 0,
-                            sizeof(game_state_->characters[i]));
-                    }
-                    game_state_->char_count = count;
-                    std::fprintf(stderr,
-                        "[app] characters.json: loaded %d characters (full roster)\n",
-                        count);
-                } else {
-                    std::fprintf(stderr,
-                        "[app] characters.json parsed 0 entries — keeping existing list (%d)\n",
-                        game_state_->char_count);
-                }
-                SDL_free(data);
-            } else {
-                std::fprintf(stderr,
-                    "[app] characters.json not found — keeping existing list (%d chars)\n",
-                    game_state_->char_count);
-            }
-        }
 
         // Bulk-prefetch every character icon so the char select grid lights up
         // as the user scrolls instead of per-page. AssetStream workers share a

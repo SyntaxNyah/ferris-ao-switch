@@ -67,6 +67,52 @@ struct Packet {
     }
 };
 
+// Stream-iterate the fields of one raw packet without copying into Packet.
+// `data` points at the start of the packet (header) and `len` is at least
+// enough bytes to reach the `%` terminator — i.e. the byte count returned by
+// parse_packet for this same packet. The callback `cb(field_ptr, field_len)`
+// is invoked once per `#`-separated field AFTER the header, stopping at the
+// `%` terminator. Intended for packets whose field count can exceed
+// Packet::MAX_FIELDS (SC, SM, CharsCheck on servers with large rosters).
+//
+// The bytes handed to `cb` point into `data` and are NOT null-terminated —
+// the callback must copy them into its own buffer before using them as a
+// C string. `cb` must be a callable with signature void(const char*, int).
+template <typename Fn>
+inline void stream_packet_fields(const char* data, int len, Fn&& cb) {
+    // Skip the header (first '#')
+    int i = 0;
+    while (i < len && data[i] != '#' && data[i] != '%') ++i;
+    if (i >= len || data[i] == '%') return;
+    ++i; // past first '#'
+
+    int seg_start = i;
+    for (; i < len; ++i) {
+        char c = data[i];
+        if (c == '%') {
+            // End of packet. Emit the pending segment only if it's not the
+            // lone '%' terminator (seg_start points right at '%' in that case).
+            break;
+        }
+        if (c == '#') {
+            int seg_len = i - seg_start;
+            // Guard: a lone `%` field would be the terminator token, never a
+            // real field. parse_packet special-cases it — we do the same.
+            if (!(seg_len == 1 && data[seg_start] == '%')) {
+                cb(data + seg_start, seg_len);
+            }
+            seg_start = i + 1;
+        }
+    }
+    // Trailing segment (if the packet had no final '#' before '%')
+    if (seg_start < i) {
+        int seg_len = i - seg_start;
+        if (!(seg_len == 1 && data[seg_start] == '%')) {
+            cb(data + seg_start, seg_len);
+        }
+    }
+}
+
 // Parse raw bytes into a Packet.
 // Returns the number of bytes consumed (0 = no complete packet yet).
 // data must be null-terminated or at least data[0..len-1] valid.

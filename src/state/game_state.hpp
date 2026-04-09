@@ -99,7 +99,11 @@ struct GameState {
     bool in_lobby           = false;    // DONE packet received
 
     // ── Characters ──────────────────────────────────────────────────────────────
-    static constexpr int MAX_CHARS = 256;
+    // Large rosters: Akashi-based servers (e.g. ao.umineko.online) routinely
+    // ship 600+ characters in a single SC packet. Sized at 1024 to fit the
+    // biggest public servers with room to spare. At 128 B per CharacterInfo
+    // this is 128 KB — trivial on the 4 GB Switch.
+    static constexpr int MAX_CHARS = 1024;
     CharacterInfo characters[MAX_CHARS];
     bool          char_taken[MAX_CHARS] = {};
     int           char_count            = 0;
@@ -112,7 +116,10 @@ struct GameState {
     int      my_area_idx = -1;
 
     // ── Music ────────────────────────────────────────────────────────────────────
-    static constexpr int MAX_MUSIC = 512;
+    // Big rosters again: music-heavy servers send several hundred tracks in
+    // the single SM packet that also carries the area list. 2048 × 128 B
+    // = 256 KB.
+    static constexpr int MAX_MUSIC = 2048;
     char music_list[MAX_MUSIC][128];
     int  music_count = 0;
     char current_music[128] = {};
