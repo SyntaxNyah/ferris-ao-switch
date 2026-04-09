@@ -549,4 +549,299 @@ HttpResult https_get(const char* url) {
 
 #endif // AO_TLS
 
+// ── HttpClient (keep-alive) ───────────────────────────────────────────────────
+//
+// A persistent HTTP/1.1 client that reuses the same TCP/TLS connection for
+// multiple requests to the same host. Eliminates the ~300-500 ms TLS
+// handshake that previously ran on every prefetch.
+//
+// Both plain HTTP and HTTPS travel over mbedtls_net (RawConn / TlsConn) so the
+// same Ryujinx-safe connect path is used in both modes. On non-AO_TLS builds
+// these types are stubs, so HttpClient::get() falls back to the one-shot
+// http_get() / https_get() APIs.
+
+#ifdef AO_TLS
+
+// Generic buffered reader over any transport that exposes
+//   int  recv(void*, int);   // >0 bytes, 0 = WANT_READ, <0 = error/closed
+//   bool poll(int timeout_ms);
+//
+// Used for HTTP/1.1 framed responses only — keep-alive requires either
+// Content-Length or chunked framing so the reader knows exactly when the
+// current response ends and the next one begins.
+template <typename Conn>
+struct PersistentBuf {
+    Conn*    conn;
+    int      timeout_ms;
+    char     buf[8192];
+    int      pos    = 0;
+    int      filled = 0;
+
+    bool refill() {
+        pos = filled = 0;
+        uint32_t deadline = SDL_GetTicks() + (uint32_t)timeout_ms;
+        while (true) {
+            if ((int32_t)(deadline - SDL_GetTicks()) <= 0) return false;
+            int n = conn->recv(buf, (int)sizeof(buf));
+            if (n > 0) { filled = n; return true; }
+            if (n < 0) return false;
+            conn->poll(1);
+        }
+    }
+    int read_line(char* out, int cap) {
+        int len = 0;
+        while (len < cap - 1) {
+            if (pos >= filled && !refill()) return -1;
+            char c = buf[pos++];
+            if (c == '\n') {
+                if (len > 0 && out[len - 1] == '\r') --len;
+                out[len] = '\0';
+                return len;
+            }
+            out[len++] = c;
+        }
+        return -1;
+    }
+    int read_exact(char* dst, int want) {
+        int got = 0;
+        while (got < want) {
+            if (pos >= filled && !refill()) break;
+            int avail = filled - pos;
+            int take  = (avail < want - got) ? avail : (want - got);
+            std::memcpy(dst + got, buf + pos, (size_t)take);
+            pos += take;
+            got += take;
+        }
+        return got;
+    }
+};
+
+template <typename Conn>
+static bool persistent_read_chunked(PersistentBuf<Conn>& rb,
+                                    uint8_t** out, int* out_size) {
+    int  cap  = 65536;
+    auto* body = (uint8_t*)SDL_malloc(cap);
+    if (!body) return false;
+    int total = 0;
+    char line[64];
+
+    while (true) {
+        if (rb.read_line(line, sizeof(line)) < 0) { SDL_free(body); return false; }
+        int chunk_size = (int)std::strtol(line, nullptr, 16);
+        if (chunk_size == 0) break;
+        if (chunk_size < 0 || total + chunk_size > HTTP_MAX_BODY) {
+            SDL_free(body); return false;
+        }
+        while (total + chunk_size > cap) {
+            cap *= 2;
+            auto* nb = (uint8_t*)SDL_realloc(body, cap);
+            if (!nb) { SDL_free(body); return false; }
+            body = nb;
+        }
+        int got = rb.read_exact((char*)(body + total), chunk_size);
+        if (got != chunk_size) { SDL_free(body); return false; }
+        total += chunk_size;
+        rb.read_line(line, sizeof(line)); // trailing CRLF
+    }
+    // Consume the trailing empty line after the 0-size chunk
+    rb.read_line(line, sizeof(line));
+    *out      = body;
+    *out_size = total;
+    return true;
+}
+
+template <typename Conn>
+static HttpResult perform_keepalive_request(Conn* conn, const char* host,
+                                            const char* path,
+                                            bool* keep_alive_out) {
+    HttpResult res = {};
+    *keep_alive_out = false;
+
+    char req[1024];
+    int req_len = std::snprintf(req, sizeof(req),
+        "GET %s HTTP/1.1\r\n"
+        "Host: %s\r\n"
+        "User-Agent: ferris-ao-switch/1.0\r\n"
+        "Accept: */*\r\n"
+        "Connection: keep-alive\r\n"
+        "\r\n",
+        path, host);
+
+    int sent = conn->send(req, req_len);
+    if (sent != req_len) {
+        std::snprintf(res.error, sizeof(res.error), "keepalive send failed");
+        return res;
+    }
+
+    PersistentBuf<Conn> rb = {conn, HTTP_TIMEOUT_MS};
+
+    char line[512];
+    if (rb.read_line(line, sizeof(line)) < 0) {
+        std::snprintf(res.error, sizeof(res.error), "keepalive read status timeout");
+        return res;
+    }
+
+    int status_code = 0;
+    if (std::sscanf(line, "HTTP/%*s %d", &status_code) != 1) {
+        std::snprintf(res.error, sizeof(res.error), "malformed status line");
+        return res;
+    }
+
+    int  content_length = -1;
+    bool chunked        = false;
+    bool close_conn     = false;
+    while (true) {
+        int n = rb.read_line(line, sizeof(line));
+        if (n < 0) {
+            std::snprintf(res.error, sizeof(res.error), "header read failed");
+            return res;
+        }
+        if (n == 0) break; // end of headers
+
+        const char* val;
+        if (header_match(line, "content-length", &val))
+            content_length = std::atoi(val);
+        if (header_match(line, "transfer-encoding", &val))
+            if (std::strstr(val, "chunked")) chunked = true;
+        if (header_match(line, "connection", &val))
+            if (std::strstr(val, "close") || std::strstr(val, "Close")) close_conn = true;
+    }
+
+    // Drain the body regardless of status so the socket stays aligned for the
+    // next request when keep-alive is possible.
+    bool body_ok   = false;
+    uint8_t* body  = nullptr;
+    int body_size  = 0;
+
+    if (chunked) {
+        body_ok = persistent_read_chunked(rb, &body, &body_size);
+    } else if (content_length >= 0) {
+        if (content_length > HTTP_MAX_BODY) {
+            std::snprintf(res.error, sizeof(res.error), "body too large (%d)", content_length);
+            return res; // can't drain safely — close
+        }
+        if (content_length == 0) {
+            body_ok = true; // empty body, still ok
+        } else {
+            body = (uint8_t*)SDL_malloc((size_t)content_length);
+            if (body) {
+                int got = rb.read_exact((char*)body, content_length);
+                if (got == content_length) {
+                    body_size = content_length;
+                    body_ok   = true;
+                } else {
+                    SDL_free(body); body = nullptr;
+                }
+            }
+        }
+    } else {
+        // No framing — cannot safely keep-alive. Signal close.
+        close_conn = true;
+        std::snprintf(res.error, sizeof(res.error), "no framing — need close");
+        return res;
+    }
+
+    if (status_code == 200 && body_ok) {
+        res.data = body;
+        res.size = body_size;
+        res.ok   = true;
+    } else {
+        if (body) SDL_free(body);
+        std::snprintf(res.error, sizeof(res.error), "HTTP %d", status_code);
+    }
+
+    if (!close_conn) *keep_alive_out = true;
+    return res;
+}
+
+struct HttpClient::Impl {
+    char     cur_host_[256] = {};
+    int      cur_port_      = 0;
+    bool     cur_tls_       = false;
+    bool     connected_     = false;
+    TlsConn  tls_ {};
+    RawConn  tcp_ {};
+};
+
+HttpClient::HttpClient()  : impl_(new Impl()) {}
+HttpClient::~HttpClient() { close(); delete impl_; }
+
+void HttpClient::close() {
+    if (!impl_ || !impl_->connected_) return;
+    if (impl_->cur_tls_) impl_->tls_.close();
+    else                 impl_->tcp_.close();
+    impl_->connected_   = false;
+    impl_->cur_host_[0] = '\0';
+    impl_->cur_port_    = 0;
+}
+
+HttpResult HttpClient::get(const char* url) {
+    HttpResult res = {};
+
+    ParsedUrl pu = parse_url(url);
+    if (!pu.valid) {
+        std::snprintf(res.error, sizeof(res.error), "invalid URL '%s'", url);
+        return res;
+    }
+
+    // Drop any cached connection to a different host/port/scheme.
+    if (impl_->connected_ &&
+        (std::strcmp(impl_->cur_host_, pu.host) != 0 ||
+         impl_->cur_port_ != pu.port ||
+         impl_->cur_tls_  != pu.tls)) {
+        close();
+    }
+
+    // Up to 2 attempts: on the first failure (which may just be a stale
+    // keep-alive socket closed by the server), reconnect and retry once.
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        if (!impl_->connected_) {
+            bool ok;
+            if (pu.tls) ok = impl_->tls_.connect(pu.host, (uint16_t)pu.port);
+            else        ok = impl_->tcp_.connect(pu.host, (uint16_t)pu.port);
+            if (!ok) {
+                std::snprintf(res.error, sizeof(res.error),
+                    "connect to %s:%d failed", pu.host, pu.port);
+                return res;
+            }
+            std::strncpy(impl_->cur_host_, pu.host, sizeof(impl_->cur_host_) - 1);
+            impl_->cur_host_[sizeof(impl_->cur_host_) - 1] = '\0';
+            impl_->cur_port_  = pu.port;
+            impl_->cur_tls_   = pu.tls;
+            impl_->connected_ = true;
+        }
+
+        bool keep_alive = false;
+        if (pu.tls) res = perform_keepalive_request(&impl_->tls_,
+                                                    pu.host, pu.path, &keep_alive);
+        else        res = perform_keepalive_request(&impl_->tcp_,
+                                                    pu.host, pu.path, &keep_alive);
+
+        if (!keep_alive) close();
+
+        if (res.ok) return res;
+
+        // Failed. If this was the first try and we had been reusing a stale
+        // connection, reconnect and try once more.
+        if (attempt == 0) close();
+    }
+    return res;
+}
+
+#else // AO_TLS not defined — HttpClient falls back to one-shot fetches
+
+struct HttpClient::Impl { int dummy; };
+
+HttpClient::HttpClient()  : impl_(new Impl{0}) {}
+HttpClient::~HttpClient() { delete impl_; }
+
+void HttpClient::close() {}
+
+HttpResult HttpClient::get(const char* url) {
+    if (std::strncmp(url, "https://", 8) == 0) return https_get(url);
+    return http_get(url);
+}
+
+#endif // AO_TLS
+
 } // namespace ao

@@ -4,6 +4,8 @@
 
 namespace ao {
 
+class HttpClient;
+
 // Asset resolution with three-tier priority:
 //
 //   1. HTTP streaming from server's asset base URL (set via set_asset_url from ASS packet)
@@ -41,6 +43,13 @@ public:
     // This call may block (network I/O or disk read); call from a worker thread
     // when latency matters.
     static uint8_t* fetch_bytes(const char* relative, int* out_size);
+
+    // Same as fetch_bytes, but reuses a caller-owned HttpClient for the HTTP
+    // tier. Lets AssetStream worker threads keep their TCP/TLS connection alive
+    // across prefetches, eliminating the per-request TLS handshake.
+    // `client` must not be shared between threads.
+    static uint8_t* fetch_bytes_with_client(const char* relative, int* out_size,
+                                            HttpClient& client);
 
     // Open an asset as an SDL_RWops from the best available source.
     // The returned RWops owns its underlying buffer: SDL_RWclose() frees it.

@@ -43,4 +43,38 @@ HttpResult http_get(const char* url);
 // url must begin with "https://". Returns ok=false when AO_TLS not defined.
 HttpResult https_get(const char* url);
 
+// ── HttpClient: persistent HTTP/1.1 keep-alive ────────────────────────────────
+// Holds an underlying TCP or TLS connection open across multiple requests to
+// the same host, saving the ~300-500 ms TLS handshake + TCP connect on every
+// subsequent fetch. Reconnects automatically when the host/port/scheme changes
+// or the server drops the connection.
+//
+// NOT thread-safe — each thread that wants keep-alive should own its own
+// HttpClient instance (e.g. AssetStream workers hold one client each).
+//
+// Usage:
+//   HttpClient c;
+//   HttpResult r1 = c.get("https://example.com/a.png");
+//   HttpResult r2 = c.get("https://example.com/b.png"); // reuses connection
+//   r1.free(); r2.free();
+class HttpClient {
+public:
+    HttpClient();
+    ~HttpClient();
+
+    HttpClient(const HttpClient&)            = delete;
+    HttpClient& operator=(const HttpClient&) = delete;
+
+    // Fetch the URL. On transient failure (peer closed the keep-alive
+    // connection), reconnects and retries exactly once.
+    HttpResult get(const char* url);
+
+    // Explicitly close any open connection.
+    void close();
+
+private:
+    struct Impl;
+    Impl* impl_;
+};
+
 } // namespace ao

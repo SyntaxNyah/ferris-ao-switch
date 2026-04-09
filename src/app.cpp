@@ -9,6 +9,7 @@
 #include <SDL2/SDL_ttf.h>
 #include <SDL2/SDL_image.h>
 #include <SDL2/SDL_mixer.h>
+#include <cctype>
 #include <cstdio>
 #include <cstring>
 
@@ -195,14 +196,18 @@ void App::update(uint32_t dt_ms) {
                 fallback_asset_url_);
         }
         ExtensionsConfig::fetch_and_apply();
-        // If SC never populated the character list (Akashi servers), fetch
-        // characters.json from the asset base — a JSON array of name strings,
-        // e.g. ["Phoenix","Maya",...].  Same format webAO uses.
-        if (game_state_->char_count == 0 && AssetManager::has_asset_url()) {
+        // Fetch characters.json from the asset base — a JSON array of name
+        // strings, e.g. ["Phoenix","Maya",...].  Same format webAO uses.
+        //
+        // This is the authoritative list of EVERY character installed on the
+        // server's CDN, not just the ones currently online. When present it
+        // REPLACES whatever SC (or the Akashi PR/PU flood) populated, so the
+        // char select shows the entire asset roster instead of just online
+        // players. Servers without characters.json fall back to the SC list.
+        if (AssetManager::has_asset_url()) {
             int size = 0;
             uint8_t* data = AssetManager::fetch_bytes("characters.json", &size);
             if (data) {
-                std::fprintf(stderr, "[app] Loading character list from characters.json\n");
                 int count = 0;
                 // Parse JSON array of strings: scan for each "value" between [ and ]
                 const char* p = reinterpret_cast<const char*>(data);
@@ -218,19 +223,66 @@ void App::update(uint32_t dt_ms) {
                     while (p < end && *p != '"') ++p;
                     int len = (int)(p - name_start);
                     if (len > 0 && len < (int)sizeof(game_state_->characters[0].name)) {
+                        // Overwrite slot `count` with the full-roster name.
+                        std::memset(&game_state_->characters[count], 0,
+                            sizeof(game_state_->characters[count]));
                         std::memcpy(game_state_->characters[count].name, name_start, len);
                         game_state_->characters[count].name[len] = '\0';
                         ++count;
                     }
                     if (p < end) ++p; // skip closing '"'
                 }
-                game_state_->char_count = count;
+                if (count > 0) {
+                    // Clear any trailing entries the old (shorter) list left behind.
+                    for (int i = count; i < game_state_->char_count &&
+                                         i < GameState::MAX_CHARS; ++i) {
+                        std::memset(&game_state_->characters[i], 0,
+                            sizeof(game_state_->characters[i]));
+                    }
+                    game_state_->char_count = count;
+                    std::fprintf(stderr,
+                        "[app] characters.json: loaded %d characters (full roster)\n",
+                        count);
+                } else {
+                    std::fprintf(stderr,
+                        "[app] characters.json parsed 0 entries — keeping existing list (%d)\n",
+                        game_state_->char_count);
+                }
                 SDL_free(data);
-                std::fprintf(stderr, "[app] characters.json: loaded %d characters\n", count);
             } else {
-                std::fprintf(stderr, "[app] characters.json not found\n");
+                std::fprintf(stderr,
+                    "[app] characters.json not found — keeping existing list (%d chars)\n",
+                    game_state_->char_count);
             }
         }
+
+        // Bulk-prefetch every character icon so the char select grid lights up
+        // as the user scrolls instead of per-page. AssetStream workers share a
+        // keep-alive HttpClient each, so queueing hundreds of paths costs one
+        // TLS handshake per worker, not per icon.
+        if (AssetManager::has_asset_url() && game_state_->char_count > 0) {
+            const ExtensionsConfig& ec = ExtensionsConfig::get();
+            int queued = 0;
+            for (int i = 0; i < game_state_->char_count; ++i) {
+                const char* name = game_state_->characters[i].name;
+                if (!name[0]) continue;
+                char lname[64];
+                int j = 0;
+                for (; name[j] && j < (int)sizeof(lname) - 1; ++j)
+                    lname[j] = (char)std::tolower((unsigned char)name[j]);
+                lname[j] = '\0';
+                for (int e = 0; e < ec.charicon_count; ++e) {
+                    char path[256];
+                    std::snprintf(path, sizeof(path),
+                        "characters/%s/char_icon%s", lname, ec.charicon[e]);
+                    if (asset_stream_.prefetch(path)) ++queued;
+                }
+            }
+            std::fprintf(stderr,
+                "[app] queued %d char icon prefetches for %d characters\n",
+                queued, game_state_->char_count);
+        }
+
         push_screen(new CharSelectScreen(*this));
     }
 

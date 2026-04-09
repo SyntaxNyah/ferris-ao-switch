@@ -1,5 +1,6 @@
 #include "asset_stream.hpp"
 #include "asset_manager.hpp"
+#include "../net/http_fetch.hpp"
 #include <cstring>
 #include <cstdio>
 
@@ -91,6 +92,11 @@ int AssetStream::thread_func(void* userdata) {
 void AssetStream::run() {
     char rel[256];
 
+    // Per-worker persistent HTTP client. Each thread owns its own connection
+    // so TLS handshakes happen once, not once per prefetch. This is the main
+    // reason AssetStream is fast enough to warm the char select grid.
+    HttpClient client;
+
     while (running_) {
         // Wait for a request
         SDL_LockMutex(req_mutex_);
@@ -104,13 +110,12 @@ void AssetStream::run() {
         req_head_ = (req_head_ + 1) % STREAM_QUEUE_SIZE;
         SDL_UnlockMutex(req_mutex_);
 
-        // Fetch bytes (HTTP → sdmc: → romfs:)
+        // Fetch bytes (keep-alive HTTP → sdmc: → romfs:)
         int      size = 0;
-        uint8_t* data = AssetManager::fetch_bytes(rel, &size);
+        uint8_t* data = AssetManager::fetch_bytes_with_client(rel, &size, client);
         if (data) {
             // Store in prefetch cache — AssetManager takes ownership
             AssetManager::store_prefetch(rel, data, size);
-            std::fprintf(stdout, "[stream] prefetched '%s' (%d bytes)\n", rel, size);
         } else {
             std::fprintf(stderr, "[stream] prefetch failed for '%s'\n", rel);
         }

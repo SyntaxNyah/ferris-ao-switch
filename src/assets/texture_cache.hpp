@@ -10,7 +10,11 @@ namespace ao {
 // Evicts the least-recently-used entry when full.
 // All textures are owned by the cache and freed on eviction or destruction.
 
-static constexpr int TEX_CACHE_SLOTS = 64;
+// Enlarged from 64 to hold most of a full AO character roster at once
+// (typical servers have 100-600 chars). Sized as a balance between VRAM
+// footprint (~16 MB at 64 KB per 128x128 RGBA icon) and the cost of the
+// linear slot-search that peek() runs every frame in CharSelectScreen.
+static constexpr int TEX_CACHE_SLOTS = 256;
 
 struct TexEntry {
     char          path[256] = {};
