@@ -122,9 +122,10 @@ void AOClient::process(InQueue& in) {
 
     // ── Fallback timers (only fire if queue was empty / server didn't respond)
 
-    // Akashi/Umineko: PR/PU flood settled (5 s since last PU) → start handshake.
-    // Send askchaa first (the proper trigger for SI, which leads to SC).
-    // If SI never arrives, the WaitSi 10s timer falls back to RC directly.
+    // Akashi/Umineko: PR/PU flood with no decryptor after 5 s → start handshake
+    // ourselves by sending askchaa. Covers servers that broadcast PR/PU at
+    // connect but never send decryptor. If SI never arrives, the WaitSi timer
+    // below falls back to RC directly.
     if (hs_state_ == HandshakeState::WaitDecryptor && akashi_pr_seen_ &&
         (int32_t)(SDL_GetTicks() - akashi_pr_ms_) > 5000) {
         std::fprintf(stderr, "[ao_client] Akashi direct: PR dump settled, sending askchaa\n");
@@ -133,6 +134,19 @@ void AOClient::process(InQueue& in) {
         send(buf, cmd::askchaa(buf, sizeof(buf)));
         hs_state_ = HandshakeState::WaitSi;
         waitsi_start_ms_ = SDL_GetTicks();
+    }
+
+    // Umineko-style fallback: we sent HI from on_decryptor, but ID never came.
+    // The server's decryptor was a broadcast, not a handshake trigger. Skip
+    // past the HI/ID exchange and send RC directly.
+    if (hs_state_ == HandshakeState::WaitId && akashi_pr_seen_ &&
+        (int32_t)(SDL_GetTicks() - akashi_pr_ms_) > 5000) {
+        std::fprintf(stderr, "[ao_client] WaitId timeout after PR flood: decryptor was a broadcast, sending RC\n");
+        akashi_pr_seen_ = false;
+        char buf[32];
+        send(buf, cmd::rc(buf, sizeof(buf)));
+        hs_state_ = HandshakeState::WaitSc;
+        waitsc_start_ms_ = SDL_GetTicks();
     }
 
     // If SI never arrived within 3 s of WaitSi, send RC directly.
@@ -207,25 +221,21 @@ void AOClient::on_decryptor(const Packet& /*p*/) {
     // Reset timeout so TLS/WS startup time doesn't eat the budget.
     hs_start_ms_ = SDL_GetTicks();
 
-    if (akashi_pr_seen_) {
-        // PR/PU flood arrived before decryptor — Akashi/Umineko-style server.
-        // These servers do NOT use the HI/ID handshake; they want RC directly.
-        // Sending HI confuses them (they ignore it and never send ID back).
-        // Refresh the flood timer so the 5-second RC-sender fires from now,
-        // not from the last PU — giving the server time to finish broadcasting.
-        akashi_pr_ms_ = SDL_GetTicks();
-        // State stays WaitDecryptor; the existing 5s timer sends RC.
-        std::fprintf(stderr, "[ao_client] decryptor after PR flood — skipping HI, waiting 5s then RC\n");
-    } else {
-        // Standard tsuserver/Python servers: send HI, wait for ID.
-        char buf[256];
-        send(buf, cmd::hi(buf, sizeof(buf), hdid_));
-        hs_state_ = HandshakeState::WaitId;
-        std::fprintf(stderr, "[ao_client] decryptor received — sent HI\n");
-    }
+    // Always send HI — Akashi/Umineko follow the same HI/ID/askchaa handshake
+    // as tsuserver; the earlier PR/PU flood is just a player-roster broadcast,
+    // not a signal to skip the handshake. If the server ignores HI (decryptor
+    // was just a broadcast with no real handshake behind it), the WaitId→RC
+    // fallback timer in process() takes over 5s later.
+    if (akashi_pr_seen_)
+        akashi_pr_ms_ = SDL_GetTicks(); // restart 5s WaitId countdown from now
+    char buf[256];
+    send(buf, cmd::hi(buf, sizeof(buf), hdid_));
+    hs_state_ = HandshakeState::WaitId;
+    std::fprintf(stderr, "[ao_client] decryptor received — sent HI\n");
 }
 
 void AOClient::on_id(const Packet& p) {
+    akashi_pr_seen_ = false; // ID arrived — cancel the WaitId→RC fallback timer
     // field(0) = server-assigned UID — needed for CC
     state_.my_uid = p.field_int(0);
     // Store server name/version
