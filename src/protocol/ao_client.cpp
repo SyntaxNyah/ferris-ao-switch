@@ -81,9 +81,20 @@ void AOClient::process(InQueue& in) {
             Packet pkt;
             int n = parse_packet(parse_buf_ + consumed, parse_len_ - consumed, pkt);
             if (n == 0) break;
-            consumed += n;
             std::fprintf(stderr, "[ao_client] pkt: %s\n", pkt.header);
-            handle(pkt);
+            // SC / SM / CharsCheck can exceed Packet::MAX_FIELDS on servers
+            // with hundreds of characters or music tracks — dispatch them to
+            // streaming handlers that walk the raw bytes directly.
+            if (std::strcmp(pkt.header, "SC") == 0) {
+                on_sc_stream(parse_buf_ + consumed, n);
+            } else if (std::strcmp(pkt.header, "SM") == 0) {
+                on_sm_stream(parse_buf_ + consumed, n);
+            } else if (std::strcmp(pkt.header, "CharsCheck") == 0) {
+                on_chars_check_stream(parse_buf_ + consumed, n);
+            } else {
+                handle(pkt);
+            }
+            consumed += n;
         }
         if (consumed > 0) {
             std::memmove(parse_buf_, parse_buf_ + consumed, parse_len_ - consumed);
@@ -137,7 +148,7 @@ void AOClient::process(InQueue& in) {
 
     // If SC never arrived within 5 s of WaitSc, force InLobby.
     // SC may still arrive later (e.g. a large WS frame still assembling);
-    // on_sc handles late SC in InLobby state.
+    // on_sc_stream handles late SC in InLobby state.
     if (hs_state_ == HandshakeState::WaitSc && waitsc_start_ms_ != 0 &&
         (int32_t)(SDL_GetTicks() - waitsc_start_ms_) > 5000) {
         std::fprintf(stderr, "[ao_client] SC timeout — forcing InLobby (SC may still arrive)\n");
@@ -161,8 +172,7 @@ void AOClient::handle(const Packet& pkt) {
     if (std::strcmp(h, "FL")          == 0) { on_fl(pkt);         return; }
     if (std::strcmp(h, "ASS")         == 0) { on_ass(pkt);         return; }
     if (std::strcmp(h, "SI")          == 0) { on_si(pkt);         return; }
-    if (std::strcmp(h, "SC")          == 0) { on_sc(pkt);         return; }
-    if (std::strcmp(h, "SM")          == 0) { on_sm(pkt);         return; }
+    // SC and SM are streaming-dispatched from process() — never reach here.
     if (std::strcmp(h, "DONE")        == 0) { on_done(pkt);       return; }
 
     // In-lobby
@@ -173,7 +183,7 @@ void AOClient::handle(const Packet& pkt) {
     if (std::strcmp(h, "HP")          == 0) { on_hp(pkt);         return; }
     if (std::strcmp(h, "BN")          == 0) { on_bn(pkt);         return; }
     if (std::strcmp(h, "LE")          == 0) { on_le(pkt);         return; }
-    if (std::strcmp(h, "CharsCheck")  == 0) { on_chars_check(pkt);return; }
+    // CharsCheck is streaming-dispatched from process() — never reach here.
     if (std::strcmp(h, "PV")          == 0) { on_pv(pkt);         return; }
     if (std::strcmp(h, "AUTH")        == 0) { on_auth(pkt);       return; }
     if (std::strcmp(h, "BD")          == 0) { on_bd(pkt);         return; }
@@ -279,18 +289,31 @@ void AOClient::on_si(const Packet& p) {
     }
 }
 
-void AOClient::on_sc(const Packet& p) {
+void AOClient::on_sc_stream(const char* raw, int len) {
     // SC#char0#char1#...#%
+    // Each field is "Name&desc&&&&&" per the AO2 wire format. webAO splits
+    // on '&' and takes chargs[0] as the folder name; we do the same. The raw
+    // streaming iterator is used instead of Packet because SC on large
+    // servers (e.g. ao.umineko.online) can contain 600+ fields, which would
+    // silently truncate at Packet::MAX_FIELDS = 35.
     state_.char_count = 0;
-    for (int i = 0; i < p.field_count && i < GameState::MAX_CHARS; ++i) {
-        char tmp[64];
-        std::strncpy(tmp, p.field(i), sizeof(tmp) - 1);
+    stream_packet_fields(raw, len, [&](const char* f, int flen) {
+        if (state_.char_count >= GameState::MAX_CHARS) return;
+        // Take the substring before the first '&' as the folder name
+        int name_len = 0;
+        while (name_len < flen && f[name_len] != '&') ++name_len;
+        constexpr int NAME_CAP = (int)sizeof(state_.characters[0].name);
+        char tmp[NAME_CAP * 4]; // unescape is shrink-only, so a little headroom is enough
+        int copy = name_len < (int)sizeof(tmp) - 1 ? name_len : (int)sizeof(tmp) - 1;
+        std::memcpy(tmp, f, copy);
+        tmp[copy] = '\0';
         Packet::unescape(tmp);
-        std::strncpy(state_.characters[i].name, tmp, sizeof(state_.characters[0].name) - 1);
-        state_.characters[i].showname[0] = '\0';
+        std::strncpy(state_.characters[state_.char_count].name, tmp, NAME_CAP - 1);
+        state_.characters[state_.char_count].name[NAME_CAP - 1] = '\0';
+        state_.characters[state_.char_count].showname[0] = '\0';
         ++state_.char_count;
-    }
-    std::fprintf(stderr, "[ao_client] SC: %d characters\n", state_.char_count);
+    });
+    std::fprintf(stderr, "[ao_client] SC: %d characters (streamed)\n", state_.char_count);
     // Accept SC from any handshake state or even InLobby (late arrival after timeout).
     if (hs_state_ == HandshakeState::WaitSc ||
         hs_state_ == HandshakeState::WaitId  ||
@@ -305,37 +328,53 @@ void AOClient::on_sc(const Packet& p) {
     // The CharSelectScreen will pick up the new char_count on the next frame.
 }
 
-void AOClient::on_sm(const Packet& p) {
+void AOClient::on_sm_stream(const char* raw, int len) {
     // SM#area0#area1#...#song0#song1#...#%
-    // Areas come first (no '.'), then music files (contain '.')
+    // Areas come first (no '.'), then music files (contain '.').
+    // Streamed for the same reason as on_sc_stream — the music list can
+    // easily exceed Packet::MAX_FIELDS = 35 on music-heavy servers.
     state_.area_count  = 0;
     state_.music_count = 0;
     bool in_music = false;
 
-    for (int i = 0; i < p.field_count; ++i) {
-        const char* f = p.field(i);
-        if (!in_music && std::strchr(f, '.') != nullptr) in_music = true;
-
+    stream_packet_fields(raw, len, [&](const char* f, int flen) {
+        // "In music" once we see a filename with a dot. Category dividers
+        // like "=== songs ===" without a dot stay treated as areas on some
+        // servers — webAO's logic matches this heuristic.
+        if (!in_music) {
+            // Scan for '.' in [0..flen)
+            for (int i = 0; i < flen; ++i) {
+                if (f[i] == '.') { in_music = true; break; }
+            }
+        }
         if (!in_music) {
             if (state_.area_count < GameState::MAX_AREAS) {
-                char tmp[128];
-                std::strncpy(tmp, f, sizeof(tmp) - 1);
+                constexpr int CAP = (int)sizeof(state_.areas[0].name);
+                char tmp[CAP * 4];
+                int copy = flen < (int)sizeof(tmp) - 1 ? flen : (int)sizeof(tmp) - 1;
+                std::memcpy(tmp, f, copy);
+                tmp[copy] = '\0';
                 Packet::unescape(tmp);
-                std::strncpy(state_.areas[state_.area_count].name, tmp,
-                    sizeof(state_.areas[0].name) - 1);
+                std::strncpy(state_.areas[state_.area_count].name, tmp, CAP - 1);
+                state_.areas[state_.area_count].name[CAP - 1] = '\0';
                 ++state_.area_count;
             }
         } else {
             if (state_.music_count < GameState::MAX_MUSIC) {
-                char tmp[128];
-                std::strncpy(tmp, f, sizeof(tmp) - 1);
+                constexpr int CAP = (int)sizeof(state_.music_list[0]);
+                char tmp[CAP * 4];
+                int copy = flen < (int)sizeof(tmp) - 1 ? flen : (int)sizeof(tmp) - 1;
+                std::memcpy(tmp, f, copy);
+                tmp[copy] = '\0';
                 Packet::unescape(tmp);
-                std::strncpy(state_.music_list[state_.music_count], tmp,
-                    sizeof(state_.music_list[0]) - 1);
+                std::strncpy(state_.music_list[state_.music_count], tmp, CAP - 1);
+                state_.music_list[state_.music_count][CAP - 1] = '\0';
                 ++state_.music_count;
             }
         }
-    }
+    });
+    std::fprintf(stderr, "[ao_client] SM: %d areas, %d music (streamed)\n",
+        state_.area_count, state_.music_count);
 
     if (hs_state_ == HandshakeState::WaitSm) {
         char buf[32];
@@ -491,14 +530,19 @@ void AOClient::on_le(const Packet& p) {
     }
 }
 
-void AOClient::on_chars_check(const Packet& p) {
-    int n = p.field_count < GameState::MAX_CHARS ? p.field_count : GameState::MAX_CHARS;
-    for (int i = 0; i < n; ++i)
-        state_.char_taken[i] = (p.field(i)[0] == '1');
+void AOClient::on_chars_check_stream(const char* raw, int len) {
+    // CharsCheck#0#1#0#...#% — one field per character, '1' if taken.
+    // Streamed because field count == char_count, which can be hundreds.
+    int idx = 0;
+    stream_packet_fields(raw, len, [&](const char* f, int /*flen*/) {
+        if (idx >= GameState::MAX_CHARS) return;
+        state_.char_taken[idx] = (f[0] == '1');
+        ++idx;
+    });
     // When SC never arrived, use CharsCheck field count as char_count so
     // CharSelectScreen has slots to display.
     if (state_.char_count == 0)
-        state_.char_count = n;
+        state_.char_count = idx;
     // CharsCheck is a broadcast — never trigger handshake actions from here.
     // The handshake is driven by on_decryptor/on_id/on_si and their timers.
 }

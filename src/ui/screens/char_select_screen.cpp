@@ -29,20 +29,9 @@ CharSelectScreen::CharSelectScreen(App& app) : Screen(app) {}
 void CharSelectScreen::on_enter() {
     selected_ = 0;
     scroll_   = 0;
-    // Prefetch icons for the first page (try each configured extension)
-    GameState& gs = app_.state();
-    const ExtensionsConfig& ec = ExtensionsConfig::get();
-    int end = gs.char_count < PAGE ? gs.char_count : PAGE;
-    for (int i = 0; i < end; ++i) {
-        if (!gs.characters[i].name[0]) continue;
-        char lname[64]; lower_copy(lname, gs.characters[i].name, sizeof(lname));
-        for (int e = 0; e < ec.charicon_count; ++e) {
-            char path[256];
-            std::snprintf(path, sizeof(path), "characters/%s/char_icon%s",
-                lname, ec.charicon[e]);
-            app_.asset_stream().prefetch(path);
-        }
-    }
+    // App already bulk-queued every character icon at lobby-enter, so there's
+    // nothing to do here — update() will pick them up as they land in the
+    // prefetch cache.
 }
 
 void CharSelectScreen::handle_event(const SDL_Event& e) {
@@ -97,14 +86,19 @@ void CharSelectScreen::update(uint32_t /*dt*/) {
     if (selected_ >= scroll_ + PAGE) scroll_ = selected_ - PAGE + 1;
     if (scroll_ < 0) scroll_ = 0;
 
-    // Decode up to 8 prefetched icons per frame into the texture cache.
-    // Try each charicon extension in order; use the first one that is ready.
+    // Decode up to DECODE_BUDGET prefetched icons per frame into the texture
+    // cache. Look ahead one full page past the visible region so scrolling
+    // down shows hot textures immediately. Budget is tuned to fit in the
+    // 16 ms frame budget — each PNG decode is ~0.5-1.5 ms on Switch. Try
+    // each charicon extension in order; use the first one that is ready.
+    constexpr int DECODE_BUDGET   = 12;
+    constexpr int LOOKAHEAD_PAGES = 2;  // scan 2 pages (current + next)
     const ExtensionsConfig& ec = ExtensionsConfig::get();
     int decoded = 0;
-    int page_start = scroll_;
-    int page_end   = scroll_ + PAGE;
-    if (page_end > total) page_end = total;
-    for (int i = page_start; i < page_end && decoded < 8; ++i) {
+    int scan_start = scroll_;
+    int scan_end   = scroll_ + PAGE * LOOKAHEAD_PAGES;
+    if (scan_end > total) scan_end = total;
+    for (int i = scan_start; i < scan_end && decoded < DECODE_BUDGET; ++i) {
         if (!gs.characters[i].name[0]) continue;
         char lname[64]; lower_copy(lname, gs.characters[i].name, sizeof(lname));
         bool already_cached = false;
@@ -116,17 +110,14 @@ void CharSelectScreen::update(uint32_t /*dt*/) {
         }
         if (already_cached) continue;
         // Try to decode whichever extension is already prefetched
-        bool decoded_one = false;
-        for (int e = 0; e < ec.charicon_count && !decoded_one; ++e) {
+        for (int e = 0; e < ec.charicon_count; ++e) {
             char path[256];
             std::snprintf(path, sizeof(path), "characters/%s/char_icon%s",
                 lname, ec.charicon[e]);
             if (AssetManager::has_prefetch(path)) {
                 app_.tex_cache().get(app_.renderer().raw(), path);
                 ++decoded;
-                decoded_one = true;
-            } else {
-                app_.asset_stream().prefetch(path);
+                break;
             }
         }
     }

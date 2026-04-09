@@ -23,7 +23,7 @@ namespace ao {
 // Thread safety: prefetch() is safe to call from the main thread at any time.
 //                start() / stop() must be called from the main thread.
 
-static constexpr int STREAM_QUEUE_SIZE = 64;
+static constexpr int STREAM_QUEUE_SIZE = 2048;
 
 class AssetStream {
 public:
@@ -46,7 +46,7 @@ private:
     static int  thread_func(void* userdata);
     void        run();
 
-    static constexpr int N_WORKERS = 4;
+    static constexpr int N_WORKERS = 8;
     SDL_Thread* threads_[N_WORKERS] = {};
     bool        running_   = false;
 

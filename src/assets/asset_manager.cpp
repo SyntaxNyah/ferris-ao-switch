@@ -45,7 +45,7 @@ const char* AssetManager::asset_url()     { return s_asset_url; }
 
 // ── Prefetch cache ────────────────────────────────────────────────────────────
 
-static constexpr int PREFETCH_SLOTS = 32;
+static constexpr int PREFETCH_SLOTS = 768;
 
 struct PrefetchEntry {
     char     rel[256];
@@ -196,6 +196,23 @@ bool AssetManager::resolve(const char* relative, char* out_path, int out_cap) {
 
 // ── fetch_bytes ───────────────────────────────────────────────────────────────
 
+// Local fallback tiers 2 + 3 (sdmc: → romfs:). Used by both fetch_bytes variants.
+static uint8_t* fetch_local(const char* relative, int* out_size) {
+    char path[512];
+    int n = std::snprintf(path, sizeof(path), "%s/%s", USER_BASE, relative);
+    if (n > 0 && n < (int)sizeof(path) && file_exists(path)) {
+        uint8_t* data = read_local_file(path, out_size);
+        if (data) return data;
+    }
+    n = std::snprintf(path, sizeof(path), "%s/%s", ROMFS_BASE, relative);
+    if (n > 0 && n < (int)sizeof(path) && file_exists(path)) {
+        uint8_t* data = read_local_file(path, out_size);
+        if (data) return data;
+    }
+    *out_size = 0;
+    return nullptr;
+}
+
 uint8_t* AssetManager::fetch_bytes(const char* relative, int* out_size) {
     // 0. Prefetch cache (pre-fetched by AssetStream)
     uint8_t* pre = consume_prefetch(relative, out_size);
@@ -204,9 +221,7 @@ uint8_t* AssetManager::fetch_bytes(const char* relative, int* out_size) {
     // 1. HTTP streaming (if server provided an asset URL)
     if (s_asset_url[0] != '\0') {
         // Skip paths we already know 404 on this server
-        if (is_failed(relative)) {
-            // silent — already logged on first miss
-        } else {
+        if (!is_failed(relative)) {
             char full_url[768];
             std::snprintf(full_url, sizeof(full_url), "%s/%s", s_asset_url, relative);
             HttpResult hr = http_get(full_url);
@@ -214,29 +229,35 @@ uint8_t* AssetManager::fetch_bytes(const char* relative, int* out_size) {
                 *out_size = hr.size;
                 return hr.data; // caller owns SDL_malloc'd buffer
             }
-            // Cache the failure so we never retry this path again
             add_failed(relative);
             std::fprintf(stderr, "[assets] HTTP miss '%s', trying local\n", relative);
         }
     }
 
-    // 2. sdmc: user base
-    char path[512];
-    int n = std::snprintf(path, sizeof(path), "%s/%s", USER_BASE, relative);
-    if (n > 0 && n < (int)sizeof(path) && file_exists(path)) {
-        uint8_t* data = read_local_file(path, out_size);
-        if (data) return data;
+    return fetch_local(relative, out_size);
+}
+
+uint8_t* AssetManager::fetch_bytes_with_client(const char* relative, int* out_size,
+                                               HttpClient& client) {
+    // 0. Prefetch cache (pre-fetched by AssetStream)
+    uint8_t* pre = consume_prefetch(relative, out_size);
+    if (pre) return pre;
+
+    // 1. HTTP streaming via persistent client (reuses TCP/TLS connection)
+    if (s_asset_url[0] != '\0') {
+        if (!is_failed(relative)) {
+            char full_url[768];
+            std::snprintf(full_url, sizeof(full_url), "%s/%s", s_asset_url, relative);
+            HttpResult hr = client.get(full_url);
+            if (hr.ok) {
+                *out_size = hr.size;
+                return hr.data;
+            }
+            add_failed(relative);
+        }
     }
 
-    // 3. romfs
-    n = std::snprintf(path, sizeof(path), "%s/%s", ROMFS_BASE, relative);
-    if (n > 0 && n < (int)sizeof(path) && file_exists(path)) {
-        uint8_t* data = read_local_file(path, out_size);
-        if (data) return data;
-    }
-
-    *out_size = 0;
-    return nullptr;
+    return fetch_local(relative, out_size);
 }
 
 // ── open_rwops — owning SDL_RWops ────────────────────────────────────────────

@@ -9,6 +9,7 @@
 #include <SDL2/SDL_ttf.h>
 #include <SDL2/SDL_image.h>
 #include <SDL2/SDL_mixer.h>
+#include <cctype>
 #include <cstdio>
 #include <cstring>
 
@@ -195,42 +196,34 @@ void App::update(uint32_t dt_ms) {
                 fallback_asset_url_);
         }
         ExtensionsConfig::fetch_and_apply();
-        // If SC never populated the character list (Akashi servers), fetch
-        // characters.json from the asset base — a JSON array of name strings,
-        // e.g. ["Phoenix","Maya",...].  Same format webAO uses.
-        if (game_state_->char_count == 0 && AssetManager::has_asset_url()) {
-            int size = 0;
-            uint8_t* data = AssetManager::fetch_bytes("characters.json", &size);
-            if (data) {
-                std::fprintf(stderr, "[app] Loading character list from characters.json\n");
-                int count = 0;
-                // Parse JSON array of strings: scan for each "value" between [ and ]
-                const char* p = reinterpret_cast<const char*>(data);
-                const char* end = p + size;
-                // skip to '['
-                while (p < end && *p != '[') ++p;
-                while (p < end && count < GameState::MAX_CHARS) {
-                    // find next '"'
-                    while (p < end && *p != '"' && *p != ']') ++p;
-                    if (p >= end || *p == ']') break;
-                    ++p; // skip opening '"'
-                    const char* name_start = p;
-                    while (p < end && *p != '"') ++p;
-                    int len = (int)(p - name_start);
-                    if (len > 0 && len < (int)sizeof(game_state_->characters[0].name)) {
-                        std::memcpy(game_state_->characters[count].name, name_start, len);
-                        game_state_->characters[count].name[len] = '\0';
-                        ++count;
-                    }
-                    if (p < end) ++p; // skip closing '"'
+
+        // Bulk-prefetch every character icon so the char select grid lights up
+        // as the user scrolls instead of per-page. AssetStream workers share a
+        // keep-alive HttpClient each, so queueing hundreds of paths costs one
+        // TLS handshake per worker, not per icon.
+        if (AssetManager::has_asset_url() && game_state_->char_count > 0) {
+            const ExtensionsConfig& ec = ExtensionsConfig::get();
+            int queued = 0;
+            for (int i = 0; i < game_state_->char_count; ++i) {
+                const char* name = game_state_->characters[i].name;
+                if (!name[0]) continue;
+                char lname[64];
+                int j = 0;
+                for (; name[j] && j < (int)sizeof(lname) - 1; ++j)
+                    lname[j] = (char)std::tolower((unsigned char)name[j]);
+                lname[j] = '\0';
+                for (int e = 0; e < ec.charicon_count; ++e) {
+                    char path[256];
+                    std::snprintf(path, sizeof(path),
+                        "characters/%s/char_icon%s", lname, ec.charicon[e]);
+                    if (asset_stream_.prefetch(path)) ++queued;
                 }
-                game_state_->char_count = count;
-                SDL_free(data);
-                std::fprintf(stderr, "[app] characters.json: loaded %d characters\n", count);
-            } else {
-                std::fprintf(stderr, "[app] characters.json not found\n");
             }
+            std::fprintf(stderr,
+                "[app] queued %d char icon prefetches for %d characters\n",
+                queued, game_state_->char_count);
         }
+
         push_screen(new CharSelectScreen(*this));
     }
 

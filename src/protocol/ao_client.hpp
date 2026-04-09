@@ -47,9 +47,14 @@ private:
     void on_fl        (const Packet& p);
     void on_ass       (const Packet& p);
     void on_si        (const Packet& p);
-    void on_sc        (const Packet& p);
-    void on_sm        (const Packet& p);
     void on_done      (const Packet& p);
+
+    // Streaming handlers — take raw packet bytes directly because SC/SM/
+    // CharsCheck on large servers can exceed Packet::MAX_FIELDS. `raw`/`len`
+    // come from the same byte range parse_packet consumed.
+    void on_sc_stream        (const char* raw, int len);
+    void on_sm_stream        (const char* raw, int len);
+    void on_chars_check_stream(const char* raw, int len);
 
     // In-lobby handlers
     void on_ms        (const Packet& p);
@@ -59,7 +64,6 @@ private:
     void on_hp        (const Packet& p);
     void on_bn        (const Packet& p);
     void on_le        (const Packet& p);
-    void on_chars_check(const Packet& p);
     void on_pv        (const Packet& p);
     void on_auth      (const Packet& p);
     void on_bd        (const Packet& p);
@@ -96,6 +100,8 @@ private:
     uint32_t waitsc_start_ms_      = 0;  // 0 = not in WaitSc
     // Timestamp when we entered WaitSi; used to force InLobby if SI never arrives.
     uint32_t waitsi_start_ms_      = 0;  // 0 = not in WaitSi
+    // Guard against duplicate ID sends if the server repeats the ID packet.
+    bool     client_id_sent_       = false;
 };
 
 } // namespace ao
