@@ -7,6 +7,7 @@ namespace ao {
 
 enum class HandshakeState {
     Idle,
+    WaitDecryptor,  // connected, waiting for decryptor packet (AO-SDL sends HI in response)
     WaitId,         // sent HI, waiting for ID + PN + FL [+ ASS]
     WaitSi,         // sent askchaa, waiting for SI
     WaitSc,         // sent RC, waiting for SC

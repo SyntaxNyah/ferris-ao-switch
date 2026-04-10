@@ -14,17 +14,15 @@ AOClient::AOClient(OutQueue& out, GameState& state, const char* username)
 
 void AOClient::on_connected(const char* hdid) {
     std::strncpy(hdid_, hdid, sizeof(hdid_) - 1);
-    hs_state_   = HandshakeState::WaitId;
+    hs_state_   = HandshakeState::WaitDecryptor;
     parse_len_  = 0;
     hs_start_ms_ = SDL_GetTicks();
 
-    // webAO sends HI immediately on WebSocket open (Client::joinServer()).
-    // No waiting for a decryptor prompt — the server is expected to respond
-    // with ID + PN + FL in reaction to our HI. See webAO/src/client.ts
-    // onOpen() → joinServer().
-    char buf[256];
-    send(buf, cmd::hi(buf, sizeof(buf), hdid_));
-    std::fprintf(stderr, "[ao_client] connected — sent HI (webAO flow)\n");
+    // AO-SDL sends nothing on connect — HI is emitted in response to the
+    // decryptor packet (see AO-SDL plugins/net/ao/PacketBehavior.cpp,
+    // AOPacketDecryptor::handle). Every AO2 server sends decryptor as its
+    // first line, so waiting for it is the correct gate.
+    std::fprintf(stderr, "[ao_client] connected — waiting for decryptor (AO-SDL flow)\n");
 }
 
 void AOClient::on_disconnected() {
@@ -100,8 +98,10 @@ void AOClient::process(InQueue& in) {
     }
 
     // ── Global handshake timeout (checked AFTER drain so resets take effect) ──
-    // webAO has no fallback timers — the handshake is entirely reactive. If
-    // nothing happens for 60s, the server is dead and we drop the connection.
+    // AO-SDL's handshake is entirely reactive — each packet triggers the
+    // next send. If nothing happens for 60s the server is dead; drop the
+    // connection. on_decryptor() resets hs_start_ms_ so the budget starts
+    // from the real handshake begin, not from TCP/TLS setup.
     if (hs_state_ != HandshakeState::Idle &&
         hs_state_ != HandshakeState::InLobby &&
         hs_start_ms_ != 0 &&
@@ -162,11 +162,15 @@ void AOClient::handle(const Packet& pkt) {
 // ── Handshake handlers ─────────────────────────────────────────────────────────
 
 void AOClient::on_decryptor(const Packet& /*p*/) {
-    // webAO has no decryptor handler — it silently logs "Invalid packet header
-    // decryptor" when tsuserver sends the legacy "decryptor#NOENCRYPT#%" line,
-    // then moves on. We do the same: no state change, no response. HI was
-    // already sent in on_connected().
-    std::fprintf(stderr, "[ao_client] decryptor ignored (webAO flow)\n");
+    // AO-SDL sends HI in response to decryptor (see AO-SDL PacketBehavior.cpp,
+    // AOPacketDecryptor::handle). We don't use the decryptor key itself —
+    // modern servers ship "NOENCRYPT" and clients ignore the value. The
+    // packet's sole purpose is to signal "you may begin the handshake now".
+    hs_start_ms_ = SDL_GetTicks(); // reset so TLS setup time doesn't eat budget
+    char buf[256];
+    send(buf, cmd::hi(buf, sizeof(buf), hdid_));
+    hs_state_ = HandshakeState::WaitId;
+    std::fprintf(stderr, "[ao_client] decryptor received — sent HI (AO-SDL flow)\n");
 }
 
 void AOClient::on_id(const Packet& p) {
@@ -175,16 +179,17 @@ void AOClient::on_id(const Packet& p) {
     std::strncpy(state_.server_name,    p.field(1), sizeof(state_.server_name) - 1);
     std::strncpy(state_.server_version, p.field(2), sizeof(state_.server_version) - 1);
 
-    // webAO's handleID sends "ID#webAO#<version>#%" back to the server unless
-    // the server software is literally "webAO". We're not webAO so always send.
+    // AO-SDL replies with ID#AO-SDL/<version>#2.999.999#% — the fake
+    // "2.999.999" protocol version makes Akashi treat us as a fully modern
+    // AO2 client with all features enabled. Match that format verbatim.
     char buf[128];
-    send(buf, cmd::id(buf, sizeof(buf)));
+    send(buf, cmd::id(buf, sizeof(buf), "ferris-ao-switch/0.1", "2.999.999"));
     std::fprintf(stderr, "[ao_client] ID received — sent client ID\n");
 }
 
 void AOClient::on_pn(const Packet& /*p*/) {
-    // webAO's handlePN sends askchaa in response to the server's player-count
-    // packet — this is the trigger for the server to send SI next.
+    // AO-SDL's AOPacketPN::handle sends askchaa in response to the player-
+    // count packet. That is the trigger for the server to emit SI next.
     char buf[32];
     send(buf, cmd::askchaa(buf, sizeof(buf)));
     if (hs_state_ == HandshakeState::WaitId)
@@ -210,7 +215,7 @@ void AOClient::on_ass(const Packet& p) {
 
 void AOClient::on_si(const Packet& p) {
     // SI#char_count#evi_count#music_count#%
-    // webAO's handleSI unconditionally sends RC#%. We match that behaviour.
+    // AO-SDL's AOPacketSI::handle unconditionally sends RC. Match that.
     (void)p;
     char buf[32];
     send(buf, cmd::rc(buf, sizeof(buf)));
@@ -244,7 +249,7 @@ void AOClient::on_sc_stream(const char* raw, int len) {
         ++state_.char_count;
     });
     std::fprintf(stderr, "[ao_client] SC: %d characters (streamed)\n", state_.char_count);
-    // webAO's handleSC unconditionally sends RM#%. Match that.
+    // AO-SDL's AOPacketSC::handle unconditionally sends RM. Match that.
     char buf[32];
     send(buf, cmd::rm(buf, sizeof(buf)));
     if (hs_state_ != HandshakeState::InLobby)
@@ -300,7 +305,7 @@ void AOClient::on_sm_stream(const char* raw, int len) {
     std::fprintf(stderr, "[ao_client] SM: %d areas, %d music (streamed)\n",
         state_.area_count, state_.music_count);
 
-    // webAO's handleSM unconditionally sends RD#%. Match that.
+    // AO-SDL's AOPacketSM::handle unconditionally sends RD. Match that.
     char buf[32];
     send(buf, cmd::rd(buf, sizeof(buf)));
     if (hs_state_ != HandshakeState::InLobby)
@@ -530,13 +535,13 @@ void AOClient::on_fa(const Packet& p) {
 
 void AOClient::on_pr(const Packet& /*p*/) {
     // PR#uid#type#% — player roster add/remove broadcast. Informational only
-    // in webAO (handlePR just updates a playerlist Map). We don't maintain a
-    // roster yet, so discard.
+    // in AO-SDL (AOPacketPR::handle publishes a PlayerListEvent). We don't
+    // maintain a roster yet, so discard.
 }
 
 void AOClient::on_pu(const Packet& /*p*/) {
     // PU#uid#data_type#value#% — player state update. Informational only in
-    // webAO (handlePU updates a playerlist Map). Discard for now.
+    // AO-SDL (AOPacketPU::handle publishes a PlayerListEvent). Discard.
 }
 
 void AOClient::on_ti(const Packet& /*p*/) {
