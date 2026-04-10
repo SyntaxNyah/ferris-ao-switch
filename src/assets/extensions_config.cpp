@@ -14,23 +14,34 @@ static bool             s_loaded = false;
 // ── Defaults ───────────────────────────────────────────────────────────────────
 
 static void apply_defaults(ExtensionsConfig& c) {
-    // charicon: try .png only (webAO default, AO2 classic default)
-    c.charicon_count = 1;
-    std::strncpy(c.charicon[0], ".png", ExtensionsConfig::EXT_LEN - 1);
+    // Defaults taken verbatim from webAO's fetchExtensions() fallback
+    // (webAO/src/client/fetchLists.ts). Exactly matching webAO avoids
+    // assets 404'ing when a server has no extensions.json file.
 
-    // emote (pre-anims and (a)/(b) standing sprites): .gif then .png fallback
-    c.emote_count = 2;
-    std::strncpy(c.emote[0], ".gif", ExtensionsConfig::EXT_LEN - 1);
-    std::strncpy(c.emote[1], ".png", ExtensionsConfig::EXT_LEN - 1);
+    // charicon: .png, .webp
+    c.charicon_count = 2;
+    std::strncpy(c.charicon[0], ".png",  ExtensionsConfig::EXT_LEN - 1);
+    std::strncpy(c.charicon[1], ".webp", ExtensionsConfig::EXT_LEN - 1);
 
-    // emotions (full idle/talk sheet variants): .png then .gif
+    // emote (pre-anims + (a)/(b) sprites): .gif, .png, .apng, .webp, .webp.static
+    c.emote_count = 5;
+    std::strncpy(c.emote[0], ".gif",         ExtensionsConfig::EXT_LEN - 1);
+    std::strncpy(c.emote[1], ".png",         ExtensionsConfig::EXT_LEN - 1);
+    std::strncpy(c.emote[2], ".apng",        ExtensionsConfig::EXT_LEN - 1);
+    std::strncpy(c.emote[3], ".webp",        ExtensionsConfig::EXT_LEN - 1);
+    std::strncpy(c.emote[4], ".webp.static", ExtensionsConfig::EXT_LEN - 1);
+
+    // emotions (emote-button icons): .png, .webp
     c.emotions_count = 2;
-    std::strncpy(c.emotions[0], ".png", ExtensionsConfig::EXT_LEN - 1);
-    std::strncpy(c.emotions[1], ".gif", ExtensionsConfig::EXT_LEN - 1);
+    std::strncpy(c.emotions[0], ".png",  ExtensionsConfig::EXT_LEN - 1);
+    std::strncpy(c.emotions[1], ".webp", ExtensionsConfig::EXT_LEN - 1);
 
-    // background: .png
-    c.background_count = 1;
-    std::strncpy(c.background[0], ".png", ExtensionsConfig::EXT_LEN - 1);
+    // background: .png, .gif, .webp, .apng
+    c.background_count = 4;
+    std::strncpy(c.background[0], ".png",  ExtensionsConfig::EXT_LEN - 1);
+    std::strncpy(c.background[1], ".gif",  ExtensionsConfig::EXT_LEN - 1);
+    std::strncpy(c.background[2], ".webp", ExtensionsConfig::EXT_LEN - 1);
+    std::strncpy(c.background[3], ".apng", ExtensionsConfig::EXT_LEN - 1);
 }
 
 // ── JSON parser ────────────────────────────────────────────────────────────────
