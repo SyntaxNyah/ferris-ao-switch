@@ -20,34 +20,104 @@ const char* AssetManager::romfs_base() { return ROMFS_BASE; }
 
 // ── Asset URL state ───────────────────────────────────────────────────────────
 
-static char s_asset_url[512] = {};
+static char s_asset_url[512]     = {};  // primary — from ASS packet
+static char s_secondary_url[512] = {};  // secondary — community fallback CDN
 
-// clear_failed() forward declaration — defined after the failure cache block below.
-static void clear_failed();
+// Forward declarations — defined after the failure cache block below.
+static void clear_failed_primary();
+static void clear_failed_secondary();
+
+// Normalise a URL in-place: strip trailing slashes, then append exactly one.
+// This guarantees path joins via "%s%s" produce a well-formed URL.
+static void normalise_base_url(char* url, int cap) {
+    int len = (int)std::strlen(url);
+    while (len > 0 && url[len - 1] == '/') url[--len] = '\0';
+    if (len > 0 && len + 1 < cap) {
+        url[len]     = '/';
+        url[len + 1] = '\0';
+    }
+}
 
 void AssetManager::set_asset_url(const char* url) {
     std::strncpy(s_asset_url, url ? url : "", sizeof(s_asset_url) - 1);
-    // Normalize: collapse trailing slashes, then ensure exactly one. Asset
-    // paths are joined as "%s%s" so the base URL must end with "/", e.g.
-    // "https://umineko.online/base/".
-    int len = (int)std::strlen(s_asset_url);
-    while (len > 0 && s_asset_url[len - 1] == '/') s_asset_url[--len] = '\0';
-    if (len > 0 && len + 1 < (int)sizeof(s_asset_url)) {
-        s_asset_url[len]     = '/';
-        s_asset_url[len + 1] = '\0';
-    }
-    clear_failed(); // URL changed — old failure entries are for a different server
-    std::fprintf(stderr, "[assets] streaming URL set: '%s'\n", s_asset_url);
+    normalise_base_url(s_asset_url, (int)sizeof(s_asset_url));
+    clear_failed_primary(); // URL changed — old failures are for a different server
+    std::fprintf(stderr, "[assets] primary URL set: '%s'\n", s_asset_url);
 }
 
 void AssetManager::clear_asset_url() {
     s_asset_url[0] = '\0';
-    clear_failed(); // new server may have the same paths — reset failure cache
-    std::fprintf(stderr, "[assets] streaming URL cleared\n");
+    clear_failed_primary();
+    std::fprintf(stderr, "[assets] primary URL cleared\n");
 }
 
 bool        AssetManager::has_asset_url() { return s_asset_url[0] != '\0'; }
 const char* AssetManager::asset_url()     { return s_asset_url; }
+
+void AssetManager::set_secondary_url(const char* url) {
+    std::strncpy(s_secondary_url, url ? url : "", sizeof(s_secondary_url) - 1);
+    normalise_base_url(s_secondary_url, (int)sizeof(s_secondary_url));
+    clear_failed_secondary();
+    std::fprintf(stderr, "[assets] secondary URL set: '%s'\n", s_secondary_url);
+}
+
+void AssetManager::clear_secondary_url() {
+    s_secondary_url[0] = '\0';
+    clear_failed_secondary();
+    std::fprintf(stderr, "[assets] secondary URL cleared\n");
+}
+
+bool        AssetManager::has_secondary_url() { return s_secondary_url[0] != '\0'; }
+const char* AssetManager::secondary_url()     { return s_secondary_url; }
+
+// ── URL composition (AO-SDL MountHttp semantics) ─────────────────────────────
+// Lowercases the relative path, percent-encodes unsafe characters, joins with
+// the base URL. Preserves `()` because AO2 emote filenames are "normal(a).png".
+
+static void lowercase_path(const char* in, char* out, int out_cap) {
+    int i = 0;
+    for (; in[i] && i < out_cap - 1; ++i) {
+        unsigned char c = (unsigned char)in[i];
+        out[i] = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : (char)c;
+    }
+    out[i] = '\0';
+}
+
+static void url_encode_path(const char* in, char* out, int out_cap) {
+    static const char hex[] = "0123456789ABCDEF";
+    int o = 0;
+    for (int i = 0; in[i]; ++i) {
+        if (o + 4 >= out_cap) break;
+        unsigned char c = (unsigned char)in[i];
+        bool safe = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                    (c >= '0' && c <= '9') ||
+                    c == '/' || c == '.' || c == '-' || c == '_' || c == '~' ||
+                    c == '(' || c == ')';
+        if (safe) {
+            out[o++] = (char)c;
+        } else {
+            out[o++] = '%';
+            out[o++] = hex[c >> 4];
+            out[o++] = hex[c & 0xF];
+        }
+    }
+    out[o] = '\0';
+}
+
+// Build an absolute URL from a base (already slash-terminated) and a relative
+// asset path. Returns false if the composed URL doesn't fit. Relative paths
+// are bounded at 256 bytes by the request queue; worst-case URL encoding
+// triples each byte, so the intermediate buffer needs 256 * 3 + 1 = 769 bytes.
+static bool build_http_url(const char* base, const char* relative,
+                           char* out, int out_cap) {
+    if (!base || !base[0]) return false;
+    char lc [512];
+    char enc[1024];
+    lowercase_path(relative, lc,  sizeof(lc));
+    url_encode_path(lc,       enc, sizeof(enc));
+    int n = std::snprintf(out, out_cap, "%s%s", base, enc);
+    return n > 0 && n < out_cap;
+}
 
 // ── Prefetch cache ────────────────────────────────────────────────────────────
 
@@ -122,43 +192,53 @@ static uint8_t* consume_prefetch(const char* relative, int* out_size) {
 }
 
 // ── HTTP failure cache ────────────────────────────────────────────────────────
-// Remembers paths that returned a 404/error so we never retry until the
-// asset URL changes (which resets the cache in clear_asset_url).
+// One set per mount (primary and secondary) so that a 404 on the primary CDN
+// never blocks the secondary from being tried. Entries are wiped when the
+// corresponding URL changes. Guarded by the prefetch mutex.
 
-static constexpr int FAIL_SLOTS = 512;
-static char          s_failed[FAIL_SLOTS][256] = {};
-static int           s_failed_count            = 0;
-// Reuse the prefetch mutex to guard this cache too.
+static constexpr int FAIL_SLOTS = 1024;
 
-static bool check_failed(const char* relative) {
+struct FailSet {
+    char paths[FAIL_SLOTS][256];
+    int  count;
+};
+
+static FailSet s_failed_p = {}; // primary
+static FailSet s_failed_s = {}; // secondary
+
+static bool check_failed(const FailSet& fs, const char* relative) {
     // Called with prefetch mutex already held.
-    for (int i = 0; i < s_failed_count; ++i)
-        if (std::strcmp(s_failed[i], relative) == 0) return true;
+    for (int i = 0; i < fs.count; ++i)
+        if (std::strcmp(fs.paths[i], relative) == 0) return true;
     return false;
 }
 
-static void add_failed(const char* relative) {
+static void add_failed(FailSet& fs, const char* relative) {
     SDL_LockMutex(get_prefetch_mutex());
-    if (!check_failed(relative)) {
-        if (s_failed_count < FAIL_SLOTS) {
-            std::strncpy(s_failed[s_failed_count], relative, 255);
-            s_failed[s_failed_count][255] = '\0';
-            ++s_failed_count;
-        }
+    if (!check_failed(fs, relative) && fs.count < FAIL_SLOTS) {
+        std::strncpy(fs.paths[fs.count], relative, 255);
+        fs.paths[fs.count][255] = '\0';
+        ++fs.count;
     }
     SDL_UnlockMutex(get_prefetch_mutex());
 }
 
-static bool is_failed(const char* relative) {
+static bool is_failed(const FailSet& fs, const char* relative) {
     SDL_LockMutex(get_prefetch_mutex());
-    bool found = check_failed(relative);
+    bool found = check_failed(fs, relative);
     SDL_UnlockMutex(get_prefetch_mutex());
     return found;
 }
 
-static void clear_failed() {
+static void clear_failed_primary() {
     SDL_LockMutex(get_prefetch_mutex());
-    s_failed_count = 0;
+    s_failed_p.count = 0;
+    SDL_UnlockMutex(get_prefetch_mutex());
+}
+
+static void clear_failed_secondary() {
+    SDL_LockMutex(get_prefetch_mutex());
+    s_failed_s.count = 0;
     SDL_UnlockMutex(get_prefetch_mutex());
 }
 
@@ -219,51 +299,63 @@ static uint8_t* fetch_local(const char* relative, int* out_size) {
     return nullptr;
 }
 
+// Try an HTTP mount (either primary or secondary). Returns SDL_malloc'd bytes
+// on success, nullptr on 404/error (and records the failure in `fs`). The
+// `client` pointer is optional — when non-null, the request uses a persistent
+// keep-alive connection, matching AO-SDL's HttpPool behaviour per worker.
+static uint8_t* try_http_mount(const char* base, FailSet& fs, const char* tag,
+                               const char* relative, int* out_size,
+                               HttpClient* client) {
+    if (!base || !base[0])          return nullptr;
+    if (is_failed(fs, relative))    return nullptr;
+
+    char url[2048]; // base (512) + percent-encoded path (1024) + slack
+    if (!build_http_url(base, relative, url, sizeof(url))) {
+        add_failed(fs, relative);
+        return nullptr;
+    }
+
+    HttpResult hr = client ? client->get(url) : http_get(url);
+    if (hr.ok) {
+        *out_size = hr.size;
+        return hr.data; // caller owns
+    }
+    add_failed(fs, relative);
+    std::fprintf(stderr, "[assets] %s miss '%s'\n", tag, relative);
+    return nullptr;
+}
+
 uint8_t* AssetManager::fetch_bytes(const char* relative, int* out_size) {
     // 0. Prefetch cache (pre-fetched by AssetStream)
     uint8_t* pre = consume_prefetch(relative, out_size);
     if (pre) return pre;
 
-    // 1. HTTP streaming (if server provided an asset URL)
-    if (s_asset_url[0] != '\0') {
-        // Skip paths we already know 404 on this server
-        if (!is_failed(relative)) {
-            char full_url[768];
-            // s_asset_url is guaranteed to end with '/', so no separator needed.
-            std::snprintf(full_url, sizeof(full_url), "%s%s", s_asset_url, relative);
-            HttpResult hr = http_get(full_url);
-            if (hr.ok) {
-                *out_size = hr.size;
-                return hr.data; // caller owns SDL_malloc'd buffer
-            }
-            add_failed(relative);
-            std::fprintf(stderr, "[assets] HTTP miss '%s', trying local\n", relative);
-        }
-    }
+    // 1. Primary HTTP (ASS-advertised CDN)
+    if (uint8_t* d = try_http_mount(s_asset_url,     s_failed_p, "primary",
+                                    relative, out_size, nullptr))
+        return d;
 
+    // 2. Secondary HTTP (community fallback CDN)
+    if (uint8_t* d = try_http_mount(s_secondary_url, s_failed_s, "secondary",
+                                    relative, out_size, nullptr))
+        return d;
+
+    // 3/4. sdmc: → romfs:
     return fetch_local(relative, out_size);
 }
 
 uint8_t* AssetManager::fetch_bytes_with_client(const char* relative, int* out_size,
                                                HttpClient& client) {
-    // 0. Prefetch cache (pre-fetched by AssetStream)
     uint8_t* pre = consume_prefetch(relative, out_size);
     if (pre) return pre;
 
-    // 1. HTTP streaming via persistent client (reuses TCP/TLS connection)
-    if (s_asset_url[0] != '\0') {
-        if (!is_failed(relative)) {
-            char full_url[768];
-            // s_asset_url is guaranteed to end with '/', so no separator needed.
-            std::snprintf(full_url, sizeof(full_url), "%s%s", s_asset_url, relative);
-            HttpResult hr = client.get(full_url);
-            if (hr.ok) {
-                *out_size = hr.size;
-                return hr.data;
-            }
-            add_failed(relative);
-        }
-    }
+    if (uint8_t* d = try_http_mount(s_asset_url,     s_failed_p, "primary",
+                                    relative, out_size, &client))
+        return d;
+
+    if (uint8_t* d = try_http_mount(s_secondary_url, s_failed_s, "secondary",
+                                    relative, out_size, &client))
+        return d;
 
     return fetch_local(relative, out_size);
 }

@@ -38,6 +38,24 @@ public:
     // Silently ignores duplicate requests already in the queue.
     bool prefetch(const char* relative);
 
+    // Multi-extension prefetch helpers — queue every variant that the server
+    // might ship for a given asset kind. Mirrors AO-SDL's AssetLibrary::probe()
+    // behaviour where all candidate extensions are fetched concurrently and
+    // whichever decodes first wins. Extension lists come from ExtensionsConfig
+    // (loaded from <asset_url>/extensions.json or built-in defaults).
+    //
+    // `rel_without_ext` is the path WITHOUT the trailing ".xxx" — e.g.
+    //   prefetch_charicon("characters/phoenix/char_icon")
+    //   prefetch_image   ("characters/phoenix/(a)normal")
+    //   prefetch_background("background/gs4/defenseempty")
+    //
+    // Returns the number of variants actually queued (0 if the queue was
+    // saturated or the extension list was empty).
+    int prefetch_charicon  (const char* rel_without_ext);
+    int prefetch_image     (const char* rel_without_ext); // emote/preanim sprites
+    int prefetch_emoticon  (const char* rel_without_ext); // emote-button still frames
+    int prefetch_background(const char* rel_without_ext);
+
     // Returns true and sets out_path (max 256 chars) when a prefetch completes.
     // Drain this each frame to stay informed (optional — for logging/debugging).
     bool poll_done(char* out_path, int out_cap);

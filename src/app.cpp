@@ -111,6 +111,12 @@ bool App::init() {
     // Init text renderer — non-fatal if font is missing (text renders as nothing).
     text_renderer_.init(renderer_->raw(), "fonts/noto_sans.ttf", 18);
 
+    // Install the community fallback CDN. AO-SDL ships with this URL as a
+    // low-priority mount that activates whenever the server's own CDN 404s on
+    // a classic base-pack asset. Lets servers host only their custom chars and
+    // rely on the global base pack for everything else.
+    AssetManager::set_secondary_url("https://attorneyoffline.de/base/");
+
     asset_stream_.start();
 
     running_ = true;
@@ -201,8 +207,12 @@ void App::update(uint32_t dt_ms) {
         // as the user scrolls instead of per-page. AssetStream workers share a
         // keep-alive HttpClient each, so queueing hundreds of paths costs one
         // TLS handshake per worker, not per icon.
-        if (AssetManager::has_asset_url() && game_state_->char_count > 0) {
-            const ExtensionsConfig& ec = ExtensionsConfig::get();
+        //
+        // Names are lowercased here so the prefetch-cache key matches what
+        // CharSelectScreen looks up (it also lowercases via lower_copy). The
+        // HTTP URL itself would be lowercased again inside fetch_bytes, but
+        // the in-memory cache key is the raw relative path — case matters.
+        if (game_state_->char_count > 0) {
             int queued = 0;
             for (int i = 0; i < game_state_->char_count; ++i) {
                 const char* name = game_state_->characters[i].name;
@@ -212,12 +222,10 @@ void App::update(uint32_t dt_ms) {
                 for (; name[j] && j < (int)sizeof(lname) - 1; ++j)
                     lname[j] = (char)std::tolower((unsigned char)name[j]);
                 lname[j] = '\0';
-                for (int e = 0; e < ec.charicon_count; ++e) {
-                    char path[256];
-                    std::snprintf(path, sizeof(path),
-                        "characters/%s/char_icon%s", lname, ec.charicon[e]);
-                    if (asset_stream_.prefetch(path)) ++queued;
-                }
+                char base[256];
+                std::snprintf(base, sizeof(base),
+                    "characters/%s/char_icon", lname);
+                queued += asset_stream_.prefetch_charicon(base);
             }
             std::fprintf(stderr,
                 "[app] queued %d char icon prefetches for %d characters\n",
