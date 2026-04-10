@@ -14,26 +14,24 @@ AOClient::AOClient(OutQueue& out, GameState& state, const char* username)
 
 void AOClient::on_connected(const char* hdid) {
     std::strncpy(hdid_, hdid, sizeof(hdid_) - 1);
-    hs_state_ = HandshakeState::WaitDecryptor;
-    parse_len_ = 0;
-    hs_start_ms_      = SDL_GetTicks();
-    akashi_pr_seen_   = false;
-    akashi_pr_ms_     = 0;
-    client_id_sent_   = false;
-    // Do NOT send HI here — AO-SDL reference sends nothing on connect.
-    // HI is sent only in on_decryptor() when the server prompts us.
+    hs_state_   = HandshakeState::WaitId;
+    parse_len_  = 0;
+    hs_start_ms_ = SDL_GetTicks();
+
+    // webAO sends HI immediately on WebSocket open (Client::joinServer()).
+    // No waiting for a decryptor prompt — the server is expected to respond
+    // with ID + PN + FL in reaction to our HI. See webAO/src/client.ts
+    // onOpen() → joinServer().
+    char buf[256];
+    send(buf, cmd::hi(buf, sizeof(buf), hdid_));
+    std::fprintf(stderr, "[ao_client] connected — sent HI (webAO flow)\n");
 }
 
 void AOClient::on_disconnected() {
-    hs_state_ = HandshakeState::Idle;
-    state_.connected      = false;
-    state_.in_lobby       = false;
-    parse_len_            = 0;
-    akashi_pr_seen_       = false;
-    akashi_pr_ms_         = 0;
-    waitsc_start_ms_      = 0;
-    waitsi_start_ms_      = 0;
-    client_id_sent_       = false;
+    hs_state_        = HandshakeState::Idle;
+    state_.connected = false;
+    state_.in_lobby  = false;
+    parse_len_       = 0;
     // Asset URL lifecycle is managed by App, not here.
     // App::disconnect() / App::connect() call set/clear_asset_url as needed.
 }
@@ -58,12 +56,10 @@ void AOClient::send_fmt(const char* fmt, ...) {
 
 void AOClient::process(InQueue& in) {
     // ── Drain the incoming queue FIRST ────────────────────────────────────────
-    // IMPORTANT: drain before checking ANY timers (including the global timeout).
-    // on_pr() and on_decryptor() reset hs_start_ms_ — if we checked the timeout
-    // before draining, those resets wouldn't have happened yet and the timeout
-    // would fire one frame too early even though decryptor just arrived.
-    // Also: blocking HTTP fetches in App::update() can stall the main thread 2-4 s;
-    // draining first ensures queued packets are never discarded by stale timers.
+    // Drain before checking the global timeout so any queued handshake packet
+    // can transition us to InLobby before the 60s clock fires. Blocking HTTP
+    // fetches in App::update() can stall the main thread 2-4 s; draining first
+    // ensures queued packets are never discarded by stale timers.
     static InPacket raw; // static: 128 KB on the call stack is too large
     while (in.pop(raw)) {
         if (std::strcmp(raw.data, "__DISCONNECT#%") == 0) {
@@ -104,8 +100,8 @@ void AOClient::process(InQueue& in) {
     }
 
     // ── Global handshake timeout (checked AFTER drain so resets take effect) ──
-    // on_decryptor() resets hs_start_ms_ so this 60 s window is measured from
-    // when the actual handshake began, not from thread/TLS startup.
+    // webAO has no fallback timers — the handshake is entirely reactive. If
+    // nothing happens for 60s, the server is dead and we drop the connection.
     if (hs_state_ != HandshakeState::Idle &&
         hs_state_ != HandshakeState::InLobby &&
         hs_start_ms_ != 0 &&
@@ -118,58 +114,6 @@ void AOClient::process(InQueue& in) {
         disc.len = (int)std::strlen(disc.data);
         in.push(disc);
         return;
-    }
-
-    // ── Fallback timers (only fire if queue was empty / server didn't respond)
-
-    // Akashi/Umineko: PR/PU flood with no decryptor after 5 s → start handshake
-    // ourselves by sending askchaa. Covers servers that broadcast PR/PU at
-    // connect but never send decryptor. If SI never arrives, the WaitSi timer
-    // below falls back to RC directly.
-    if (hs_state_ == HandshakeState::WaitDecryptor && akashi_pr_seen_ &&
-        (int32_t)(SDL_GetTicks() - akashi_pr_ms_) > 5000) {
-        std::fprintf(stderr, "[ao_client] Akashi direct: PR dump settled, sending askchaa\n");
-        akashi_pr_seen_ = false;
-        char buf[32];
-        send(buf, cmd::askchaa(buf, sizeof(buf)));
-        hs_state_ = HandshakeState::WaitSi;
-        waitsi_start_ms_ = SDL_GetTicks();
-    }
-
-    // Umineko-style fallback: we sent HI from on_decryptor, but ID never came.
-    // The server's decryptor was a broadcast, not a handshake trigger. Skip
-    // past the HI/ID exchange and send RC directly.
-    if (hs_state_ == HandshakeState::WaitId && akashi_pr_seen_ &&
-        (int32_t)(SDL_GetTicks() - akashi_pr_ms_) > 5000) {
-        std::fprintf(stderr, "[ao_client] WaitId timeout after PR flood: decryptor was a broadcast, sending RC\n");
-        akashi_pr_seen_ = false;
-        char buf[32];
-        send(buf, cmd::rc(buf, sizeof(buf)));
-        hs_state_ = HandshakeState::WaitSc;
-        waitsc_start_ms_ = SDL_GetTicks();
-    }
-
-    // If SI never arrived within 3 s of WaitSi, send RC directly.
-    if (hs_state_ == HandshakeState::WaitSi && waitsi_start_ms_ != 0 &&
-        (int32_t)(SDL_GetTicks() - waitsi_start_ms_) > 3000) {
-        std::fprintf(stderr, "[ao_client] SI timeout — sending RC directly\n");
-        waitsi_start_ms_ = 0;
-        char buf[32];
-        send(buf, cmd::rc(buf, sizeof(buf)));
-        hs_state_ = HandshakeState::WaitSc;
-        waitsc_start_ms_ = SDL_GetTicks();
-    }
-
-    // If SC never arrived within 5 s of WaitSc, force InLobby.
-    // SC may still arrive later (e.g. a large WS frame still assembling);
-    // on_sc_stream handles late SC in InLobby state.
-    if (hs_state_ == HandshakeState::WaitSc && waitsc_start_ms_ != 0 &&
-        (int32_t)(SDL_GetTicks() - waitsc_start_ms_) > 5000) {
-        std::fprintf(stderr, "[ao_client] SC timeout — forcing InLobby (SC may still arrive)\n");
-        waitsc_start_ms_ = 0;
-        state_.in_lobby  = true;
-        state_.connected = true;
-        hs_state_ = HandshakeState::InLobby;
     }
 }
 
@@ -218,57 +162,34 @@ void AOClient::handle(const Packet& pkt) {
 // ── Handshake handlers ─────────────────────────────────────────────────────────
 
 void AOClient::on_decryptor(const Packet& /*p*/) {
-    // Reset timeout so TLS/WS startup time doesn't eat the budget.
-    hs_start_ms_ = SDL_GetTicks();
-
-    // Always send HI — Akashi/Umineko follow the same HI/ID/askchaa handshake
-    // as tsuserver; the earlier PR/PU flood is just a player-roster broadcast,
-    // not a signal to skip the handshake. If the server ignores HI (decryptor
-    // was just a broadcast with no real handshake behind it), the WaitId→RC
-    // fallback timer in process() takes over 5s later.
-    if (akashi_pr_seen_)
-        akashi_pr_ms_ = SDL_GetTicks(); // restart 5s WaitId countdown from now
-    char buf[256];
-    send(buf, cmd::hi(buf, sizeof(buf), hdid_));
-    hs_state_ = HandshakeState::WaitId;
-    std::fprintf(stderr, "[ao_client] decryptor received — sent HI\n");
+    // webAO has no decryptor handler — it silently logs "Invalid packet header
+    // decryptor" when tsuserver sends the legacy "decryptor#NOENCRYPT#%" line,
+    // then moves on. We do the same: no state change, no response. HI was
+    // already sent in on_connected().
+    std::fprintf(stderr, "[ao_client] decryptor ignored (webAO flow)\n");
 }
 
 void AOClient::on_id(const Packet& p) {
-    akashi_pr_seen_ = false; // ID arrived — cancel the WaitId→RC fallback timer
-    // field(0) = server-assigned UID — needed for CC
+    // Server's ID packet: "ID#<uid>#<software>#<version>#%"
     state_.my_uid = p.field_int(0);
-    // Store server name/version
     std::strncpy(state_.server_name,    p.field(1), sizeof(state_.server_name) - 1);
     std::strncpy(state_.server_version, p.field(2), sizeof(state_.server_version) - 1);
 
-    // Accept ID from WaitId, WaitDecryptor, or WaitSi.
-    if (hs_state_ == HandshakeState::WaitId      ||
-        hs_state_ == HandshakeState::WaitDecryptor||
-        hs_state_ == HandshakeState::WaitSi) {
-        // Guard against duplicate ID sends if server repeats the ID packet.
-        if (!client_id_sent_) {
-            char buf[128];
-            send(buf, cmd::id(buf, sizeof(buf)));
-            client_id_sent_ = true;
-        }
-        if (hs_state_ != HandshakeState::WaitSi) {
-            hs_state_ = HandshakeState::WaitSi;
-            waitsi_start_ms_ = SDL_GetTicks();
-        }
-    }
+    // webAO's handleID sends "ID#webAO#<version>#%" back to the server unless
+    // the server software is literally "webAO". We're not webAO so always send.
+    char buf[128];
+    send(buf, cmd::id(buf, sizeof(buf)));
+    std::fprintf(stderr, "[ao_client] ID received — sent client ID\n");
 }
 
 void AOClient::on_pn(const Packet& /*p*/) {
-    // PN is the server's "here's the player count" packet. Per webAO's protocol,
-    // askchaa is sent in response to PN (not to ID). Send it now if we're past
-    // the initial ID exchange and still waiting for SI.
-    if (hs_state_ == HandshakeState::WaitSi ||
-        hs_state_ == HandshakeState::WaitId) {
-        char buf[32];
-        send(buf, cmd::askchaa(buf, sizeof(buf)));
+    // webAO's handlePN sends askchaa in response to the server's player-count
+    // packet — this is the trigger for the server to send SI next.
+    char buf[32];
+    send(buf, cmd::askchaa(buf, sizeof(buf)));
+    if (hs_state_ == HandshakeState::WaitId)
         hs_state_ = HandshakeState::WaitSi;
-    }
+    std::fprintf(stderr, "[ao_client] PN received — sent askchaa\n");
 }
 
 void AOClient::on_fl(const Packet& /*p*/) {
@@ -289,14 +210,13 @@ void AOClient::on_ass(const Packet& p) {
 
 void AOClient::on_si(const Packet& p) {
     // SI#char_count#evi_count#music_count#%
-    // Store counts (informational), then request character list
+    // webAO's handleSI unconditionally sends RC#%. We match that behaviour.
     (void)p;
-    if (hs_state_ == HandshakeState::WaitSi) {
-        char buf[32];
-        send(buf, cmd::rc(buf, sizeof(buf)));
+    char buf[32];
+    send(buf, cmd::rc(buf, sizeof(buf)));
+    if (hs_state_ == HandshakeState::WaitId || hs_state_ == HandshakeState::WaitSi)
         hs_state_ = HandshakeState::WaitSc;
-        waitsc_start_ms_ = SDL_GetTicks();
-    }
+    std::fprintf(stderr, "[ao_client] SI received — sent RC\n");
 }
 
 void AOClient::on_sc_stream(const char* raw, int len) {
@@ -324,18 +244,12 @@ void AOClient::on_sc_stream(const char* raw, int len) {
         ++state_.char_count;
     });
     std::fprintf(stderr, "[ao_client] SC: %d characters (streamed)\n", state_.char_count);
-    // Accept SC from any handshake state or even InLobby (late arrival after timeout).
-    if (hs_state_ == HandshakeState::WaitSc ||
-        hs_state_ == HandshakeState::WaitId  ||
-        hs_state_ == HandshakeState::WaitSi) {
-        waitsc_start_ms_ = 0;
-        waitsi_start_ms_ = 0;
-        char buf[32];
-        send(buf, cmd::rm(buf, sizeof(buf)));
+    // webAO's handleSC unconditionally sends RM#%. Match that.
+    char buf[32];
+    send(buf, cmd::rm(buf, sizeof(buf)));
+    if (hs_state_ != HandshakeState::InLobby)
         hs_state_ = HandshakeState::WaitSm;
-    }
-    // InLobby: SC arrived late (after timeout forced us in); just update the list.
-    // The CharSelectScreen will pick up the new char_count on the next frame.
+    std::fprintf(stderr, "[ao_client] SC processed — sent RM\n");
 }
 
 void AOClient::on_sm_stream(const char* raw, int len) {
@@ -386,12 +300,12 @@ void AOClient::on_sm_stream(const char* raw, int len) {
     std::fprintf(stderr, "[ao_client] SM: %d areas, %d music (streamed)\n",
         state_.area_count, state_.music_count);
 
-    if (hs_state_ == HandshakeState::WaitSm) {
-        char buf[32];
-        send(buf, cmd::rd(buf, sizeof(buf)));
+    // webAO's handleSM unconditionally sends RD#%. Match that.
+    char buf[32];
+    send(buf, cmd::rd(buf, sizeof(buf)));
+    if (hs_state_ != HandshakeState::InLobby)
         hs_state_ = HandshakeState::WaitDone;
-    }
-    // InLobby: SM arrived late; areas/music already updated above, nothing else needed.
+    std::fprintf(stderr, "[ao_client] SM processed — sent RD\n");
 }
 
 void AOClient::on_done(const Packet& /*p*/) {
@@ -615,27 +529,14 @@ void AOClient::on_fa(const Packet& p) {
 }
 
 void AOClient::on_pr(const Packet& /*p*/) {
-    // PR#uid#type#% — player roster add/remove broadcast. Informational only.
-    // In WaitDecryptor state this signals an Akashi-style server: it is sending
-    // an initial PR/PU player-state flood before the handshake. Mark the flag and
-    // refresh the timer. If decryptor arrives, on_decryptor sends HI properly.
-    // If no decryptor ever arrives (pure Akashi direct-lobby), the 5s timer in
-    // process() fires and skips straight to RC.
-    if (hs_state_ == HandshakeState::WaitDecryptor) {
-        if (!akashi_pr_seen_) {
-            hs_start_ms_ = SDL_GetTicks(); // first PR resets the handshake clock
-            std::fprintf(stderr, "[ao_client] Akashi: first PR — PR/PU flood started, waiting for decryptor\n");
-        }
-        akashi_pr_seen_ = true;
-        akashi_pr_ms_   = SDL_GetTicks();
-    }
+    // PR#uid#type#% — player roster add/remove broadcast. Informational only
+    // in webAO (handlePR just updates a playerlist Map). We don't maintain a
+    // roster yet, so discard.
 }
 
-void AOClient::on_pu(const Packet& p) {
-    // PU#uid#data_type#value#% — player state update (name/char/showname/area).
-    // Keep the PR/PU arrival timer fresh so we don't fire RC mid-dump.
-    if (hs_state_ == HandshakeState::WaitDecryptor && akashi_pr_seen_)
-        akashi_pr_ms_ = SDL_GetTicks();
+void AOClient::on_pu(const Packet& /*p*/) {
+    // PU#uid#data_type#value#% — player state update. Informational only in
+    // webAO (handlePU updates a playerlist Map). Discard for now.
 }
 
 void AOClient::on_ti(const Packet& /*p*/) {

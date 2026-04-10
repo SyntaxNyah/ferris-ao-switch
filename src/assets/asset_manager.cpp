@@ -27,9 +27,15 @@ static void clear_failed();
 
 void AssetManager::set_asset_url(const char* url) {
     std::strncpy(s_asset_url, url ? url : "", sizeof(s_asset_url) - 1);
-    // Strip trailing slash(es)
+    // Normalize: collapse trailing slashes, then ensure exactly one. Asset
+    // paths are joined as "%s%s" so the base URL must end with "/", e.g.
+    // "https://umineko.online/base/".
     int len = (int)std::strlen(s_asset_url);
     while (len > 0 && s_asset_url[len - 1] == '/') s_asset_url[--len] = '\0';
+    if (len > 0 && len + 1 < (int)sizeof(s_asset_url)) {
+        s_asset_url[len]     = '/';
+        s_asset_url[len + 1] = '\0';
+    }
     clear_failed(); // URL changed — old failure entries are for a different server
     std::fprintf(stderr, "[assets] streaming URL set: '%s'\n", s_asset_url);
 }
@@ -223,7 +229,8 @@ uint8_t* AssetManager::fetch_bytes(const char* relative, int* out_size) {
         // Skip paths we already know 404 on this server
         if (!is_failed(relative)) {
             char full_url[768];
-            std::snprintf(full_url, sizeof(full_url), "%s/%s", s_asset_url, relative);
+            // s_asset_url is guaranteed to end with '/', so no separator needed.
+            std::snprintf(full_url, sizeof(full_url), "%s%s", s_asset_url, relative);
             HttpResult hr = http_get(full_url);
             if (hr.ok) {
                 *out_size = hr.size;
@@ -247,7 +254,8 @@ uint8_t* AssetManager::fetch_bytes_with_client(const char* relative, int* out_si
     if (s_asset_url[0] != '\0') {
         if (!is_failed(relative)) {
             char full_url[768];
-            std::snprintf(full_url, sizeof(full_url), "%s/%s", s_asset_url, relative);
+            // s_asset_url is guaranteed to end with '/', so no separator needed.
+            std::snprintf(full_url, sizeof(full_url), "%s%s", s_asset_url, relative);
             HttpResult hr = client.get(full_url);
             if (hr.ok) {
                 *out_size = hr.size;

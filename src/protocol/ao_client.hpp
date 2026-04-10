@@ -7,12 +7,11 @@ namespace ao {
 
 enum class HandshakeState {
     Idle,
-    WaitDecryptor,  // ← decryptor#NOENCRYPT#%
-    WaitId,         // ← ID + PN + FL [+ ASS]
-    WaitSi,         // ← SI
-    WaitSc,         // ← SC
-    WaitSm,         // ← SM
-    WaitDone,       // ← LE + CharsCheck + HP×2 + BN + DONE
+    WaitId,         // sent HI, waiting for ID + PN + FL [+ ASS]
+    WaitSi,         // sent askchaa, waiting for SI
+    WaitSc,         // sent RC, waiting for SC
+    WaitSm,         // sent RM, waiting for SM
+    WaitDone,       // sent RD, waiting for LE + CharsCheck + HP×2 + BN + DONE
     InLobby,        // fully connected, normal operation
 };
 
@@ -86,22 +85,8 @@ private:
     char  parse_buf_[131072];
     int   parse_len_ = 0;
 
-    // Handshake timeout — if we don't reach InLobby within 15s, disconnect.
+    // Handshake timeout — if we don't reach InLobby within 60s, disconnect.
     uint32_t hs_start_ms_ = 0;
-
-    // Akashi direct-lobby: track when last PR/PU arrived so we can send RC
-    // proactively if CharsCheck never comes.
-    bool     akashi_pr_seen_       = false;
-    uint32_t akashi_pr_ms_         = 0;  // SDL_GetTicks() when last PR/PU was seen
-    // After Akashi decryptor, if ID doesn't arrive within 3s the server wants
-    // us to drive — send ID+askchaa to prompt SI.
-    uint32_t akashi_decryptor_ms_  = 0;  // 0 = not waiting
-    // Timestamp when we entered WaitSc; used to force InLobby if SC never arrives.
-    uint32_t waitsc_start_ms_      = 0;  // 0 = not in WaitSc
-    // Timestamp when we entered WaitSi; used to force InLobby if SI never arrives.
-    uint32_t waitsi_start_ms_      = 0;  // 0 = not in WaitSi
-    // Guard against duplicate ID sends if the server repeats the ID packet.
-    bool     client_id_sent_       = false;
 };
 
 } // namespace ao
