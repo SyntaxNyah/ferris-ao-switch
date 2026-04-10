@@ -6,30 +6,52 @@ namespace ao {
 
 class HttpClient;
 
-// Asset resolution with three-tier priority:
+// Asset resolution with four-tier priority (mirrors AO-SDL's MountManager):
 //
-//   1. HTTP streaming from server's asset base URL (set via set_asset_url from ASS packet)
-//   2. sdmc:/switch/ferris-ao/base/<relative>   (user-installed local AO base pack)
-//   3. romfs:/<relative>                         (bundled fallback assets in NRO)
+//   1. Primary   HTTP from <primary_url>   (set via set_asset_url from ASS packet)
+//   2. Secondary HTTP from <secondary_url> (set via set_secondary_url, e.g.
+//                                           https://attorneyoffline.de/base/)
+//   3. sdmc:/switch/ferris-ao/base/<relative>   (user-installed local AO base pack)
+//   4. romfs:/<relative>                         (bundled fallback assets in NRO)
 //
 // Tier 1 is only active when the server advertises an asset URL (ASS packet during handshake).
-// If HTTP fetch fails or no URL is set, the search falls through to tiers 2 and 3.
-// This means the local base folder is fully optional — servers without a web server simply
-// rely on romfs fallbacks, while servers with a CDN stream everything on demand.
+// Tier 2 is a community fallback CDN that hosts the classic AO2 base pack — it lets servers
+// that only host their custom chars on their own CDN still resolve everything else.
+// If a tier returns 404 the search falls through to the next tier. Network failures are
+// cached per-URL so we never hammer a dead server.
 //
-// Thread safety: set_asset_url / clear_asset_url must only be called from the main thread.
-//                fetch_bytes / open_rwops are safe to call from any thread (e.g. AssetStream).
+// URL composition (AO-SDL MountHttp semantics):
+//   - Relative paths are lowercased before being sent to either HTTP tier
+//     (AO2 CDNs host lowercase-only trees by convention).
+//   - Each path segment is percent-encoded per RFC 3986, preserving `/`, `.`,
+//     `-`, `_`, `~`, and crucially `()` so emote filenames like `normal(a).png`
+//     round-trip intact.
+//   - Local tiers (sdmc:/romfs:) preserve case — the user controls that tree.
+//
+// Thread safety: set_asset_url / set_secondary_url / clear_* must only be called from
+//                the main thread. fetch_bytes / open_rwops are safe to call from any
+//                thread (e.g. AssetStream workers).
 
 class AssetManager {
 public:
     // ── URL management ─────────────────────────────────────────────────────────
-    // Called by AOClient when the server sends an ASS packet.
+    // Primary CDN — set from the server's ASS packet. Tried first.
     // url should be the bare base, e.g. "http://cdn.example.com/ao-base"
-    // A trailing slash, if present, is stripped.
+    // Trailing slashes are normalised — exactly one is always appended so that
+    // paths can be joined with "%s%s" safely.
     static void set_asset_url(const char* url);
     static void clear_asset_url();
     static bool        has_asset_url();
     static const char* asset_url();          // "" if none set
+
+    // Secondary CDN — community fallback base pack (AO-SDL ships with this set
+    // to https://attorneyoffline.de/base/). Tried after the primary 404s and
+    // before the local sdmc:/romfs: tiers. Lets servers that only host their
+    // custom assets on their own CDN still resolve the classic base pack.
+    static void set_secondary_url(const char* url);
+    static void clear_secondary_url();
+    static bool        has_secondary_url();
+    static const char* secondary_url();      // "" if none set
 
     // ── Path resolution (local only) ───────────────────────────────────────────
     // Checks sdmc: then romfs:. Returns true and fills out_path if found locally.

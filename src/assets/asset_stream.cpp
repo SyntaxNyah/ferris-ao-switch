@@ -1,5 +1,6 @@
 #include "asset_stream.hpp"
 #include "asset_manager.hpp"
+#include "extensions_config.hpp"
 #include "../net/http_fetch.hpp"
 #include <cstring>
 #include <cstdio>
@@ -66,6 +67,45 @@ bool AssetStream::prefetch(const char* relative) {
     SDL_CondBroadcast(req_cond_);
     SDL_UnlockMutex(req_mutex_);
     return true;
+}
+
+// ── Multi-extension prefetch helpers ─────────────────────────────────────────
+// Queue one prefetch per configured extension. AO-SDL fires all of these in
+// parallel through its HttpPool; we lean on the N_WORKERS worker threads for
+// the same effect. Extensions come from ExtensionsConfig which was loaded
+// from <asset_url>/extensions.json (or the built-in defaults).
+
+static int queue_variants(AssetStream& s, const char* rel_without_ext,
+                          const char exts[][ExtensionsConfig::EXT_LEN],
+                          int ext_count) {
+    int queued = 0;
+    char path[256];
+    for (int i = 0; i < ext_count; ++i) {
+        int n = std::snprintf(path, sizeof(path), "%s%s",
+                              rel_without_ext, exts[i]);
+        if (n > 0 && n < (int)sizeof(path) && s.prefetch(path)) ++queued;
+    }
+    return queued;
+}
+
+int AssetStream::prefetch_charicon(const char* rel_without_ext) {
+    const ExtensionsConfig& ec = ExtensionsConfig::get();
+    return queue_variants(*this, rel_without_ext, ec.charicon, ec.charicon_count);
+}
+
+int AssetStream::prefetch_image(const char* rel_without_ext) {
+    const ExtensionsConfig& ec = ExtensionsConfig::get();
+    return queue_variants(*this, rel_without_ext, ec.emote, ec.emote_count);
+}
+
+int AssetStream::prefetch_emoticon(const char* rel_without_ext) {
+    const ExtensionsConfig& ec = ExtensionsConfig::get();
+    return queue_variants(*this, rel_without_ext, ec.emotions, ec.emotions_count);
+}
+
+int AssetStream::prefetch_background(const char* rel_without_ext) {
+    const ExtensionsConfig& ec = ExtensionsConfig::get();
+    return queue_variants(*this, rel_without_ext, ec.background, ec.background_count);
 }
 
 bool AssetStream::poll_done(char* out_path, int out_cap) {
