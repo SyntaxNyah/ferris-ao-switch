@@ -56,7 +56,7 @@ ARCH := -march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE
 #---------------------------------------------------------------------------------
 # Compiler flags
 #---------------------------------------------------------------------------------
-CFLAGS   := -Wall -Wextra -O2 -ffunction-sections \
+CFLAGS   := -Wall -Wextra -O2 -ffunction-sections -pipe \
             $(ARCH) \
             $(DEFINES)
 
@@ -69,7 +69,7 @@ CXXFLAGS := $(CFLAGS) \
             -DAO_TLS
 
 ASFLAGS  := -g $(ARCH)
-LDFLAGS   = -specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
+LDFLAGS   = -specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) -pipe -Wl,-Map,$(notdir $*.map)
 
 #---------------------------------------------------------------------------------
 # Libraries
