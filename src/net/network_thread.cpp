@@ -244,6 +244,21 @@ void NetworkThread::ws_loop() {
             if (n < 0) { std::fprintf(stderr, "[ws_loop] net_recv error %d\n", n); break; }
             if (n == 0) { SDL_Delay(1); goto send_outgoing; } // WANT_READ — check sends
             std::fprintf(stderr, "[ws_loop] recv %d bytes\n", n);
+            // First 256 bytes of each recv, hex-dumped — helps diagnose servers
+            // that close the connection after an opaque response (e.g. Akashi
+            // post-HI 68-byte reply). Dump capped so logs don't explode.
+            {
+                int dump_n = n < 256 ? n : 256;
+                std::fprintf(stderr, "[ws_loop] recv hex:");
+                for (int i = 0; i < dump_n; ++i)
+                    std::fprintf(stderr, " %02x", (unsigned)frame_buf[frame_len + i]);
+                std::fprintf(stderr, "\n[ws_loop] recv ascii: ");
+                for (int i = 0; i < dump_n; ++i) {
+                    unsigned char c = frame_buf[frame_len + i];
+                    std::fputc((c >= 0x20 && c < 0x7F) ? (char)c : '.', stderr);
+                }
+                std::fputc('\n', stderr);
+            }
             frame_len += n;
 
             int consumed_total = 0;
@@ -256,9 +271,14 @@ void NetworkThread::ws_loop() {
                 FrameResult res = ws_decode_frame(
                     frame_buf + consumed_total, remaining,
                     payload, sizeof(payload), payload_len);
+                std::fprintf(stderr, "[ws_loop] decode@%d remaining=%d res=%d plen=%d\n",
+                    consumed_total, remaining, (int)res, payload_len);
 
                 if (res == FrameResult::Incomplete) break;
-                if (res == FrameResult::Close)  { stop_flag_.store(true); break; }
+                if (res == FrameResult::Close)  {
+                    std::fprintf(stderr, "[ws_loop] Close frame received — stopping\n");
+                    stop_flag_.store(true); break;
+                }
                 if (res == FrameResult::Error)  { std::fprintf(stderr, "WS frame error\n"); stop_flag_.store(true); break; }
                 if (res == FrameResult::Ping)   { send_pong(payload, payload_len); }
 

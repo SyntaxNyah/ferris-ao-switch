@@ -73,6 +73,16 @@ public:
     static uint8_t* fetch_bytes_with_client(const char* relative, int* out_size,
                                             HttpClient& client);
 
+    // Two-client overload: the primary tier uses `primary_client` and the
+    // secondary tier uses `secondary_client`. Required when both mounts live
+    // on different hosts — a single client would otherwise thrash, closing
+    // and reopening its connection on every alternation, exhausting libnx's
+    // thread table on Switch.
+    // Neither client may be shared between threads.
+    static uint8_t* fetch_bytes_with_clients(const char* relative, int* out_size,
+                                             HttpClient& primary_client,
+                                             HttpClient& secondary_client);
+
     // Open an asset as an SDL_RWops from the best available source.
     // The returned RWops owns its underlying buffer: SDL_RWclose() frees it.
     // Returns nullptr if the asset cannot be found anywhere.

@@ -360,6 +360,23 @@ uint8_t* AssetManager::fetch_bytes_with_client(const char* relative, int* out_si
     return fetch_local(relative, out_size);
 }
 
+uint8_t* AssetManager::fetch_bytes_with_clients(const char* relative, int* out_size,
+                                                HttpClient& primary_client,
+                                                HttpClient& secondary_client) {
+    uint8_t* pre = consume_prefetch(relative, out_size);
+    if (pre) return pre;
+
+    if (uint8_t* d = try_http_mount(s_asset_url,     s_failed_p, "primary",
+                                    relative, out_size, &primary_client))
+        return d;
+
+    if (uint8_t* d = try_http_mount(s_secondary_url, s_failed_s, "secondary",
+                                    relative, out_size, &secondary_client))
+        return d;
+
+    return fetch_local(relative, out_size);
+}
+
 // ── open_rwops — owning SDL_RWops ────────────────────────────────────────────
 //
 // Returns an SDL_RWops whose close callback frees the underlying buffer.

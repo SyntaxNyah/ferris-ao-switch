@@ -47,11 +47,19 @@ bool RawConn::connect(const char* host, uint16_t port) {
     task->result = -1;
     task->sem    = SDL_CreateSemaphore(0);
 
-    SDL_Thread* th = SDL_CreateThread(raw_connect_thread, "raw_tcp_connect", task);
+    // Retry SDL_CreateThread up to 8 times with 50-125ms backoff. libnx has a
+    // small global thread table; under AssetStream load with 8 workers each
+    // potentially reconnecting, it can momentarily saturate. A short wait
+    // lets detached helpers finish and free their slots.
+    SDL_Thread* th = nullptr;
+    for (int attempt = 0; attempt < 8 && !th; ++attempt) {
+        th = SDL_CreateThread(raw_connect_thread, "raw_tcp_connect", task);
+        if (!th) SDL_Delay(50 + attempt * 10);
+    }
     if (!th) {
         SDL_DestroySemaphore(task->sem);
         delete task;
-        std::fprintf(stderr, "RawConn: failed to create connect thread\n");
+        std::fprintf(stderr, "RawConn: failed to create connect thread after retries\n");
         return false;
     }
     SDL_DetachThread(th);
@@ -127,11 +135,17 @@ bool TlsConn::connect(const char* host, uint16_t port) {
         std::strncpy(task->port_str, port_str, sizeof(task->port_str) - 1);
         task->result = -1;
         task->sem    = SDL_CreateSemaphore(0);
-        SDL_Thread* th = SDL_CreateThread(raw_connect_thread, "tls_tcp_connect", task);
+        // Same retry dance as RawConn::connect — libnx thread table can spike
+        // under concurrent AssetStream connects.
+        SDL_Thread* th = nullptr;
+        for (int attempt = 0; attempt < 8 && !th; ++attempt) {
+            th = SDL_CreateThread(raw_connect_thread, "tls_tcp_connect", task);
+            if (!th) SDL_Delay(50 + attempt * 10);
+        }
         if (!th) {
             SDL_DestroySemaphore(task->sem);
             delete task;
-            std::fprintf(stderr, "TlsConn: failed to create connect thread\n");
+            std::fprintf(stderr, "TlsConn: failed to create connect thread after retries\n");
             return false;
         }
         SDL_DetachThread(th);
