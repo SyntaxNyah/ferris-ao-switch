@@ -233,6 +233,20 @@ void NetworkThread::ws_loop() {
     std::fprintf(stderr, "[ws_loop] started\n");
 
     while (!stop_flag_.load(std::memory_order_acquire)) {
+        // Drain outgoing queue BEFORE the first recv so packets queued while
+        // the handshake was spinning up go out immediately. webAO parity
+        // requires HI to be sent right when the WS socket opens — our main
+        // thread queues HI via on_connected_ws() before the network thread
+        // reaches this loop, and we must flush it before blocking on recv.
+        {
+            OutPacket pre;
+            while (out_queue_.pop(pre)) {
+                uint8_t frame[2200];
+                int flen = ws_encode_frame(pre.data, pre.len, frame, sizeof(frame));
+                if (flen > 0) net_send(frame, flen);
+            }
+        }
+
         // Receive without gating on net_poll — select() is unreliable on Ryujinx.
         {
             int space = (int)sizeof(frame_buf) - frame_len;
@@ -282,7 +296,14 @@ void NetworkThread::ws_loop() {
                 if (res == FrameResult::Error)  { std::fprintf(stderr, "WS frame error\n"); stop_flag_.store(true); break; }
                 if (res == FrameResult::Ping)   { send_pong(payload, payload_len); }
 
-                if (payload_len > 0 && recv_len_ + payload_len < RECV_BUF_CAP) {
+                // Only application-data frames (Complete) feed recv_buf_.
+                // Ping payloads are random bytes (e.g. "cXjO jÍ )/=") that
+                // contain stray '%' characters — if we append them here,
+                // extract_packets() will slice them into bogus AO packets
+                // and ao_client will log "unknown packet: ..." garbage.
+                if (res == FrameResult::Complete &&
+                    payload_len > 0 &&
+                    recv_len_ + payload_len < RECV_BUF_CAP) {
                     std::memcpy(recv_buf_ + recv_len_, payload, payload_len);
                     recv_len_ += payload_len;
                     extract_packets();
