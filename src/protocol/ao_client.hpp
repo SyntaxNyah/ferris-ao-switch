@@ -22,8 +22,16 @@ class AOClient {
 public:
     AOClient(OutQueue& out, GameState& state, const char* username);
 
-    // Call when the TCP/WS connection is established — sends HI.
+    // Call when a TCP connection is established. AO-SDL flow: wait for the
+    // server's decryptor packet, then send HI in response.
     void on_connected(const char* hdid = "ferris-ao-switch");
+
+    // Call when a WebSocket connection is established. webAO flow: send HI
+    // immediately on socket.onopen without waiting for decryptor. Vanilla
+    // tsuserver sends a 758-byte PR/PU broadcast burst *before* the
+    // decryptor and closes the socket if HI doesn't arrive in that window,
+    // so we have to match webAO's behaviour to connect at all.
+    void on_connected_ws(const char* hdid = "ferris-ao-switch");
 
     // Call on disconnect.
     void on_disconnected();

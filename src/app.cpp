@@ -331,7 +331,13 @@ bool App::connect(const char* host, uint16_t port, ConnMode mode) {
         return false;
     }
 
-    ao_client_->on_connected();
+    // Branch on transport: WebSocket flows match webAO (HI on open) while
+    // raw TCP matches AO-SDL (HI in response to decryptor). See
+    // AOClient::on_connected_ws for the detailed rationale.
+    if (mode == ConnMode::WS || mode == ConnMode::WSS)
+        ao_client_->on_connected_ws();
+    else
+        ao_client_->on_connected();
     return true;
 }
 

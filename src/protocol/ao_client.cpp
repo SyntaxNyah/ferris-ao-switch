@@ -25,6 +25,24 @@ void AOClient::on_connected(const char* hdid) {
     std::fprintf(stderr, "[ao_client] connected — waiting for decryptor (AO-SDL flow)\n");
 }
 
+void AOClient::on_connected_ws(const char* hdid) {
+    std::strncpy(hdid_, hdid, sizeof(hdid_) - 1);
+    parse_len_   = 0;
+    hs_start_ms_ = SDL_GetTicks();
+
+    // webAO parity: fire HI immediately on socket.onopen. Vanilla tsuserver
+    // pushes a pre-decryptor burst of PR/PU broadcasts and closes the
+    // connection if it doesn't see HI within that window. Our queue-first
+    // architecture makes this easy — the out queue is drained by the
+    // NetworkThread's ws_loop on its first iteration (which we've reordered
+    // to flush sends before the first recv), so HI goes out before any
+    // server bytes are processed.
+    char buf[256];
+    send(buf, cmd::hi(buf, sizeof(buf), hdid_));
+    hs_state_ = HandshakeState::WaitId;
+    std::fprintf(stderr, "[ao_client] WS connected — sent HI immediately (webAO flow)\n");
+}
+
 void AOClient::on_disconnected() {
     hs_state_        = HandshakeState::Idle;
     state_.connected = false;
@@ -166,6 +184,16 @@ void AOClient::on_decryptor(const Packet& /*p*/) {
     // AOPacketDecryptor::handle). We don't use the decryptor key itself —
     // modern servers ship "NOENCRYPT" and clients ignore the value. The
     // packet's sole purpose is to signal "you may begin the handshake now".
+    //
+    // Idempotency: on WS/WSS we already sent HI on socket.onopen via
+    // on_connected_ws(), so we're in WaitId by the time this packet
+    // arrives. Don't re-send HI or the server will bail with a protocol
+    // error. Only transition if we were still waiting for the decryptor.
+    if (hs_state_ != HandshakeState::WaitDecryptor) {
+        std::fprintf(stderr, "[ao_client] decryptor received post-HI (state=%d) — ignoring\n",
+            (int)hs_state_);
+        return;
+    }
     hs_start_ms_ = SDL_GetTicks(); // reset so TLS setup time doesn't eat budget
     char buf[256];
     send(buf, cmd::hi(buf, sizeof(buf), hdid_));

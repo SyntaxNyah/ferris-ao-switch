@@ -1,4 +1,5 @@
 #include "tls_conn.hpp"
+#include "connect_pool.hpp"
 #include <cstdio>
 #include <cstring>
 #include <SDL2/SDL.h>
@@ -16,68 +17,18 @@ static void tls_log_err(const char* tag, int ret) {
 }
 
 // ── RawConn — plain non-blocking TCP via mbedtls_net ─────────────────────────
-
-// mbedtls_net_connect does a blocking TCP connect.  On Ryujinx the blocking
-// connect() syscall never times out, freezing the app forever.  Run it on a
-// detached thread and wait with a 10-second timeout via SDL semaphore.
-
-struct RawConnectTask {
-    char              host[256];
-    char              port_str[8];
-    mbedtls_net_context net;
-    int               result;
-    SDL_sem*          sem;
-};
-
-static int raw_connect_thread(void* ud) {
-    auto* t = static_cast<RawConnectTask*>(ud);
-    mbedtls_net_init(&t->net);
-    t->result = mbedtls_net_connect(&t->net, t->host, t->port_str,
-                                    MBEDTLS_NET_PROTO_TCP);
-    SDL_SemPost(t->sem);
-    return 0;
-}
+//
+// mbedtls_net_connect does a blocking TCP connect. On Ryujinx the blocking
+// connect() syscall never times out, freezing the app forever. Previously
+// we worked around this by spawning a fresh SDL_Thread per connect call,
+// but under AssetStream load that exhausted libnx's global thread table
+// ("CreateThread() = LimitReached"). ConnectPool is a single persistent
+// worker thread that serialises connects and isolates us from the blocking
+// POSIX syscall without consuming thread slots.
 
 bool RawConn::connect(const char* host, uint16_t port) {
     mbedtls_net_init(&net);
-
-    auto* task = new RawConnectTask{};
-    std::strncpy(task->host, host, sizeof(task->host) - 1);
-    std::snprintf(task->port_str, sizeof(task->port_str), "%u", (unsigned)port);
-    task->result = -1;
-    task->sem    = SDL_CreateSemaphore(0);
-
-    // Retry SDL_CreateThread up to 8 times with 50-125ms backoff. libnx has a
-    // small global thread table; under AssetStream load with 8 workers each
-    // potentially reconnecting, it can momentarily saturate. A short wait
-    // lets detached helpers finish and free their slots.
-    SDL_Thread* th = nullptr;
-    for (int attempt = 0; attempt < 8 && !th; ++attempt) {
-        th = SDL_CreateThread(raw_connect_thread, "raw_tcp_connect", task);
-        if (!th) SDL_Delay(50 + attempt * 10);
-    }
-    if (!th) {
-        SDL_DestroySemaphore(task->sem);
-        delete task;
-        std::fprintf(stderr, "RawConn: failed to create connect thread after retries\n");
-        return false;
-    }
-    SDL_DetachThread(th);
-
-    // Wait up to 10 s for the connect to complete
-    if (SDL_SemWaitTimeout(task->sem, 10000) != 0) {
-        // Timed out — task/thread leaked intentionally (thread may still be
-        // blocked in the OS connect() call; it will eventually post and exit)
-        std::fprintf(stderr, "RawConn: connect to %s:%u timed out\n", host, port);
-        return false;
-    }
-
-    int ret = task->result;
-    net = task->net;              // take ownership of the fd
-    mbedtls_net_init(&task->net); // zero task copy so its destructor won't close our fd
-    SDL_DestroySemaphore(task->sem);
-    delete task;
-
+    int ret = ConnectPool::connect(host, port, &net, 10000);
     if (ret != 0) { tls_log_err("raw_connect", ret); return false; }
     mbedtls_net_set_nonblock(&net);
     std::fprintf(stderr, "RawConn: connected to %s:%u\n", host, port);
@@ -125,42 +76,13 @@ bool TlsConn::connect(const char* host, uint16_t port) {
                                      (const unsigned char*)pers, std::strlen(pers));
     if (ret != 0) { tls_log_err("ctr_drbg_seed", ret); return false; }
 
-    // DNS resolve + TCP connect — run in a thread with timeout (Ryujinx hangs
-    // indefinitely on blocking connect() when the remote doesn't respond fast)
-    char port_str[8];
-    std::snprintf(port_str, sizeof(port_str), "%u", (unsigned)port);
-    {
-        auto* task = new RawConnectTask{};
-        std::strncpy(task->host, host, sizeof(task->host) - 1);
-        std::strncpy(task->port_str, port_str, sizeof(task->port_str) - 1);
-        task->result = -1;
-        task->sem    = SDL_CreateSemaphore(0);
-        // Same retry dance as RawConn::connect — libnx thread table can spike
-        // under concurrent AssetStream connects.
-        SDL_Thread* th = nullptr;
-        for (int attempt = 0; attempt < 8 && !th; ++attempt) {
-            th = SDL_CreateThread(raw_connect_thread, "tls_tcp_connect", task);
-            if (!th) SDL_Delay(50 + attempt * 10);
-        }
-        if (!th) {
-            SDL_DestroySemaphore(task->sem);
-            delete task;
-            std::fprintf(stderr, "TlsConn: failed to create connect thread after retries\n");
-            return false;
-        }
-        SDL_DetachThread(th);
-        if (SDL_SemWaitTimeout(task->sem, 10000) != 0) {
-            std::fprintf(stderr, "TlsConn: TCP connect to %s:%u timed out\n", host, port);
-            return false;
-        }
-        ret = task->result;
-        net = task->net;
-        mbedtls_net_init(&task->net);
-        SDL_DestroySemaphore(task->sem);
-        delete task;
-        if (ret != 0) { tls_log_err("net_connect", ret); return false; }
-        std::fprintf(stderr, "TlsConn: TCP connected to %s:%u\n", host, port);
-    }
+    // DNS resolve + TCP connect via ConnectPool — same rationale as RawConn:
+    // Ryujinx's blocking connect() never times out, and we can't spawn a
+    // fresh helper thread per call without exhausting libnx's thread table
+    // under AssetStream load.
+    ret = ConnectPool::connect(host, port, &net, 10000);
+    if (ret != 0) { tls_log_err("net_connect", ret); return false; }
+    std::fprintf(stderr, "TlsConn: TCP connected to %s:%u\n", host, port);
 
     // Non-blocking so poll() + WANT_READ work correctly
     mbedtls_net_set_nonblock(&net);
