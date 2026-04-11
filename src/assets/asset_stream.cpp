@@ -132,10 +132,14 @@ int AssetStream::thread_func(void* userdata) {
 void AssetStream::run() {
     char rel[256];
 
-    // Per-worker persistent HTTP client. Each thread owns its own connection
-    // so TLS handshakes happen once, not once per prefetch. This is the main
-    // reason AssetStream is fast enough to warm the char select grid.
-    HttpClient client;
+    // Per-worker persistent HTTP clients — one per mount tier. A single client
+    // would close+reopen its connection every time the primary 404s and we
+    // fall back to the secondary CDN (and vice versa), which thrashes the
+    // connect-helper-thread pool so hard that libnx runs out of thread
+    // handles. Holding one sticky client per host keeps both TLS sessions
+    // warm and brings connect-thread churn to essentially zero.
+    HttpClient primary_client;
+    HttpClient secondary_client;
 
     while (running_) {
         // Wait for a request
@@ -152,7 +156,8 @@ void AssetStream::run() {
 
         // Fetch bytes (keep-alive HTTP → sdmc: → romfs:)
         int      size = 0;
-        uint8_t* data = AssetManager::fetch_bytes_with_client(rel, &size, client);
+        uint8_t* data = AssetManager::fetch_bytes_with_clients(
+            rel, &size, primary_client, secondary_client);
         if (data) {
             // Store in prefetch cache — AssetManager takes ownership
             AssetManager::store_prefetch(rel, data, size);
