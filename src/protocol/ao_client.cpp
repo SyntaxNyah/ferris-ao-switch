@@ -40,6 +40,7 @@ void AOClient::on_connected_ws(const char* hdid) {
     char buf[256];
     send(buf, cmd::hi(buf, sizeof(buf), hdid_));
     hs_state_ = HandshakeState::WaitId;
+    hi_resent_ = false;
     std::fprintf(stderr, "[ao_client] WS connected — sent HI immediately (webAO flow)\n");
 }
 
@@ -184,21 +185,37 @@ void AOClient::on_decryptor(const Packet& /*p*/) {
     // AOPacketDecryptor::handle). We don't use the decryptor key itself —
     // modern servers ship "NOENCRYPT" and clients ignore the value. The
     // packet's sole purpose is to signal "you may begin the handshake now".
-    //
-    // Idempotency: on WS/WSS we already sent HI on socket.onopen via
-    // on_connected_ws(), so we're in WaitId by the time this packet
-    // arrives. Don't re-send HI or the server will bail with a protocol
-    // error. Only transition if we were still waiting for the decryptor.
-    if (hs_state_ != HandshakeState::WaitDecryptor) {
-        std::fprintf(stderr, "[ao_client] decryptor received post-HI (state=%d) — ignoring\n",
-            (int)hs_state_);
+
+    if (hs_state_ == HandshakeState::WaitDecryptor) {
+        // AO-SDL / raw TCP flow: first time seeing decryptor, send HI.
+        hs_start_ms_ = SDL_GetTicks();
+        char buf[256];
+        send(buf, cmd::hi(buf, sizeof(buf), hdid_));
+        hs_state_ = HandshakeState::WaitId;
+        std::fprintf(stderr, "[ao_client] decryptor received — sent HI (AO-SDL flow)\n");
         return;
     }
-    hs_start_ms_ = SDL_GetTicks(); // reset so TLS setup time doesn't eat budget
-    char buf[256];
-    send(buf, cmd::hi(buf, sizeof(buf), hdid_));
-    hs_state_ = HandshakeState::WaitId;
-    std::fprintf(stderr, "[ao_client] decryptor received — sent HI (AO-SDL flow)\n");
+
+    if (hs_state_ == HandshakeState::WaitId && !hi_resent_) {
+        // webAO fallback for vanilla tsuserver: we already sent HI eagerly
+        // on WS open (on_connected_ws), but the server hasn't responded with
+        // ID yet.  Vanilla tsuserver ignores HI that arrives before its own
+        // decryptor broadcast — the arrival of decryptor while we're still
+        // in WaitId is strong evidence our early HI was dropped.  Re-send
+        // HI now that the server has signalled readiness.  The flag prevents
+        // compounding duplicates if the server sends multiple decryptors.
+        hi_resent_ = true;
+        hs_start_ms_ = SDL_GetTicks();
+        char buf[256];
+        send(buf, cmd::hi(buf, sizeof(buf), hdid_));
+        std::fprintf(stderr, "[ao_client] decryptor in WaitId — re-sent HI (vanilla fallback)\n");
+        return;
+    }
+
+    // Past WaitId (WaitSi, WaitSc, InLobby, etc.) — server already
+    // processed our HI, ignore the late decryptor.
+    std::fprintf(stderr, "[ao_client] decryptor received (state=%d) — ignoring\n",
+        (int)hs_state_);
 }
 
 void AOClient::on_id(const Packet& p) {
