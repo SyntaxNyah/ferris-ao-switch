@@ -89,6 +89,11 @@ private:
     HandshakeState hs_state_ = HandshakeState::Idle;
     char           username_[64];
     char           hdid_[64]    = "ferris-ao-switch";
+    // Vanilla tsuserver sometimes ignores HI that arrives before its own
+    // decryptor broadcast. on_connected_ws() sends HI eagerly for webAO
+    // parity, and on_decryptor() uses this flag to re-send HI exactly once
+    // if we reach decryptor without the server having responded with ID.
+    bool           hi_resent_   = false;
 
     // Pending parse buffer (across frames) — must be >= InPacket::data (131072)
     char  parse_buf_[131072];
