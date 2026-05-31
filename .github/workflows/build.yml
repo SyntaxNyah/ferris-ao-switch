@@ -1,0 +1,55 @@
+name: Build NRO
+
+# Builds the Switch homebrew .nro and uploads it as a downloadable artifact.
+# - Every push / PR: build + attach `ferris-ao-switch.nro` to the run's Artifacts.
+# - Pushing a tag like `v0.1.0`: also publish a GitHub Release with the .nro.
+# - Manual: trigger from the Actions tab via "Run workflow".
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # Official devkitPro image: ships the devkitA64 toolchain + libnx, and the
+    # dkp-pacman package manager for the SDL2 portlibs we link against.
+    container:
+      image: devkitpro/devkita64:latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install SDL2 portlibs
+        # The base image has the toolchain but not the SDL2 stack — install the
+        # exact set the Makefile links. -Sy refreshes the db; --noconfirm is
+        # non-interactive (CI has no TTY).
+        run: |
+          dkp-pacman -Sy --noconfirm \
+            switch-sdl2 switch-sdl2_image switch-sdl2_ttf \
+            switch-sdl2_mixer switch-sdl2_net \
+            switch-libwebp switch-mbedtls
+
+      - name: Build
+        run: make -j$(nproc)
+
+      - name: Show build output
+        run: ls -lh ferris-ao-switch.nro ferris-ao-switch.elf
+
+      - name: Upload NRO artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ferris-ao-switch
+          path: ferris-ao-switch.nro
+          if-no-files-found: error
+
+      - name: Publish release (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ferris-ao-switch.nro
+          generate_release_notes: true

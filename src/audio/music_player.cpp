@@ -8,13 +8,20 @@ namespace ao {
 MusicPlayer::~MusicPlayer() { stop(); }
 
 void MusicPlayer::play(const char* path, int fade_ms) {
-    if (std::strcmp(path, "~~") == 0) { stop(); return; }
+    // AO2 stop-music sentinels: "~stop.mp3" (modern) and "~~" (legacy).
+    if (std::strcmp(path, "~~") == 0 || std::strstr(path, "~stop")) { stop(); return; }
 
-    // Resolve via AssetManager (HTTP streaming → sdmc: → romfs:)
-    // Try the path as given first, then with "music/" prepended.
+    // Resolve via AssetManager (prefetch cache → HTTP → sdmc: → romfs:). Try
+    // the path exactly as given FIRST — the courtroom hands us the precise
+    // relative path it already warmed in the prefetch cache, so this hits the
+    // cache with no network. Fall back to the AO2 layouts otherwise.
     SDL_RWops* rw = AssetManager::open_rwops(path);
+    char rel[320];
     if (!rw) {
-        char rel[300];
+        std::snprintf(rel, sizeof(rel), "sounds/music/%s", path);
+        rw = AssetManager::open_rwops(rel);
+    }
+    if (!rw) {
         std::snprintf(rel, sizeof(rel), "music/%s", path);
         rw = AssetManager::open_rwops(rel);
     }
@@ -23,17 +30,13 @@ void MusicPlayer::play(const char* path, int fade_ms) {
         return;
     }
 
-    // Stop and free the current track before loading the new one
-    if (music_) {
-        Mix_HaltMusic();
-        // music_rw_ is freed by Mix_FreeMusic (freesrc was 1)
-        Mix_FreeMusic(music_);
-        music_    = nullptr;
-        music_rw_ = nullptr;
-    }
+    // Stop and free the current track before loading the new one. The old
+    // track was loaded with freesrc=0, so Mix_FreeMusic does NOT close its
+    // RWops — we must SDL_RWclose(music_rw_) ourselves or it leaks.
+    stop();
 
     // freesrc=0: we keep rw alive ourselves so SDL_mixer can stream from it.
-    // music_rw_ is closed and freed when we next call _free_music() / stop().
+    // music_rw_ is closed and freed by the next play()/stop() call.
     music_rw_ = rw;
     music_    = Mix_LoadMUS_RW(rw, 0);
     if (!music_) {

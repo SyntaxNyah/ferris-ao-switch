@@ -65,8 +65,9 @@ struct ICAnimState {
     char    sfx[64]         = {};
     char    bg[128]         = {};
     int     char_id         = -1;
-    int     emote_mod       = 0;        // 0-6
-    int     text_color      = 0;        // 0-11
+    int     desk_mod        = 1;        // 0=hidden, 1=shown, 2-5 variants
+    int     emote_mod       = 0;        // 0,1,2,5,6 (1/2/6 play preanim)
+    int     text_color      = 0;        // 0-9 (see TEXT_COLORS)
     int     objection_mod   = 0;        // 0=none,1=objection,2=hold_it,3=take_that
     bool    flip            = false;
     bool    realization     = false;

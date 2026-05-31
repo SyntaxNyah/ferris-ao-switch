@@ -5,6 +5,8 @@
 #include "assets/theme_manager.hpp"
 #include "assets/texture_cache.hpp"
 #include "assets/asset_stream.hpp"
+#include "audio/audio_manager.hpp"
+#include "audio/music_player.hpp"
 #include "render/text_renderer.hpp"
 #include "input/input_manager.hpp"
 #include "net/network_thread.hpp"
@@ -42,6 +44,8 @@ public:
     TextRenderer& text()         { return text_renderer_; }
     TextureCache& tex_cache()    { return tex_cache_; }
     AssetStream&  asset_stream() { return asset_stream_; }
+    AudioManager& audio()        { return audio_manager_; }
+    MusicPlayer&  music()        { return music_player_; }
     bool          running()      const { return running_; }
     void          quit()         { running_ = false; }
 
@@ -76,6 +80,8 @@ private:
     InputManager  input_manager_;
     TextureCache  tex_cache_;
     AssetStream   asset_stream_;
+    AudioManager  audio_manager_;
+    MusicPlayer   music_player_;
 
     // Networking
     InQueue        in_queue_;

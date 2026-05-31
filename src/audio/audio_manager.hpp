@@ -19,6 +19,12 @@ public:
 
     bool init();  // called once after Mix_OpenAudio
 
+    // Free all cached chunks and halt channels. Idempotent. MUST be called
+    // while the mixer is still open (i.e. before Mix_CloseAudio), so App calls
+    // it explicitly during teardown rather than relying on the destructor —
+    // member destructors run after App::~App has already closed the mixer.
+    void shutdown();
+
     // Play a sound effect by filesystem path (cached).
     // Returns false if the file can't be loaded.
     bool play_sfx(const char* path);

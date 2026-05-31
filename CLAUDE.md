@@ -40,6 +40,20 @@ LIBS     := -lSDL2_mixer -lSDL2_ttf -lSDL2_image -lSDL2_net -lSDL2 \
 - `-fPIE` — position-independent executable for NRO ASLR
 - `ROMFS := romfs` — bundles `romfs/` into the NRO; accessible at runtime as `romfs:/`
 
+**Building (verified):** `DEVKITPRO` is exported inside the devkitPro MSYS2
+shell but NOT in a plain Git Bash, so build through the login shell:
+`/c/devkitPro/msys2/usr/bin/bash -l -c "cd '<repo>' && make"`. A clean build ends
+with `built ... ferris-ao-switch.nro` (~12 MB, `NRO0` magic). To check one file
+fast without a full build, run the cross-compiler with `-fsyntax-only` and the
+portlib include paths — see **BUILDING.md** ("Verified build notes"). The
+codebase emits many benign `-Wstringop-truncation`/`-Wformat-truncation`
+warnings from its `strncpy(dst,src,sizeof-1)` idiom; these are expected.
+
+**CI:** `.github/workflows/build.yml` builds in the `devkitpro/devkita64`
+container (installs the SDL2 portlibs via `dkp-pacman`, runs `make`) and uploads
+`ferris-ao-switch.nro` as a downloadable artifact on every push/PR, plus a
+GitHub Release on `v*` tags.
+
 **Desktop build:** Not supported by Makefile, but all non-libnx code compiles with a standard g++/clang++ if you stub `<switch.h>` and swkbd. `AssetManager` falls back to relative `base/` and `romfs/` paths on non-Switch.
 
 ---
@@ -410,7 +424,12 @@ Performs the RFC 6455 HTTP upgrade:
 ### `src/net/ws_frame.hpp` / `src/net/ws_frame.cpp`
 
 **`ws_encode_frame(const char* payload, int len, char* out, int out_cap)`**
-- Writes a binary (opcode `0x02`) WebSocket frame to `out`
+- Writes a **TEXT** (opcode `0x01`, first byte `0x81`) WebSocket frame to `out`.
+  **This must be text, not binary.** AO2 over WebSocket is a text protocol:
+  webAO sends text frames, and every server reads only text — Whisker switches
+  on `WS_OPCODE_TEXT`, akashi connects only `QWebSocket::textMessageReceived`.
+  A binary (`0x82`) frame is silently dropped, so `HI` never arrives and the
+  handshake stalls forever. (This was the "can't connect to any server" bug.)
 - Client→server frames **must** be masked per RFC 6455 — uses `SDL_GetTicks()` XOR for 4-byte mask seed
 - Returns bytes written, or -1 if `out_cap` insufficient
 
@@ -1039,80 +1058,74 @@ Scrollable list showing up to 10 areas at a time. Reads `gs.areas[]` for player 
 
 ### `src/ui/screens/courtroom_screen.hpp` / `courtroom_screen.cpp`
 
-Main gameplay screen. Most complex screen. Owns animation state.
+Main gameplay screen. Renders the AO2 courtroom in real time — streamed
+backgrounds, desks, character idle/talk sprites, pre-animations, shout bubbles,
+the typewriter chatbox, music/SFX/blips — and composes outgoing IC/OOC/MC.
+The animation state machine, typewriter, and panels are all inlined here
+(there are **no** separate `chatbox.cpp` / `ic_input.cpp` files; an earlier
+revision split them out but the current screen is monolithic).
 
-**`CourtroomPanel` enum:**
-```cpp
-enum class CourtroomPanel { None, OOC, Music, Evidence, ICInput };
-```
+**`CourtroomPanel` enum:** `{ None, OOC, Music, Evidence, ICInput }`
 
-**Layout regions (from `Layout` namespace):**
-- Viewport (853×480): character sprite + background
-- Chat area: chatbox typewriter text
-- Side panel: HP bars, button strip
-- Overlays: OOC, Music, Evidence, ICInput panels (semi-transparent, slide in/out)
+**Animation players (all `APNGPlayer`, all stream via `AssetManager`):**
+`bg_player_`, `desk_player_`, `idle_player_` (a), `talk_player_` (b),
+`preanim_player_`, `shout_player_`, `pair_player_`.
 
-**Core update loop per frame:**
-1. If `gs.has_pending_ic`: consume `gs.pending_ic` → start IC animation sequence
-2. IC animation state machine:
-   - `PRE_ANIM`: play `pre_anim` GIF once (skip if `emote_mod == 1`)
-   - `OBJECTION`: show objection popup (0.5s), play SFX
-   - `REALIZATION`: white flash overlay (0.3s)
-   - `TALKING`: show `<emote>(b).png`, run chatbox typewriter (35ms/char)
-   - `IDLE`: switch to `<emote>(a).png`, wait for next IC
-3. Screenshake: accumulate offset from `screenshake` flag, decay over 500ms
-4. HP bar renders: 10-segment bar (green = def, red = pro)
+**Non-blocking loading (the render loop never does network I/O).** On a new
+message, `begin_message()` queues every candidate path (all extensions) on the
+`AssetStream` worker threads via `prefetch_emote`/`prefetch_bgimg`/
+`prefetch_shout`. Each frame `resolve_assets()` decodes only what
+`AssetManager::has_prefetch()` already reports cached (instant in-memory decode),
+setting the `*_ready_` flags. The exact candidate paths follow the
+`(a)`/`(b)`-prefix rules below so prefetch and decode use identical keys.
 
-**Controller mapping in courtroom:**
+**IC animation phases (`enum class Phase`):**
+0. `Loading` — entered by `begin_message()`. Holds the timeline until the
+   speaker sprite is decoded (`char_ready()`) or `LOAD_GATE_MS` (1.2 s) elapses,
+   so text + animation start crisp and in sync. Missing assets are abandoned
+   after `ASSET_GIVEUP_MS` (8 s). Music is resolved the same async way in
+   `update_music()`; small SFX/blips stay synchronous but prefetch-warmed.
+1. `Shout` — if `objection_mod ≥ 1`: load `<shout>_bubble` (or `misc/default`),
+   play the theme shout SFX, hold `SHOUT_MS` (1.5 s).
+2. `Preanim` — if `emote_mod ∈ {1,2,6}` and `pre_anim` is set/≠`-`: play the
+   pre-anim once (a static pre-anim is treated as instantly finished so the
+   phase can't hang).
+3. `Talking` — `(b)` talk sprite, typewriter at `TYPEWRITER_MS` (35 ms/char),
+   blip SFX every `BLIP_EVERY` visible chars, message SFX at start, optional
+   realization white-flash (`REALIZE_MS`).
+4. Idle — once the typewriter finishes, the `(a)` idle sprite is drawn.
 
-| Button | Action |
-|--------|--------|
-| ZL | Toggle OOC panel |
-| ZR | Toggle Music panel |
-| Y | Toggle Evidence panel |
-| X | Open IC Input overlay |
-| A | Skip typewriter (jump to end of current message) |
-| B | Close active panel |
-| + | Disconnect → pop to ConnectScreen |
-| Right stick Up/Down | Scroll OOC/Music/Evidence list |
+`screenshake` jitters the viewport for ~14 frames. `flip`/`pair_flip` mirror
+horizontally. `self_offset`/`other_offset` shift sprites by a % of viewport
+width (pairing draws the partner behind the speaker). Layer order:
+**background → pair sprite → speaker sprite → desk overlay → realization flash
+→ shout bubble**.
 
-**IC Input overlay (`ic_input.hpp`):**
-- Shows current showname, character, emote selector (D-pad L/R to cycle)
-- A → open system keyboard for message text
-- ZR → send `MS` packet (via `OutQueue`)
-- Reads `CharDef` to populate emote list
+**Scene caching:** the background/desk only reload when `pos` or `gs.background`
+actually changes (tracked in `cur_pos_`/`cur_bg_`); music only (re)plays when
+`gs.current_music` changes (tracked in `cur_music_`).
 
----
+**Controller / keyboard mapping:**
 
-### `src/ui/courtroom/chatbox.hpp` / `chatbox.cpp`
+| Button (key) | Action |
+|--------------|--------|
+| ZL (Z) | Toggle OOC panel |
+| ZR (C) | Toggle Music panel |
+| Y (Y) | Toggle Evidence panel |
+| X (X) | Toggle IC composer |
+| A / Enter | Skip typewriter; or panel-specific confirm |
+| B / Esc | Close panel |
+| + / Start (P) | Disconnect → pop to ConnectScreen |
+| D-pad / arrows | Navigate active panel |
 
-Typewriter chatbox. Called from `CourtroomScreen`.
+**IC composer (ICInput panel):** D-pad ←/→ cycle the player's own emotes (read
+from their `char.ini` via `load_char_ini`), ↑/↓ cycle text colour, A opens the
+system keyboard and on confirm builds + sends the 26-field `MS` packet via
+`cmd::ms`. **Music panel:** A sends `MC` for the highlighted track.
+**OOC panel:** A opens the keyboard and sends `CT`.
 
-```cpp
-void start(const char* text, int text_color, bool additive);
-void update(uint32_t dt_ms);
-bool is_done() const;
-void skip();                      // Jump to end immediately
-void render(Renderer& r, TTF_Font* font, const SDL_Rect& bounds);
-```
-
-- 35ms per character default speed
-- `additive = true` → new message appended to previous (don't clear)
-- `text_color` → maps to SDL_Color (AO2 color codes 0–7)
-- Renders only visible characters up to current position
-
-**Color map:**
-
-| Code | Color |
-|------|-------|
-| 0 | White |
-| 1 | Green |
-| 2 | Red |
-| 3 | Orange |
-| 4 | Blue |
-| 5 | Yellow |
-| 6 | Rainbow (cycles) |
-| 7 | Pink |
+**Text colours (`TEXT_COLORS[10]`, AO2 canonical 0–9):** white, green, red,
+orange, blue, yellow, pink, cyan, grey, rainbow (rainbow renders as white).
 
 ---
 
@@ -1395,15 +1408,37 @@ If latency-sensitive loading is needed, call `asset_stream.prefetch()` before th
 
 `MusicPlayer` holds `music_rw_` alongside `music_`. `music_rw_` is the `open_rwops()` result; SDL_mixer streams from it. Always call `Mix_FreeMusic(music_)` before `SDL_RWclose(music_rw_)`. The `stop()` method does this correctly. Do not reorder these calls.
 
-### 12. Character sprite path convention
+### 12. Character sprite path convention (AO2 standard)
+
+The `(a)`/`(b)` markers are a **prefix**, the sprite lives at the **character
+root** (not an `emotions/` subdir), and the extension is probed in the order
+the server advertises (`ExtensionsConfig`: webp → apng → gif → png by default).
+This matches AO2-Client, AO-SDL, and webAO exactly (see `buildEmoteUrls` in
+webAO/LemmyAO):
 
 ```
-Idle:     characters/<name>/emotions/<emote>(a).png
-Talk:     characters/<name>/emotions/<emote>(b).png
-Pre-anim: characters/<name>/<pre_anim>.gif
+Idle (animated):  characters/<name>/(a)<emote>.<ext>
+Talk (animated):  characters/<name>/(b)<emote>.<ext>
+Bare PNG (both):  characters/<name>/<emote>.png        ← no prefix for .png!
+Pre-anim:         characters/<name>/<pre_anim>.<ext>   ← no prefix
+Char icon:        characters/<name>/char_icon.png      (static, .png/.webp)
+Emote button:     characters/<name>/emotions/button<N>_off.png
 ```
 
-The `emote` field from the MS packet is the base name (no suffix). Append `(a)` or `(b)` before calling `AssetManager::open_rwops()` or `TextureCache::get()`. Pre-anims use the full name from `[Emotions]` ini section field 2.
+Key rule: the `.png` (and `.webp.static`) candidates use the **bare** emote
+name with no `(a)`/`(b)` prefix — classic single-file static emotes. Only the
+animated formats get the prefix. The `emote` field from the MS packet **is** the
+animation base name (e.g. `normal`), so other players' sprites render straight
+from the packet with no char.ini lookup. `CourtroomScreen::load_emote()` and
+`AssetManager` lowercase the character/background folder before building the URL
+(AO2 CDNs host lowercase-only trees).
+
+Background: `background/<bg>/<posfile>.<ext>` where `<posfile>` maps the side
+(`bg_filename()`): `def→defenseempty`, `pro→prosecutorempty`, `wit→witnessempty`,
+`jud→judgestand`, `hld→helperstand`, `hlp→prohelperstand`, `jur→jurystand`,
+`sea→seancestand`. Desk overlay: `background/<bg>/<deskfile>.<ext>`
+(`def→defensedesk`, `pro→prosecutiondesk`, `wit→stand`, …). Both fall back to
+`background/default/...`.
 
 ### 11. `SDLNet_TCP_Send` is not frame-safe on partial sends
 

@@ -15,8 +15,11 @@ int ws_encode_frame(const char* payload, int payload_len,
     if (out_cap < header_len + payload_len) return 0;
 
     int pos = 0;
-    // Byte 0: FIN=1, opcode=binary(2)
-    out[pos++] = 0x82;
+    // Byte 0: FIN=1, opcode=TEXT(1). AO2 over WebSocket is a text protocol —
+    // webAO sends text frames and servers (Whisker, akashi, tsuserver) only
+    // read WS_OPCODE_TEXT, silently dropping binary (0x2) frames. Sending text
+    // is what lets HI and every subsequent packet actually reach the server.
+    out[pos++] = 0x81;
     // Byte 1: MASK=1, payload length
     if (payload_len <= 125) {
         out[pos++] = 0x80 | (uint8_t)payload_len;

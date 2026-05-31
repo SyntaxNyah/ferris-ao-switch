@@ -1,10 +1,24 @@
 #pragma once
 #include "../screen.hpp"
+#include "../../assets/apng_player.hpp"
+#include "../../assets/char_ini_parser.hpp"
+#include <cstdint>
 
 namespace ao {
 
 enum class CourtroomPanel { None, OOC, Music, Evidence, ICInput };
 
+// Main gameplay screen. Renders the AO2 courtroom in real time: streamed
+// backgrounds, desks, character idle/talk sprites, pre-animations, shout
+// bubbles, the typewriter chatbox, HP bars, music/SFX/blips, and the IC
+// message composer.
+//
+// Loading is fully asynchronous and never blocks the render loop: when a
+// message arrives, every candidate asset (all extensions) is queued on the
+// AssetStream worker threads, and the main thread only ever decodes an asset
+// once it is already sitting in the in-memory prefetch cache. A short Loading
+// phase holds the timeline until the speaker's sprite is ready (or a small
+// timeout elapses) so text and animation start crisp and in sync.
 class CourtroomScreen : public Screen {
 public:
     explicit CourtroomScreen(App& app);
@@ -16,30 +30,121 @@ public:
     void render() override;
 
 private:
+    // IC animation phases. Loading gates the start of the timeline on the
+    // speaker sprite being decoded; Idle is the resting state between lines.
+    enum class Phase { Loading, Shout, Preanim, Talking, Idle };
+
+    // ── Sequence control (all non-blocking) ───────────────────────────────
+    void begin_message();          // snapshot gs.ic_anim, queue prefetches
+    void resolve_assets();         // per-frame: decode any asset that's ready
+    void start_pending_phase();    // leave Loading → Shout/Preanim/Talking
+    void enter_talking();          // start typewriter + message SFX
+    void queue_scene();            // prefetch background + desk for cur_*
+    void update_music();           // async track changes
+
+    // ── Rendering ─────────────────────────────────────────────────────────
     void render_viewport();
     void render_chat_area();
     void render_side_panel();
     void render_active_panel();
+    void draw_sprite_fill(APNGPlayer& p, int off_x_pct, bool flip);
+
+    // ── IC composer ───────────────────────────────────────────────────────
+    void load_own_character();
+    void compose_and_send();
+
+    bool char_ready() const { return idle_ready_ || talk_ready_; }
 
     CourtroomPanel active_panel_ = CourtroomPanel::None;
 
-    // Typewriter state
-    int    typewriter_pos_  = 0;
-    int    typewriter_max_  = 0;
-    uint32_t typewriter_acc_ = 0;
-    static constexpr uint32_t TYPEWRITER_MS = 35; // ms per character
+    // ── Snapshot of the message currently animating ───────────────────────
+    char m_char_[64]      = {};   // lowercased speaker folder
+    char m_emote_[64]     = {};   // emote anim base (lowercased)
+    char m_preanim_[64]   = {};
+    char m_pair_char_[64] = {};
+    char m_pair_emote_[64]= {};
+    char m_blip_[32]      = {};
+    int  m_color_     = 0;
+    int  m_emote_mod_ = 0;
+    int  m_shout_     = 0;
+    bool m_flip_      = false;
+    bool m_pair_flip_ = false;
+    int  m_self_off_  = 0;         // % of viewport width
+    int  m_pair_off_  = 0;
+    bool m_has_pair_  = false;
+    bool m_desk_visible_ = true;
+    bool m_realize_   = false;
+    bool m_use_pre_   = false;     // this line plays a pre-anim
 
-    // Screenshake
-    int    shake_frames_ = 0;
-    int    shake_x_      = 0;
-    int    shake_y_      = 0;
+    // ── Scene caches (so we don't reload every message) ───────────────────
+    char cur_bg_[128]   = {};
+    char cur_pos_[16]   = {};
+    char cur_music_[128]= {};
+    bool         chatbox_tried_ = false;
+    SDL_Texture* chatbox_tex_   = nullptr;  // owned by TextureCache, not freed here
 
-    // OOC scroll
-    int ooc_scroll_ = 0;
-    // Music scroll
+    // ── Animation players ─────────────────────────────────────────────────
+    APNGPlayer bg_player_;
+    APNGPlayer desk_player_;
+    APNGPlayer idle_player_;     // (a)
+    APNGPlayer talk_player_;     // (b)
+    APNGPlayer preanim_player_;
+    APNGPlayer shout_player_;
+    APNGPlayer pair_player_;
+
+    // ── Async load readiness flags ─────────────────────────────────────────
+    bool scene_pending_  = false; // bg/desk still need decoding
+    bool bg_ready_       = false;
+    bool desk_ready_     = false;
+    bool idle_ready_     = false;
+    bool talk_ready_     = false;
+    bool preanim_ready_  = false;
+    bool pair_ready_     = false;
+    bool shout_ready_    = false;
+    uint32_t msg_age_ms_ = 0;     // ms since begin_message (load gate / give-up)
+    static constexpr uint32_t LOAD_GATE_MS   = 1200;  // start line anyway after this
+    static constexpr uint32_t ASSET_GIVEUP_MS = 8000; // stop probing missing assets
+
+    Phase phase_ = Phase::Idle;
+    Phase pending_phase_ = Phase::Talking;
+
+    // music async
+    char want_music_[128] = {};
+    bool     music_pending_ = false;
+    uint32_t music_age_ms_  = 0;
+
+    // typewriter
+    int      tw_pos_ = 0;
+    int      tw_max_ = 0;
+    uint32_t tw_acc_ = 0;
+    int      tw_since_blip_ = 0;
+    static constexpr uint32_t TYPEWRITER_MS = 35;
+    static constexpr int      BLIP_EVERY    = 2;   // chars per blip
+
+    // phase timers
+    uint32_t shout_acc_  = 0;
+    static constexpr uint32_t SHOUT_MS = 1500;
+    uint32_t realize_ms_ = 0;
+    static constexpr uint32_t REALIZE_MS = 350;
+
+    // screenshake
+    int shake_frames_ = 0;
+    int shake_x_ = 0, shake_y_ = 0;
+
+    // panel scroll/selection
+    int ooc_scroll_   = 0;
     int music_scroll_ = 0;
-    // Evidence scroll
-    int evi_scroll_ = 0;
+    int music_sel_    = 0;
+    int evi_scroll_   = 0;
+
+    // ── IC composer state (own character) ─────────────────────────────────
+    CharDef own_char_;
+    bool    own_loaded_  = false;
+    int     ic_emote_sel_= 0;
+    int     ic_color_    = 0;
+    char    ic_pos_[16]  = "wit";
+    char    ic_text_[256]= {};
+    bool    kb_active_   = false;
 };
 
 } // namespace ao

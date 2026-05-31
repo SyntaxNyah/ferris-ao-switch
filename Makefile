@@ -37,7 +37,6 @@ SOURCES  := src \
             src/render \
             src/ui \
             src/ui/screens \
-            src/ui/courtroom \
             src/input
 DATA     := data
 INCLUDES := include src

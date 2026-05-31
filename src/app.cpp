@@ -37,6 +37,11 @@ App::~App() {
     delete game_state_;
     delete renderer_;
 
+    // Release audio buffers while the mixer is still open. Member destructors
+    // run after this body, i.e. after Mix_CloseAudio(), so we must free here.
+    music_player_.stop();
+    audio_manager_.shutdown();
+
     Mix_CloseAudio();
     Mix_Quit();
     TTF_Quit();
@@ -85,8 +90,9 @@ bool App::init() {
         std::fprintf(stderr, "Mix_OpenAudio: %s\n", Mix_GetError());
         return false;
     }
-    Mix_Init(MIX_INIT_OGG | MIX_INIT_OPUS);
+    Mix_Init(MIX_INIT_OGG | MIX_INIT_OPUS | MIX_INIT_MP3 | MIX_INIT_MOD);
     Mix_AllocateChannels(16);
+    audio_manager_.init();
 
     window_ = SDL_CreateWindow(
         "Ferris-AO",

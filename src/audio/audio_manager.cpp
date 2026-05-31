@@ -7,6 +7,10 @@
 namespace ao {
 
 AudioManager::~AudioManager() {
+    shutdown();
+}
+
+void AudioManager::shutdown() {
     stop_sfx();
     for (auto& s : sfx_cache_)
         if (s.chunk) { Mix_FreeChunk(s.chunk); s.chunk = nullptr; }

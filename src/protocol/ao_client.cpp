@@ -94,7 +94,6 @@ void AOClient::process(InQueue& in) {
             Packet pkt;
             int n = parse_packet(parse_buf_ + consumed, parse_len_ - consumed, pkt);
             if (n == 0) break;
-            std::fprintf(stderr, "[ao_client] pkt: %s\n", pkt.header);
             // SC / SM / CharsCheck can exceed Packet::MAX_FIELDS on servers
             // with hundreds of characters or music tracks — dispatch them to
             // streaming handlers that walk the raw bytes directly.
@@ -380,7 +379,7 @@ void AOClient::on_ms(const Packet& p) {
     };
 
     // [0] desk_mod  [1] pre_anim  [2] char_name  [3] emote
-    ic.emote_mod  = p.field_int(0);
+    ic.desk_mod   = p.field_int(0, 1);
     copy_field(ic.pre_anim,   sizeof(ic.pre_anim),  1);
     copy_field(ic.char_name,  sizeof(ic.char_name),  2);
     copy_field(ic.emote,      sizeof(ic.emote),      3);
@@ -463,7 +462,8 @@ void AOClient::on_mc(const Packet& p) {
     std::strncpy(song, p.field(0), sizeof(song) - 1);
     Packet::unescape(song);
     std::strncpy(state_.current_music, song, sizeof(state_.current_music) - 1);
-    // TODO Phase 8: tell audio manager to play the song
+    // CourtroomScreen watches state_.current_music and calls MusicPlayer::play()
+    // when it changes — AOClient has no audio access and stays main-thread-pure.
 }
 
 void AOClient::on_hp(const Packet& p) {

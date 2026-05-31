@@ -48,6 +48,9 @@ void CharSelectScreen::handle_event(const SDL_Event& e) {
             case SDLK_UP:    selected_ = (selected_ - COLS + total) % total; break;
             case SDLK_RETURN:
                 if (!gs.char_taken[selected_]) {
+                    // Optimistically record our char_id so the courtroom IC
+                    // composer works before the server's PV confirmation lands.
+                    gs.my_char_id = selected_;
                     char buf[256];
                     int n = cmd::cc(buf, sizeof(buf), gs.my_uid, selected_, "ferris-ao-switch");
                     app_.send_packet(buf, n);
@@ -65,6 +68,9 @@ void CharSelectScreen::handle_event(const SDL_Event& e) {
             case SDL_CONTROLLER_BUTTON_DPAD_UP:    selected_=(selected_-COLS+total)%total; break;
             case SDL_CONTROLLER_BUTTON_A:
                 if (!gs.char_taken[selected_]) {
+                    // Optimistically record our char_id so the courtroom IC
+                    // composer works before the server's PV confirmation lands.
+                    gs.my_char_id = selected_;
                     char buf[256];
                     int n = cmd::cc(buf, sizeof(buf), gs.my_uid, selected_, "ferris-ao-switch");
                     app_.send_packet(buf, n);

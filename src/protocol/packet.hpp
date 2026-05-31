@@ -142,6 +142,12 @@ inline int parse_packet(const char* data, int len, Packet& out) {
             } else if (seg_idx < Packet::MAX_FIELDS) {
                 // Check for lone '%' which is the terminator token
                 if (seg_len == 1 && data[seg_start] == '%') break;
+                // AO2 packets always end in "#%": the segment between the final
+                // '#' and the '%' terminator is empty and must NOT be stored as
+                // a real field (it would inflate field_count by one). Genuine
+                // empty middle fields (from "##") still come through because for
+                // those i != end.
+                if (i == end && seg_len == 0) break;
                 int copy = seg_len < Packet::MAX_FIELD_LEN - 1 ? seg_len : Packet::MAX_FIELD_LEN - 1;
                 std::strncpy(out.fields[seg_idx], data + seg_start, copy);
                 out.fields[seg_idx][copy] = '\0';

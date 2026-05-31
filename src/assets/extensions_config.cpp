@@ -116,15 +116,10 @@ void ExtensionsConfig::fetch_and_apply() {
 
     const char* json = reinterpret_cast<const char*>(data);
 
+    // Start from defaults so any field the JSON omits keeps a sane fallback,
+    // then override each category that the file actually specifies.
+    apply_defaults(s_cfg);
     int n;
-
-    n = parse_ext_array(json, size, "charicon_extensions",
-                        s_cfg.charicon, MAX_EXTS);
-    if (n > 0) s_cfg.charicon_count = n;
-    else       apply_defaults(s_cfg); // partial — keep defaults for this field
-
-    // re-parse the others after applying defaults so partial files are safe
-    apply_defaults(s_cfg); // reset all first
     n = parse_ext_array(json, size, "charicon_extensions",   s_cfg.charicon,   MAX_EXTS); if (n > 0) s_cfg.charicon_count   = n;
     n = parse_ext_array(json, size, "emote_extensions",      s_cfg.emote,      MAX_EXTS); if (n > 0) s_cfg.emote_count      = n;
     n = parse_ext_array(json, size, "emotions_extensions",   s_cfg.emotions,   MAX_EXTS); if (n > 0) s_cfg.emotions_count   = n;
