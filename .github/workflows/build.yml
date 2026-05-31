@@ -26,13 +26,25 @@ jobs:
 
       - name: Install SDL2 portlibs
         # The base image has the toolchain but not the SDL2 stack — install the
-        # exact set the Makefile links. -Sy refreshes the db; --noconfirm is
-        # non-interactive (CI has no TTY).
+        # exact set the Makefile links. devkitPro's mirror (pkg.devkitpro.org)
+        # intermittently 403s CI runners during the `-Sy` database refresh, so
+        # retry a few times before giving up (this, not a logic error, is what
+        # makes some runs fail while identical ones pass minutes later).
         run: |
-          dkp-pacman -Sy --noconfirm \
-            switch-sdl2 switch-sdl2_image switch-sdl2_ttf \
-            switch-sdl2_mixer switch-sdl2_net \
-            switch-libwebp switch-mbedtls
+          set -e
+          pkgs="switch-sdl2 switch-sdl2_image switch-sdl2_ttf \
+                switch-sdl2_mixer switch-sdl2_net \
+                switch-libwebp switch-mbedtls"
+          ok=0
+          for i in 1 2 3 4 5 6; do
+            if dkp-pacman -Sy --noconfirm --needed $pkgs; then ok=1; break; fi
+            echo "::warning::dkp-pacman sync failed (attempt $i) — retrying in 20s"
+            sleep 20
+          done
+          if [ "$ok" != 1 ]; then
+            echo "::error::Could not install devkitPro portlibs after 6 attempts (pkg.devkitpro.org unreachable / 403)"
+            exit 1
+          fi
 
       - name: Build
         run: make -j$(nproc)
