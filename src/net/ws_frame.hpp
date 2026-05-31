@@ -29,8 +29,10 @@ int ws_encode_frame(const char* payload, int payload_len,
 
 // Decode a server→client frame from buf[0..buf_len).
 // On Complete/Ping: out_buf receives the unmasked payload, out_len its length.
-// Returns number of bytes consumed from buf (0 = Incomplete).
+// `consumed` is set to the total frame size (header + payload) so the caller
+// can advance its buffer — it must NOT re-derive this itself (the 8-byte
+// length form is easy to get wrong). On Incomplete, consumed is 0.
 FrameResult ws_decode_frame(const uint8_t* buf, int buf_len,
-                             char* out_buf, int out_cap, int& out_len);
+                             char* out_buf, int out_cap, int& out_len, int& consumed);
 
 } // namespace ao

@@ -265,24 +265,26 @@ void NetworkThread::ws_loop() {
                 if (remaining <= 0) break;
 
                 static char payload[131072];
-                int  payload_len = 0;
+                int  payload_len = 0, frame_consumed = 0;
                 FrameResult res = ws_decode_frame(
                     frame_buf + consumed_total, remaining,
-                    payload, sizeof(payload), payload_len);
+                    payload, sizeof(payload), payload_len, frame_consumed);
 
                 if (res == FrameResult::Incomplete) break;
                 if (res == FrameResult::Close)  {
                     std::fprintf(stderr, "[ws_loop] Close frame received — stopping\n");
                     stop_flag_.store(true); break;
                 }
-                if (res == FrameResult::Error)  { std::fprintf(stderr, "WS frame error\n"); stop_flag_.store(true); break; }
+                if (res == FrameResult::Error)  {
+                    std::fprintf(stderr, "[ws_loop] WS frame error — stopping\n");
+                    stop_flag_.store(true); break;
+                }
                 if (res == FrameResult::Ping)   { send_pong(payload, payload_len); }
 
                 // Only application-data frames (Complete) feed recv_buf_.
-                // Ping payloads are random bytes (e.g. "cXjO jÍ )/=") that
-                // contain stray '%' characters — if we append them here,
-                // extract_packets() will slice them into bogus AO packets
-                // and ao_client will log "unknown packet: ..." garbage.
+                // Ping payloads are random bytes that may contain stray '%'
+                // characters — appending them would make extract_packets()
+                // slice bogus AO packets.
                 if (res == FrameResult::Complete &&
                     payload_len > 0 &&
                     recv_len_ + payload_len < RECV_BUF_CAP) {
@@ -291,14 +293,12 @@ void NetworkThread::ws_loop() {
                     extract_packets();
                 }
 
-                // Advance past this frame
-                int header = 2;
-                uint8_t* fb = frame_buf + consumed_total;
-                int plen = fb[1] & 0x7F;
-                if (plen == 126) { header += 2; plen = ((int)fb[2]<<8)|fb[3]; }
-                else if (plen == 127) { header += 8; plen = (int)fb[9]; }
-                if (fb[1] & 0x80) header += 4; // mask present
-                consumed_total += header + plen;
+                // Advance by the exact frame size the decoder reported. (The
+                // old inline re-parse mis-read the 8-byte length form used for
+                // payloads > 64 KB — e.g. a 2000-track SM packet — and desynced
+                // the stream into a "WS frame error".)
+                if (frame_consumed <= 0) break;  // defensive; shouldn't happen here
+                consumed_total += frame_consumed;
             }
 
             if (consumed_total > 0 && consumed_total < frame_len)

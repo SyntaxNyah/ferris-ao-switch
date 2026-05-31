@@ -51,8 +51,9 @@ int ws_encode_frame(const char* payload, int payload_len,
 }
 
 FrameResult ws_decode_frame(const uint8_t* buf, int buf_len,
-                             char* out_buf, int out_cap, int& out_len) {
+                             char* out_buf, int out_cap, int& out_len, int& consumed) {
     out_len = 0;
+    consumed = 0;
     if (buf_len < 2) return FrameResult::Incomplete;
 
     bool fin    = (buf[0] & 0x80) != 0;
@@ -92,7 +93,7 @@ FrameResult ws_decode_frame(const uint8_t* buf, int buf_len,
 
     (void)fin; // fragmentation: treat all as complete for now
 
-    int consumed = pos + plen;
+    consumed = pos + plen; // header (incl. any mask) + payload — caller advances by this
 
     switch (opcode) {
         case WsOpcode::Text:
@@ -110,7 +111,6 @@ FrameResult ws_decode_frame(const uint8_t* buf, int buf_len,
         default:
             return FrameResult::Error;
     }
-    (void)consumed;
 }
 
 } // namespace ao

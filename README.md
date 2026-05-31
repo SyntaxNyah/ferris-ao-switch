@@ -53,8 +53,9 @@ ferris-ao-switch implements the full AO2 client protocol so Switch players can j
 - **Narrator mode** — send IC messages without a character sprite
 
 ### Assets
-- **HTTP streaming** — loads assets on-demand from server CDN (`ASS` packet); no base pack download needed
-- **Three-tier fallback** — HTTP CDN → `sdmc:/switch/ferris-ao/base/` local pack → `romfs:/` bundled fallback
+- **HTTP & HTTPS streaming** — loads assets on-demand from a server CDN (`ASS` packet); `https://` (TLS) and `http://` URLs both supported; no base pack download needed
+- **Async, non-blocking loads** — sprites/backgrounds/music are prefetched on worker threads and decoded from cache on the main thread, so the courtroom never stalls on the network
+- **Four-tier fallback** — server CDN → community CDN (`attorneyoffline.de/base/`) → `sdmc:/switch/ferris-ao/base/` local pack → `romfs:/` bundled fallback
 - **Local base optional** — the SD card base folder is only needed on servers without a CDN
 - **APNG + GIF animations** — character idle, talk, and pre-animations via `IMG_LoadAnimation_RW()`
 - **LRU texture cache** — 64-slot cache; all lookups use relative paths as keys, regardless of source
@@ -229,18 +230,22 @@ ferris-ao-switch supports **on-demand asset streaming** directly from a server's
 
 **For players:** If the server you're connecting to has a CDN, you don't need to install anything. Just connect and play.
 
-**For server operators:** Set the `asset_url` field in your server's config to point to your HTTP file server. Clients that support it (including ferris-ao-switch) will stream from there automatically. Example:
+**For server operators:** Set the `asset_url` field in your server's config to point to your file server (HTTP **or** HTTPS). Clients that support it (including ferris-ao-switch) will stream from there automatically. Example:
 ```toml
 [server]
-asset_url = "http://cdn.myaoserver.com/base"
+asset_url = "https://cdn.myaoserver.com/base"
 ```
 
 The client constructs requests as `<asset_url>/<relative_path>`, e.g.:
 ```
-http://cdn.myaoserver.com/base/characters/Phoenix_Wright/emotions/normal(a).png
+https://cdn.myaoserver.com/base/characters/phoenix/(a)normal.png
 ```
 
-**HTTP only** — HTTPS (TLS) CDN URLs are not supported at this time. Use a plain `http://` URL or a reverse proxy that strips TLS.
+**HTTPS / TLS CDNs are fully supported.** `https://` asset URLs are fetched over
+TLS via mbedtls (`switch-mbedtls`) — the same stack used for `wss://` servers and
+the master server list. Plain `http://` works too. There's also a built-in
+secondary community CDN (`https://attorneyoffline.de/base/`) that fills in the
+classic base pack for servers that only host their own custom characters.
 
 ---
 
@@ -250,9 +255,10 @@ If the server has no CDN, or for offline use, assets can be installed locally. f
 
 | Priority | Source | When used |
 |---|---|---|
-| 1 | HTTP CDN — `<server asset_url>/<relative>` | Server sent `ASS` packet with a URL |
-| 2 | `sdmc:/switch/ferris-ao/base/<relative>` | Local base pack on SD card (optional) |
-| 3 | `romfs:/<relative>` | Bundled fallback (minimal — one character, font, UI chrome) |
+| 1 | Server CDN — `<server asset_url>/<relative>` (HTTP or **HTTPS**) | Server sent `ASS` packet with a URL |
+| 2 | Community CDN — `https://attorneyoffline.de/base/<relative>` | Classic base-pack fallback (built in) |
+| 3 | `sdmc:/switch/ferris-ao/base/<relative>` | Local base pack on SD card (optional) |
+| 4 | `romfs:/<relative>` | Bundled fallback (minimal — font, UI chrome) |
 
 If the server has no CDN and you have no local base, the client still works using the bundled romfs fallbacks — you'll see placeholder sprites for characters not in romfs.
 
@@ -261,27 +267,27 @@ The expected folder structure under `base/` mirrors the standard AO2 base pack:
 ```
 sdmc:/switch/ferris-ao/base/
 ├── characters/
-│   ├── Phoenix_Wright/
+│   ├── phoenix/
 │   │   ├── char.ini
+│   │   ├── char_icon.png        ← char-select icon
+│   │   ├── (a)normal.png        ← idle sprite  (prefix at char root)
+│   │   ├── (b)normal.png        ← talk sprite
+│   │   ├── normal.png           ← bare PNG (used for both if no (a)/(b))
 │   │   └── emotions/
-│   │       ├── normal(a).png    ← idle animation
-│   │       ├── normal(b).png    ← talk animation
-│   │       └── ...
-│   ├── Miles_Edgeworth/
+│   │       └── button1_off.png  ← emote-picker button icons
+│   ├── edgeworth/
 │   │   └── ...
 │   └── ...
 ├── background/
 │   ├── gs4/
-│   │   ├── defensedesk.png
+│   │   ├── witnessempty.png     ← per-position background
+│   │   ├── defensedesk.png      ← per-position desk overlay
 │   │   └── ...
 │   └── ...
-├── music/
-│   ├── Turnabout_Sisters.opus
-│   └── ...
 └── sounds/
-    ├── sfx-blink.ogg
-    ├── sfx-galeem.ogg
-    └── ...
+    ├── music/Turnabout_Sisters.opus
+    ├── general/sfx-deskslam.opus
+    └── blips/male.opus
 ```
 
 ### Where to get an AO2 base pack
@@ -290,17 +296,24 @@ The standard AO2 base pack is distributed with the [Attorney Online 2 desktop cl
 
 ### Character sprite format
 
-Character sprites follow the AO2 naming convention:
+Character sprites follow the AO2 naming convention (matching AO2-Client, AO-SDL,
+and webAO). The `(a)`/`(b)` marker is a **prefix** and the sprite lives at the
+**character root** — not in an `emotions/` subfolder. Each is probed across the
+extensions the server advertises (default order: `.webp` → `.apng` → `.gif` →
+`.png`):
 
 | File | Purpose |
 |---|---|
-| `emotions/<emote>(a).png` | Idle/standing animation (static PNG, APNG, or animated WebP) |
-| `emotions/<emote>(a).webp` | Idle/standing animation (WebP alternative) |
-| `emotions/<emote>(b).png` | Talking animation (static PNG, APNG, or animated WebP) |
-| `emotions/<emote>(b).webp` | Talking animation (WebP alternative) |
-| `<preanim>.gif` | Pre-animation (GIF, APNG, or animated WebP) |
-| `<preanim>.webp` | Pre-animation (animated WebP alternative) |
-| `char.ini` | Character metadata (name, showname, emotion list) |
+| `characters/<char>/(a)<emote>.<ext>` | Idle sprite (webp/apng/gif) |
+| `characters/<char>/(b)<emote>.<ext>` | Talk sprite (webp/apng/gif) |
+| `characters/<char>/<emote>.png` | Bare PNG — classic static emote, used for **both** idle and talk when no `(a)`/`(b)` exists |
+| `characters/<char>/<preanim>.<ext>` | Pre-animation (no prefix) |
+| `characters/<char>/char_icon.png` | Char-select grid icon |
+| `characters/<char>/char.ini` | Character metadata (name, showname, blips, emotion list) |
+
+The MS packet's `emote` field **is** the animation base name, so other players'
+sprites render straight from the packet — no `char.ini` lookup needed. Folder
+names are lowercased before the request (AO2 CDNs host lowercase-only trees).
 
 **Supported image formats:** PNG, APNG, GIF, WebP (static), animated WebP. All are decoded via `SDL2_image`'s `IMG_LoadAnimation_RW` / `IMG_LoadTexture_RW` — format detection is by file content, not extension. WebP requires `switch-libwebp` to be installed (included in the build prerequisites above).
 

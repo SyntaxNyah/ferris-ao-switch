@@ -26,11 +26,10 @@ public:
     // server's decryptor packet, then send HI in response.
     void on_connected(const char* hdid = "ferris-ao-switch");
 
-    // Call when a WebSocket connection is established. webAO flow: send HI
-    // immediately on socket.onopen without waiting for decryptor. Vanilla
-    // tsuserver sends a 758-byte PR/PU broadcast burst *before* the
-    // decryptor and closes the socket if HI doesn't arrive in that window,
-    // so we have to match webAO's behaviour to connect at all.
+    // Call when a WebSocket connection is established. Same flow as raw TCP:
+    // the server's first packet is `decryptor`, and we send HI in response to
+    // it (per webAO/LemmyAO). Sending HI eagerly on open made akashi receive
+    // HI twice (eager + decryptor re-send) and close the socket, so we wait.
     void on_connected_ws(const char* hdid = "ferris-ao-switch");
 
     // Call on disconnect.

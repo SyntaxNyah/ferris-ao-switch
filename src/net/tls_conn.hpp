@@ -25,6 +25,7 @@ struct RawConn {
 #ifdef AO_TLS
     mbedtls_net_context net {};
 #endif
+    bool active_ = false;   // guards close() against double-free / double-close
     bool connect(const char* host, uint16_t port);
     void close();
     int  send(const void* data, int len);
@@ -53,6 +54,7 @@ struct TlsConn {
     mbedtls_entropy_context  entropy  {};
     mbedtls_ctr_drbg_context ctr_drbg {};
 #endif
+    bool active_ = false;   // guards close() against double-free / double-close
 
     // DNS + TCP + TLS handshake (blocking).  Call from network thread only.
     bool connect(const char* host, uint16_t port);

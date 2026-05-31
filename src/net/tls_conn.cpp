@@ -28,6 +28,7 @@ static void tls_log_err(const char* tag, int ret) {
 
 bool RawConn::connect(const char* host, uint16_t port) {
     mbedtls_net_init(&net);
+    active_ = true;   // mark before connect so a partial failure still frees
     int ret = ConnectPool::connect(host, port, &net, 10000);
     if (ret != 0) { tls_log_err("raw_connect", ret); return false; }
     mbedtls_net_set_nonblock(&net);
@@ -36,6 +37,8 @@ bool RawConn::connect(const char* host, uint16_t port) {
 }
 
 void RawConn::close() {
+    if (!active_) return;   // idempotent: close() is reached from both the net
+    active_ = false;        // thread (after the loop) and NetworkThread::disconnect()
     mbedtls_net_free(&net);
 }
 
@@ -69,6 +72,7 @@ bool TlsConn::connect(const char* host, uint16_t port) {
     mbedtls_ssl_config_init(&conf);
     mbedtls_entropy_init(&entropy);
     mbedtls_ctr_drbg_init(&ctr_drbg);
+    active_ = true;   // mark before handshake so a partial failure still frees
 
     // Seed the CSPRNG
     const char* pers = "ferris-ao-tls";
@@ -126,7 +130,13 @@ bool TlsConn::connect(const char* host, uint16_t port) {
 }
 
 void TlsConn::close() {
-    mbedtls_ssl_close_notify(&ssl);
+    if (!active_) return;   // idempotent: close() is reached from both the net
+    active_ = false;        // thread (after the loop) and NetworkThread::disconnect()
+    // NOTE: deliberately NOT calling mbedtls_ssl_close_notify() — it writes a
+    // TLS alert to the socket, and by the time we tear down the peer has often
+    // already closed it (e.g. server sent a WS Close). Writing to that dead
+    // socket can raise SIGPIPE / fault on libnx. A client gains nothing from a
+    // graceful TLS shutdown here; just free everything.
     mbedtls_net_free(&net);
     mbedtls_ssl_free(&ssl);
     mbedtls_ssl_config_free(&conf);

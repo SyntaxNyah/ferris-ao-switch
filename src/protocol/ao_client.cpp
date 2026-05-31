@@ -26,22 +26,14 @@ void AOClient::on_connected(const char* hdid) {
 }
 
 void AOClient::on_connected_ws(const char* hdid) {
-    std::strncpy(hdid_, hdid, sizeof(hdid_) - 1);
-    parse_len_   = 0;
-    hs_start_ms_ = SDL_GetTicks();
-
-    // webAO parity: fire HI immediately on socket.onopen. Vanilla tsuserver
-    // pushes a pre-decryptor burst of PR/PU broadcasts and closes the
-    // connection if it doesn't see HI within that window. Our queue-first
-    // architecture makes this easy — the out queue is drained by the
-    // NetworkThread's ws_loop on its first iteration (which we've reordered
-    // to flush sends before the first recv), so HI goes out before any
-    // server bytes are processed.
-    char buf[256];
-    send(buf, cmd::hi(buf, sizeof(buf), hdid_));
-    hs_state_ = HandshakeState::WaitId;
-    hi_resent_ = false;
-    std::fprintf(stderr, "[ao_client] WS connected — sent HI immediately (webAO flow)\n");
+    // AO2 — including webAO — sends HI *in response to* the server's `decryptor`
+    // packet, which is always the server's first message (see LemmyAO/webAO:
+    // "decryptor (s2c) — server's first packet"; "HI — the first packet a client
+    // sends after the server's decryptor"). The old code fired HI eagerly on WS
+    // open AND re-sent it on decryptor, so akashi received HI twice and closed
+    // the socket. Wait for decryptor and send HI exactly once — identical to the
+    // raw-TCP path.
+    on_connected(hdid);
 }
 
 void AOClient::on_disconnected() {
