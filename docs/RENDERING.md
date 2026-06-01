@@ -321,6 +321,12 @@ panel highlights the new room immediately.
   sprites are prefetched ahead of time (`prefetch_own_emote`, also on emote
   change). Other players' sprites stream in when they talk; pre-warming ours
   stops *our* first line from being the slow one.
+- **char.ini pre-warmed at character select.** `CharSelectScreen` prefetches the
+  highlighted character's `char.ini` while you browse, so by the time you pick it
+  the courtroom parses it on frame 1 and starts fetching emote sprites/buttons
+  immediately — removing the char.ini round-trip from the "loading sprites" wait
+  (the buttons themselves are then one parallel round-trip, instant on a revisit
+  thanks to the disk cache).
 - **Big-server icon flood is gone.** Character icons are prefetched on-demand for
   the visible window in `CharSelectScreen` (re-queued only when the scroll moves),
   not bulk-queued for all 600 at lobby-enter, and `CourtroomScreen::on_enter`

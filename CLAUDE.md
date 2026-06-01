@@ -1284,6 +1284,14 @@ char         ms_url_[256];         // master server URL (configurable)
 - Touch → tap a cell to highlight, tap the highlighted cell to pick (shares `pick_char`)
 - Taken slots dimmed; available slots show the icon (or a colored placeholder) + name
 
+**char.ini pre-warm.** `update()` also prefetches the **highlighted** character's
+`char.ini` as you browse (tiny file, deduped per selection via `ci_pf_sel_`). The
+courtroom must parse the char.ini before it can fetch emote sprites/buttons, so
+having it cached by the time you press A removes a whole round-trip from the
+"loading sprites" wait — `CourtroomScreen::on_enter` finds it already prefetched
+and `update()` parses it on the first frame, kicking off the sprite/button
+prefetch immediately.
+
 **Search / filtering.** The navigable list is the filtered set when a query is
 active, else every slot. `selected_`/`scroll_` are positions in that list;
 `real_index(pos)` maps a position back to the `gs.characters[]` index, and

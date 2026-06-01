@@ -238,7 +238,10 @@ void CourtroomScreen::on_enter() {
     if (cid >= 0 && cid < gs.char_count && gs.characters[cid].name[0]) {
         char lc[64]; lc_copy(lc, sizeof(lc), gs.characters[cid].name);
         char rel[160]; std::snprintf(rel, sizeof(rel), "characters/%s/char.ini", lc);
-        app_.asset_stream().prefetch(rel);
+        // Char-select pre-warms this as you browse, so it's usually already
+        // cached here → update() parses it on the very first frame and emote
+        // sprites/buttons start fetching immediately. Only queue if not cached.
+        if (!AssetManager::has_prefetch(rel)) app_.asset_stream().prefetch(rel);
     }
     prefetch_blip(app_.asset_stream(), "male");   // warm the typewriter blip
 

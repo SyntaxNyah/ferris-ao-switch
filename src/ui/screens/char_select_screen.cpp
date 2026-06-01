@@ -173,6 +173,20 @@ void CharSelectScreen::update(uint32_t /*dt*/) {
     if (top_row < 0)                  top_row = 0;
     scroll_ = top_row * COLS;
 
+    // Pre-warm the HIGHLIGHTED character's char.ini as you browse (it's tiny).
+    // The courtroom needs it parsed before it can fetch emote sprites/buttons, so
+    // having it cached by the time you press A removes a whole round-trip from the
+    // "loading sprites" wait.
+    if (selected_ != ci_pf_sel_) {
+        ci_pf_sel_ = selected_;
+        int real = real_index(selected_);
+        if (real >= 0 && real < gs.char_count && gs.characters[real].name[0]) {
+            char lname[64]; lower_copy(lname, gs.characters[real].name, sizeof(lname));
+            char rel[160]; std::snprintf(rel, sizeof(rel), "characters/%s/char.ini", lname);
+            if (!AssetManager::has_prefetch(rel)) app_.asset_stream().prefetch(rel);
+        }
+    }
+
     // On-demand icon streaming for the visible + lookahead window only (never
     // bulk-queued — that starved the courtroom on big servers). DECODE runs each
     // frame (cheap peek/has_prefetch, self-limiting as icons land); ENQUEUE runs

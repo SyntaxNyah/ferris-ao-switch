@@ -27,6 +27,7 @@ private:
     int  selected_  = 0;     // position in the visible list
     int  scroll_    = 0;     // row-aligned top position (multiple of COLS)
     int  pf_scroll_ = -1;    // scroll the icon window was last queued for
+    int  ci_pf_sel_ = -1;    // selection the char.ini was last pre-warmed for
     int  char_count_ = 0;    // last-seen gs.char_count (rebuild trigger)
 
     char search_[48]  = {};
