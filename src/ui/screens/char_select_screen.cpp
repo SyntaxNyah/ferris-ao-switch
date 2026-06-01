@@ -98,10 +98,18 @@ void CharSelectScreen::handle_event(const SDL_Event& e) {
     }
 
     if (total == 0) {
-        // Still allow opening search even before a match exists.
-        if ((e.type == SDL_KEYDOWN && (e.key.keysym.sym == SDLK_f || e.key.keysym.sym == SDLK_SLASH)) ||
-            (e.type == SDL_CONTROLLERBUTTONDOWN && e.cbutton.button == SDL_CONTROLLER_BUTTON_Y))
-            open_search();
+        // No matches (or no roster yet): still allow opening search, and always
+        // allow clearing it so a bad query can't trap you on an empty grid.
+        bool open = (e.type == SDL_KEYDOWN &&
+                     (e.key.keysym.sym == SDLK_f || e.key.keysym.sym == SDLK_SLASH)) ||
+                    (e.type == SDL_CONTROLLERBUTTONDOWN &&
+                     e.cbutton.button == SDL_CONTROLLER_BUTTON_Y);
+        bool clear = (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_ESCAPE) ||
+                     (e.type == SDL_CONTROLLERBUTTONDOWN &&
+                      e.cbutton.button == SDL_CONTROLLER_BUTTON_B);
+        if (open)  open_search();
+        if (clear && searching()) { search_[0] = '\0'; selected_ = scroll_ = 0; pf_scroll_ = -1; }
+        // A tap also reaches here (handled above); let tapping the search bar work.
         return;
     }
 
@@ -243,7 +251,8 @@ void CharSelectScreen::render() {
     }
     int total = vis_count();
     if (total == 0) {
-        txt.draw("No characters match your search.", 40, 130, {180, 160, 120, 255});
+        txt.draw("No characters match your search.  (B / Esc to clear)",
+                 40, 130, {200, 170, 120, 255});
         return;
     }
 

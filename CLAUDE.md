@@ -1314,6 +1314,17 @@ message, `begin_message()` queues every candidate path (all extensions) on the
 setting the `*_ready_` flags. The exact candidate paths follow the
 `(a)`/`(b)`-prefix rules below so prefetch and decode use identical keys.
 
+**Async own character (no join freeze).** `on_enter` must NOT block — the old
+code called `load_own_character()` (a blocking char.ini `fetch_bytes`) on join,
+which froze the screen ~1 s. Now `on_enter` only *queues* the char.ini prefetch
+(`own_pending_`); `update()` parses it from the cache once `has_prefetch` reports
+it ready (or after a 5 s fallback), then pre-warms **our own** selected emote's
+`(a)`/`(b)` sprites (`prefetch_own_emote`) and emote-button thumbnails. Other
+players' sprites already streamed in when they talked; pre-warming ours means
+*our* first line isn't the slow one. `cycle_emote()` re-warms on every emote
+change. (The composer/quick-talk fall back to the `normal` emote until the
+char.ini finishes loading.)
+
 **IC animation phases (`enum class Phase`):**
 0. `Loading` — entered by `begin_message()`. Holds the timeline until the
    speaker sprite is decoded (`char_ready()`) or `LOAD_GATE_MS` (1.2 s) elapses,

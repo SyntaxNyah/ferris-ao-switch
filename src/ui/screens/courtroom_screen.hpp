@@ -167,6 +167,13 @@ private:
     // the character-select grid). Returns the cached texture or nullptr.
     void         prefetch_emote_buttons();          // queue visible/selected buttons
     SDL_Texture* emote_button_tex(int emote_idx, bool on) const; // peek-only
+    void         prefetch_own_emote();              // warm own (a)/(b) sprite for the selected emote
+
+    // Own char.ini is loaded ASYNCHRONOUSLY so joining never freezes the render
+    // loop on a blocking HTTP fetch: on_enter queues the char.ini prefetch,
+    // update() consumes it from cache once ready (or blocks once after a timeout).
+    bool     own_pending_  = false;
+    uint32_t own_load_age_ = 0;
 };
 
 } // namespace ao

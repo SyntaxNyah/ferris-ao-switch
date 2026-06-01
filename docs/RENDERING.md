@@ -315,6 +315,12 @@ panel highlights the new room immediately.
   speaker sprite when the char+emote is unchanged — so a character talking line
   after line does zero asset work and skips the Loading gate. This was the main
   cause of "characters reload every time someone talks".
+- **No join freeze; own sprite pre-warmed.** The local char.ini is loaded
+  asynchronously (`on_enter` queues it, `update()` parses it from cache) instead
+  of blocking the render loop on join, and our own selected emote's `(a)`/`(b)`
+  sprites are prefetched ahead of time (`prefetch_own_emote`, also on emote
+  change). Other players' sprites stream in when they talk; pre-warming ours
+  stops *our* first line from being the slow one.
 - **Big-server icon flood is gone.** Character icons are prefetched on-demand for
   the visible window in `CharSelectScreen` (re-queued only when the scroll moves),
   not bulk-queued for all 600 at lobby-enter, and `CourtroomScreen::on_enter`

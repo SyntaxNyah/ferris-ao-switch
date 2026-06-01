@@ -199,11 +199,23 @@ void CourtroomScreen::on_enter() {
     // desk and sprite prefetches go to the workers first — otherwise the first
     // few IC lines on a 600-character server wait behind a wall of icon fetches.
     app_.asset_stream().clear_pending();
-    load_own_character();
+
     GameState& gs = app_.state();
-    std::strncpy(ic_pos_, (own_loaded_ && own_char_.side[0]) ? own_char_.side : "wit",
-                 sizeof(ic_pos_) - 1);
+    // Load our own char.ini ASYNCHRONOUSLY — do NOT block here (that was the
+    // ~1s freeze on join). Queue the char.ini fetch; update() loads it from the
+    // cache once ready, then pre-warms our sprite + emote thumbnails.
+    own_loaded_  = false;
+    own_pending_ = true;
+    own_load_age_ = 0;
+    std::strncpy(ic_pos_, "wit", sizeof(ic_pos_) - 1);   // default until char.ini loads
     ic_pos_[sizeof(ic_pos_) - 1] = '\0';
+    int cid = gs.my_char_id;
+    if (cid >= 0 && cid < gs.char_count && gs.characters[cid].name[0]) {
+        char lc[64]; lc_copy(lc, sizeof(lc), gs.characters[cid].name);
+        char rel[160]; std::snprintf(rel, sizeof(rel), "characters/%s/char.ini", lc);
+        app_.asset_stream().prefetch(rel);
+    }
+
     // Queue the opening background asynchronously — never block on entry.
     if (gs.background[0]) {
         lc_copy(cur_bg_, sizeof(cur_bg_), gs.background);
@@ -211,9 +223,6 @@ void CourtroomScreen::on_enter() {
         cur_pos_[sizeof(cur_pos_) - 1] = '\0';
         queue_scene();
     }
-    // Warm our own emote thumbnails now (queued behind the scene), so the
-    // composer's grid/preview is already cached by the time it's opened.
-    prefetch_emote_buttons();
 }
 
 void CourtroomScreen::load_own_character() {
@@ -257,6 +266,30 @@ SDL_Texture* CourtroomScreen::emote_button_tex(int emote_idx, bool on) const {
     std::snprintf(p, sizeof(p), "characters/%s/emotions/button%d_%s.png",
                   lc, emote_idx + 1, on ? "on" : "off");
     return app_.tex_cache().peek(p);
+}
+
+// Pre-warm OUR OWN selected emote's (a)/(b) sprites (and pre-anim) so that when
+// we send a line our sprite is already downloaded — without this our first line
+// pays the full fetch while everyone else's sprites (fetched when they talked)
+// look instant.
+void CourtroomScreen::prefetch_own_emote() {
+    if (!own_loaded_ || own_char_.emotion_count <= 0) return;
+    GameState& gs = app_.state();
+    int cid = gs.my_char_id;
+    if (cid < 0 || cid >= gs.char_count || !gs.characters[cid].name[0]) return;
+    int sel = ic_emote_sel_;
+    if (sel < 0 || sel >= own_char_.emotion_count) return;
+
+    char clc[64]; lc_copy(clc, sizeof(clc), gs.characters[cid].name);
+    char elc[64]; lc_copy(elc, sizeof(elc), own_char_.emotions[sel].idle_anim);
+    AssetStream& s = app_.asset_stream();
+    prefetch_emote(s, clc, elc, "(a)");
+    prefetch_emote(s, clc, elc, "(b)");
+    const EmotionEntry& em = own_char_.emotions[sel];
+    if (em.has_pre && em.pre_anim[0]) {
+        char plc[64]; lc_copy(plc, sizeof(plc), em.pre_anim);
+        prefetch_emote(s, clc, plc, "");
+    }
 }
 
 // ── Async scene/sprite resolution ─────────────────────────────────────────────
@@ -463,6 +496,32 @@ void CourtroomScreen::update_music() {
 
 void CourtroomScreen::update(uint32_t dt_ms) {
     GameState& gs = app_.state();
+
+    // Async own-character load (no join freeze). Parse our char.ini once it's in
+    // the prefetch cache (or after a short fallback), then pre-warm our sprite
+    // and emote thumbnails so our first line isn't slow.
+    if (own_pending_) {
+        own_load_age_ += dt_ms;
+        int cid = gs.my_char_id;
+        if (cid < 0 || cid >= gs.char_count || !gs.characters[cid].name[0]) {
+            own_pending_ = false;
+        } else {
+            char lc[64]; lc_copy(lc, sizeof(lc), gs.characters[cid].name);
+            char rel[160]; std::snprintf(rel, sizeof(rel), "characters/%s/char.ini", lc);
+            if (AssetManager::has_prefetch(rel) || own_load_age_ > 5000) {
+                load_own_character();   // cache hit (fast) or one-time fallback fetch
+                own_pending_ = false;
+                if (own_loaded_) {
+                    if (own_char_.side[0]) {
+                        std::strncpy(ic_pos_, own_char_.side, sizeof(ic_pos_) - 1);
+                        ic_pos_[sizeof(ic_pos_) - 1] = '\0';
+                    }
+                    prefetch_own_emote();
+                    prefetch_emote_buttons();
+                }
+            }
+        }
+    }
 
     update_music();
 
@@ -1122,6 +1181,7 @@ void CourtroomScreen::cycle_emote(int dir) {
     if (n <= 0) return;
     ic_emote_sel_ = (ic_emote_sel_ + dir + n) % n;
     ic_buttons_dirty_ = true;   // warm the new emote's preview button
+    prefetch_own_emote();        // and its (a)/(b) sprite, so sending it is instant
 }
 
 // ── Touch ───────────────────────────────────────────────────────────────────────
