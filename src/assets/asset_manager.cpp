@@ -392,7 +392,11 @@ static uint8_t* try_http_mount(const char* base, FailSet& fs, const char* tag,
         return hr.data; // caller owns
     }
     add_failed(fs, relative);
-    std::fprintf(stderr, "[assets] %s miss '%s'\n", tag, relative);
+    // No logging here: a 404 is the EXPECTED result for most extension-probe
+    // candidates (only one extension exists), and stderr is unbuffered to the SD
+    // card — logging every miss meant dozens of slow synchronous SD writes per
+    // cold load, across 8 worker threads, which dominated the load time.
+    (void)tag;
     return nullptr;
 }
 

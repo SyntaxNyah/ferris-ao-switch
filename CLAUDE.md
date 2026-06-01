@@ -1366,9 +1366,13 @@ fire line after line. The bar carries inline **`<` `>` emote arrows** and a litt
 next to the name (the cached `button<N>` thumbnail); Left/Right in the main view
 (no panel) also cycle the emote — all through `cycle_emote()`, which re-warms the
 new emote's sprite + thumbnail, so changing emote never needs the composer. The IC keyboard
-opens with a fresh (empty) field each time. Own emote thumbnails are warmed at
-`on_enter` (`prefetch_emote_buttons`) so the composer grid/preview is ready when
-opened.
+opens with a fresh (empty) field each time. On entry only the **selected**
+emote's button is warmed (`prefetch_own_emote`) and decoded every frame so the
+quick-bar icon shows with the composer closed; the **full** button grid
+(`prefetch_emote_buttons`, potentially 40+ requests) is fetched lazily only when
+the composer is opened — eager-loading it all was a big part of the cold-load
+wait. (A character with no `emotions/button<N>` art simply shows the emote name
+with no icon.)
 
 **`CourtroomPanel` enum:** `{ None, OOC, Music, Evidence, Area, ICInput }`
 

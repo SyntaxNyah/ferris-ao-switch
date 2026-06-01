@@ -319,6 +319,13 @@ void CourtroomScreen::prefetch_own_emote() {
         char plc[64]; lc_copy(plc, sizeof(plc), em.pre_anim);
         prefetch_emote(s, clc, plc, "");
     }
+    // Also the SELECTED emote's button thumbnail (for the quick-bar icon). Only
+    // the selected one — the full grid is fetched lazily when the composer opens.
+    char bp[256];
+    std::snprintf(bp, sizeof(bp), "characters/%s/emotions/button%d_off.png", clc, sel + 1);
+    if (!AssetManager::has_prefetch(bp)) s.prefetch(bp);
+    std::snprintf(bp, sizeof(bp), "characters/%s/emotions/button%d_on.png", clc, sel + 1);
+    if (!AssetManager::has_prefetch(bp)) s.prefetch(bp);
 }
 
 // ── Async scene/sprite resolution ─────────────────────────────────────────────
@@ -556,9 +563,30 @@ void CourtroomScreen::update(uint32_t dt_ms) {
                         std::strncpy(ic_pos_, own_char_.side, sizeof(ic_pos_) - 1);
                         ic_pos_[sizeof(ic_pos_) - 1] = '\0';
                     }
+                    // Warm only the SELECTED emote's sprite + button on entry.
+                    // The full emote-button grid (could be 40+ requests) is fetched
+                    // lazily when the composer is opened — eager-loading it all was
+                    // the bulk of the 10-20 s cold-load wait.
                     prefetch_own_emote();
-                    prefetch_emote_buttons();
                 }
+            }
+        }
+    }
+
+    // Decode the SELECTED emote's button thumbnail into the texture cache every
+    // frame (cheap once cached) so the quick-talk bar icon shows even when the
+    // composer is closed — the composer-only decode below never ran for it.
+    if (own_loaded_ && own_char_.emotion_count > 0) {
+        int cid = gs.my_char_id;
+        if (cid >= 0 && cid < gs.char_count && gs.characters[cid].name[0] &&
+            ic_emote_sel_ >= 0 && ic_emote_sel_ < own_char_.emotion_count) {
+            char lc[64]; lc_copy(lc, sizeof(lc), gs.characters[cid].name);
+            char p[256];
+            for (int on = 0; on < 2; ++on) {
+                std::snprintf(p, sizeof(p), "characters/%s/emotions/button%d_%s.png",
+                              lc, ic_emote_sel_ + 1, on ? "on" : "off");
+                if (!app_.tex_cache().peek(p) && AssetManager::has_prefetch(p))
+                    app_.tex_cache().get(app_.renderer().raw(), p);
             }
         }
     }

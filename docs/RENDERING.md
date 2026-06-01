@@ -301,11 +301,17 @@ panel highlights the new room immediately.
   early-outs when every sprite/scene/shout this line needs is decoded, so the
   per-frame `has_prefetch()` mutex scans don't run during steady-state chat. A
   background change (`BN`) re-arms the scene's load window.
-- **Emote thumbnails are warmed early and budgeted.** The local character's
-  emote-button thumbnails are prefetched at courtroom entry (queued behind the
-  scene), and the composer decodes at most a handful of prefetched buttons per
-  frame — so by the time you open it (or change emote on the bar) the art is
-  already cached. With the disk cache, a second visit is instant.
+- **Emote thumbnails are lazy + budgeted.** On courtroom entry only the
+  **selected** emote's button is warmed (for the quick-bar icon, decoded every
+  frame so it shows with the composer closed); the **full** button grid is
+  fetched only when the composer is actually opened, decoded a handful per frame.
+  Eager-loading every emote's button on entry (40+ requests on a big character)
+  was a big chunk of the cold-load wait.
+- **No per-404 logging on the hot path.** Extension probing 404s by design (only
+  one extension exists), and stderr is unbuffered to the SD card — logging every
+  miss meant dozens of slow synchronous SD writes per cold load across 8 worker
+  threads, serialising them. Those logs were removed; the keep-alive HTTP client
+  still reuses one connection per worker so the only real cost is the bytes.
 - **Character search keeps big rosters usable.** Filtering is a case-insensitive
   substring rebuild only when the query/roster changes; navigation and on-demand
   icon streaming run over the filtered index list, so a 600-character server

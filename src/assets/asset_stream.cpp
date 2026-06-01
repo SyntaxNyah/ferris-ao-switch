@@ -168,9 +168,10 @@ void AssetStream::run() {
         if (data) {
             // Store in prefetch cache — AssetManager takes ownership
             AssetManager::store_prefetch(rel, data, size);
-        } else {
-            std::fprintf(stderr, "[stream] prefetch failed for '%s'\n", rel);
         }
+        // No else-log: most prefetches are extension-probe candidates that 404 by
+        // design, and stderr is unbuffered to SD — logging each one serialised the
+        // workers on slow SD writes and dominated cold-load time.
 
         // Signal done
         SDL_LockMutex(done_mutex_);
