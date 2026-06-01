@@ -54,6 +54,15 @@ container (installs the SDL2 portlibs via `dkp-pacman`, runs `make`) and uploads
 `ferris-ao-switch.nro` as a downloadable artifact on every push/PR, plus a
 GitHub Release on `v*` tags.
 
+The portlib install does the DB refresh (`dkp-pacman -Sy`) **best-effort** and
+then installs with `dkp-pacman -S` (no refresh). `pkg.devkitpro.org` frequently
+403s CI runners on the `-Sy` step (often only the unrelated `dkp-linux`/
+`dkp-libs` host-repo databases), and a combined `-Sy … <pkgs>` aborts the whole
+install when any repo db fails — even though the `switch-*` repo we actually need
+is fine. Splitting refresh from install lets the build use the image's
+pre-synced databases and survive those 403s; only a real package-file outage
+fails the job.
+
 **Desktop build:** Not supported by Makefile, but all non-libnx code compiles with a standard g++/clang++ if you stub `<switch.h>` and swkbd. `AssetManager` falls back to relative `base/` and `romfs/` paths on non-Switch.
 
 ---
