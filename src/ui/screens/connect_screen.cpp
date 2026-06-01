@@ -5,12 +5,25 @@
 #include "../../input/virtual_keyboard.hpp"
 #include "../../net/http_fetch.hpp"
 #include "../../assets/asset_manager.hpp"
+#include "../../assets/theme_manager.hpp"
+#include "../../audio/audio_manager.hpp"
+#include "../../audio/music_player.hpp"
 #include <SDL2/SDL.h>
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
+#include <dirent.h>
+#include <sys/stat.h>
 
 namespace ao {
+
+// Does <dir>/<name>/courtroom_design.ini exist? (marks a usable AO2 theme)
+static bool is_theme_dir(const char* dir, const char* name) {
+    char p[512];
+    std::snprintf(p, sizeof(p), "%s/%s/courtroom_design.ini", dir, name);
+    struct stat st;
+    return ::stat(p, &st) == 0;
+}
 
 // ── JSON parser helpers ────────────────────────────────────────────────────────
 
@@ -305,13 +318,59 @@ void ConnectScreen::on_enter() {
     std::snprintf(status_, sizeof(status_),
         "Press R to refresh server list");
 
-    // Pre-fill username from App
-    // (App's username_ is the source of truth)
+    // Master server URL persists across launches.
+    if (app_.settings().master_url[0]) {
+        std::strncpy(ms_url_, app_.settings().master_url, sizeof(ms_url_) - 1);
+        ms_url_[sizeof(ms_url_) - 1] = '\0';
+    }
+    scan_themes();
 
     if (server_count_ == 0 &&
         SDL_AtomicGet(&fetch_state_atom_) == (int)FetchState::Idle) {
         start_fetch();
     }
+}
+
+// Collect AO2 theme folders found under the SD-card base (themes/ and misc/),
+// so the user can import one simply by dropping it on the card. "default" is
+// always offered (built-in layout).
+void ConnectScreen::scan_themes() {
+    theme_count_ = 0;
+    auto add = [&](const char* name) {
+        if (theme_count_ >= MAX_THEMES) return;
+        for (int i = 0; i < theme_count_; ++i)
+            if (!std::strcmp(themes_[i], name)) return;       // dedupe
+        std::strncpy(themes_[theme_count_], name, 63);
+        themes_[theme_count_][63] = '\0';
+        ++theme_count_;
+    };
+    add("default");
+
+    const char* subdirs[] = {"themes", "misc"};
+    char base[512];
+    for (int sd = 0; sd < 2; ++sd) {
+        std::snprintf(base, sizeof(base), "%s/%s", AssetManager::user_base(), subdirs[sd]);
+        DIR* d = ::opendir(base);
+        if (!d) continue;
+        struct dirent* e;
+        while ((e = ::readdir(d)) != nullptr) {
+            if (e->d_name[0] == '.') continue;
+            if (is_theme_dir(base, e->d_name)) add(e->d_name);
+        }
+        ::closedir(d);
+    }
+
+    // Point theme_sel_ at the active theme.
+    theme_sel_ = 0;
+    for (int i = 0; i < theme_count_; ++i)
+        if (!std::strcmp(themes_[i], app_.settings().theme)) { theme_sel_ = i; break; }
+}
+
+void ConnectScreen::apply_theme(const char* name) {
+    app_.theme().load(name);
+    std::strncpy(app_.settings().theme, name, sizeof(app_.settings().theme) - 1);
+    app_.settings().theme[sizeof(app_.settings().theme) - 1] = '\0';
+    app_.settings().save();
 }
 
 void ConnectScreen::on_exit() {
@@ -445,11 +504,12 @@ void ConnectScreen::handle_event(const SDL_Event& e) {
     // ── Touch / mouse ──────────────────────────────────────────────────────────
     int tx, ty;
     if (tap_point(e, app_.renderer().raw(), tx, ty)) {
-        // Tab bar [y 50..80]: Servers | Direct | Credits
+        // Tab bar [y 50..80]: Servers | Direct | Settings | Credits
         if (ty >= 50 && ty < 80) {
             if      (tx < 180) tab_ = 0;
             else if (tx < 362) tab_ = 1;
             else if (tx < 544) tab_ = 2;
+            else if (tx < 726) tab_ = 3;
             return;
         }
         if (tab_ == 0 && server_count_ > 0 && ty >= 80) {
@@ -480,6 +540,32 @@ void ConnectScreen::handle_event(const SDL_Event& e) {
             }
             return;
         }
+        if (tab_ == 2) {   // Settings rows
+            for (int i = 0; i < 4; ++i) {
+                SDL_Rect row = {100, 80 + 20 + i * 100, Renderer::WIDTH - 200, 70};
+                if (pt_in(tx, ty, row)) {
+                    settings_sel_ = i;
+                    if (i == 0) {
+                        char sn[64]; std::strncpy(sn, app_.settings().showname, 63); sn[63] = '\0';
+                        open_keyboard("Showname (blank = username)", sn, sn, sizeof(sn), 63);
+                        std::strncpy(app_.settings().showname, sn, 63);
+                        app_.settings().showname[63] = '\0';
+                        app_.settings().save();
+                    } else if (i == 1 && theme_count_ > 0) {
+                        theme_sel_ = (theme_sel_ + 1) % theme_count_;
+                        apply_theme(themes_[theme_sel_]);
+                    } else if (i == 2) {
+                        int v = app_.settings().sfx_volume + 16; if (v > 128) v = 0;
+                        app_.settings().sfx_volume = v; app_.audio().set_sfx_volume(v); app_.settings().save();
+                    } else if (i == 3) {
+                        int v = app_.settings().music_volume + 16; if (v > 128) v = 0;
+                        app_.settings().music_volume = v; app_.music().set_volume(v); app_.settings().save();
+                    }
+                    return;
+                }
+            }
+            return;
+        }
         return;  // credits tab: tabs handled above, nothing else tappable
     }
 
@@ -494,17 +580,52 @@ void ConnectScreen::handle_event(const SDL_Event& e) {
         return;
     }
 
-    // ── Tab switch (L / R shoulder on either tab) ──────────────────────────────
+    // ── Tab switch (L shoulder / Q) ─────────────────────────────────────────────
     if (btn_down(SDL_CONTROLLER_BUTTON_LEFTSHOULDER) ||
         (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_q)) {
-        tab_ = (tab_ + 1) % 3;   // Servers → Direct → Credits → …
+        tab_ = (tab_ + 1) % 4;   // Servers → Direct → Settings → Credits → …
         return;
     }
-    // Credits tab: only quit is actionable.
+    auto key = [&](SDL_Keycode k) {
+        return e.type == SDL_KEYDOWN && e.key.keysym.sym == k;
+    };
+    bool quit = btn_down(SDL_CONTROLLER_BUTTON_START) || key(SDLK_ESCAPE);
+
+    // ── Tab 2: Settings ─────────────────────────────────────────────────────────
     if (tab_ == 2) {
-        if (btn_down(SDL_CONTROLLER_BUTTON_START) ||
-            (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_ESCAPE))
-            app_.quit();
+        bool up    = btn_down(SDL_CONTROLLER_BUTTON_DPAD_UP)    || key(SDLK_UP);
+        bool down  = btn_down(SDL_CONTROLLER_BUTTON_DPAD_DOWN)  || key(SDLK_DOWN);
+        bool left  = btn_down(SDL_CONTROLLER_BUTTON_DPAD_LEFT)  || key(SDLK_LEFT);
+        bool right = btn_down(SDL_CONTROLLER_BUTTON_DPAD_RIGHT) || key(SDLK_RIGHT);
+        bool act   = btn_down(SDL_CONTROLLER_BUTTON_A)          || key(SDLK_RETURN);
+        if (up   && settings_sel_ > 0) --settings_sel_;
+        if (down && settings_sel_ < 3) ++settings_sel_;
+        Settings& st = app_.settings();
+        if (settings_sel_ == 0 && act) {                        // showname
+            char sn[64]; std::strncpy(sn, st.showname, 63); sn[63] = '\0';
+            open_keyboard("Showname (blank = username)", sn, sn, sizeof(sn), 63);
+            std::strncpy(st.showname, sn, 63); st.showname[63] = '\0';
+            st.save();
+        } else if (settings_sel_ == 1 && theme_count_ > 0) {    // theme
+            if (right || act) { theme_sel_ = (theme_sel_ + 1) % theme_count_; apply_theme(themes_[theme_sel_]); }
+            if (left)         { theme_sel_ = (theme_sel_ - 1 + theme_count_) % theme_count_; apply_theme(themes_[theme_sel_]); }
+        } else if (settings_sel_ == 2) {                        // SFX volume
+            if (right || act) st.sfx_volume += 16;
+            if (left)         st.sfx_volume -= 16;
+            if (st.sfx_volume < 0) st.sfx_volume = 0; if (st.sfx_volume > 128) st.sfx_volume = 128;
+            if (left || right || act) { app_.audio().set_sfx_volume(st.sfx_volume); st.save(); }
+        } else if (settings_sel_ == 3) {                        // music volume
+            if (right || act) st.music_volume += 16;
+            if (left)         st.music_volume -= 16;
+            if (st.music_volume < 0) st.music_volume = 0; if (st.music_volume > 128) st.music_volume = 128;
+            if (left || right || act) { app_.music().set_volume(st.music_volume); st.save(); }
+        }
+        if (quit) app_.quit();
+        return;
+    }
+    // ── Tab 3: Credits — quit only ──────────────────────────────────────────────
+    if (tab_ == 3) {
+        if (quit) app_.quit();
         return;
     }
     if (btn_down(SDL_CONTROLLER_BUTTON_RIGHTSHOULDER) && tab_ == 1) {
@@ -550,6 +671,9 @@ void ConnectScreen::handle_event(const SDL_Event& e) {
              e.caxis.value > 16000) ||
             (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_z)) {
             open_keyboard("Master server URL", ms_url_, ms_url_, sizeof(ms_url_), 255);
+            std::strncpy(app_.settings().master_url, ms_url_, sizeof(app_.settings().master_url) - 1);
+            app_.settings().master_url[sizeof(app_.settings().master_url) - 1] = '\0';
+            app_.settings().save();
             return;
         }
         // + / Start: quit
@@ -683,9 +807,11 @@ void ConnectScreen::render() {
     r.fill_rect({0,   50, 180, 30}, tab_ == 0 ? TAB_ACT : TAB_INACT);
     r.fill_rect({182, 50, 180, 30}, tab_ == 1 ? TAB_ACT : TAB_INACT);
     r.fill_rect({364, 50, 180, 30}, tab_ == 2 ? TAB_ACT : TAB_INACT);
+    r.fill_rect({546, 50, 180, 30}, tab_ == 3 ? TAB_ACT : TAB_INACT);
     text.draw("Servers",       10,  57, tab_ == 0 ? YELLOW : GRAY);
     text.draw("Direct Connect",192, 57, tab_ == 1 ? YELLOW : GRAY);
-    text.draw("Credits",       374, 57, tab_ == 2 ? YELLOW : GRAY);
+    text.draw("Settings",      374, 57, tab_ == 2 ? YELLOW : GRAY);
+    text.draw("Credits",       556, 57, tab_ == 3 ? YELLOW : GRAY);
 
     // ── Content area [0,80,1280,560] ──────────────────────────────────────────
     const int CONTENT_Y = 80;
@@ -770,6 +896,26 @@ void ConnectScreen::render() {
                           sel ? YELLOW : WHITE);
             }
         }
+    } else if (tab_ == 2) {
+        // ── Settings ──────────────────────────────────────────────────────────
+        const Settings& st = app_.settings();
+        char vals[4][96];
+        std::snprintf(vals[0], sizeof(vals[0]), "%s", st.showname[0] ? st.showname : "(use username)");
+        std::snprintf(vals[1], sizeof(vals[1]), "%s", st.theme);
+        std::snprintf(vals[2], sizeof(vals[2]), "%d / 128", st.sfx_volume);
+        std::snprintf(vals[3], sizeof(vals[3]), "%d / 128", st.music_volume);
+        const char* labels[] = { "Showname:", "Theme  (< >):", "SFX Volume (< >):", "Music Volume (< >):" };
+        for (int i = 0; i < 4; ++i) {
+            bool sel = (i == settings_sel_);
+            SDL_Rect row = {100, CONTENT_Y + 20 + i * 100, CONTENT_W - 200, 70};
+            r.fill_rect(row, sel ? BLUE_SEL : DARK_ROW);
+            if (sel) r.draw_rect(row, YELLOW);
+            text.draw(labels[i], 110, CONTENT_Y + 20 + i * 100 + 10, sel ? YELLOW : GRAY);
+            text.draw(vals[i],   110 + 320, CONTENT_Y + 20 + i * 100 + 10, WHITE);
+        }
+        text.draw("Drop AO2 theme folders in sdmc:/switch/ferris-ao/base/themes "
+                  "(or misc) and pick them here. Settings save automatically.",
+                  110, CONTENT_Y + 20 + 4 * 100 + 6, DIM);
     } else {
         // ── Credits ───────────────────────────────────────────────────────────
         SDL_Rect box = {Renderer::WIDTH / 2 - 360, CONTENT_Y + 60, 720, 280};
@@ -794,9 +940,11 @@ void ConnectScreen::render() {
 
     // ── Hint bar [0,690,1280,30] ──────────────────────────────────────────────
     r.fill_rect({0, 690, Renderer::WIDTH, 30}, {15, 15, 30, 255});
-    const char* hint = (tab_ == 0)
-        ? "A:Connect  R:Refresh  ZL:Edit URL  L/R:Switch tab  +:Quit"
-        : "A:Edit/Connect  ZR:Connect  L/R:Switch tab  +:Quit";
+    const char* hint =
+        tab_ == 0 ? "A:Connect  R:Refresh  ZL:Edit URL  L:Switch tab  +:Quit" :
+        tab_ == 1 ? "A:Edit/Connect  ZR:Connect  L:Switch tab  +:Quit" :
+        tab_ == 2 ? "Up/Down:Select  A/< >:Change  L:Switch tab  (saves automatically)" :
+                    "L:Switch tab  +:Quit";
     text.draw(hint, 10, 697, DIM);
 }
 

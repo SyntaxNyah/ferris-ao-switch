@@ -161,16 +161,41 @@ static bool resolve_shout(APNGPlayer& pl, SDL_Renderer* r, const char* char_lc, 
     return false;
 }
 
-// Audio (small files): kept synchronous, but warmed via prefetch so the load
-// is normally a cache hit. "" first so names with an embedded extension work.
+// Audio (small files). play_sfx is NON-BLOCKING (cached/local only), so to hear
+// a sound we must prefetch its bytes ahead of time — prefetch_audio queues every
+// extension candidate on the worker threads. "" first so names with an embedded
+// extension work.
+static const char* AUDIO_EXTS[] = {"", ".opus", ".ogg", ".wav", ".mp3"};
+
 static bool try_play_audio(App& app, const char* base) {
-    static const char* exts[] = {"", ".opus", ".ogg", ".wav", ".mp3"};
     char path[256];
     for (int i = 0; i < 5; ++i) {
-        std::snprintf(path, sizeof(path), "%s%s", base, exts[i]);
+        std::snprintf(path, sizeof(path), "%s%s", base, AUDIO_EXTS[i]);
         if (app.audio().play_sfx(path)) return true;
     }
     return false;
+}
+
+static void prefetch_audio(AssetStream& s, const char* base) {
+    char path[256];
+    for (int i = 0; i < 5; ++i) {
+        std::snprintf(path, sizeof(path), "%s%s", base, AUDIO_EXTS[i]);
+        if (!AssetManager::has_prefetch(path)) s.prefetch(path);
+    }
+}
+
+static void prefetch_sfx_named(AssetStream& s, const char* name) {
+    if (!name || !name[0] || !std::strcmp(name, "0") || !std::strcmp(name, "1")) return;
+    char b[200];
+    std::snprintf(b, sizeof(b), "sounds/general/%s", name); prefetch_audio(s, b);
+    std::snprintf(b, sizeof(b), "sounds/%s", name);         prefetch_audio(s, b);
+}
+
+static void prefetch_blip(AssetStream& s, const char* blip) {
+    const char* b = (blip && blip[0]) ? blip : "male";
+    char p[160];
+    std::snprintf(p, sizeof(p), "sounds/blips/%s", b); prefetch_audio(s, p);
+    std::snprintf(p, sizeof(p), "blips/%s", b);        prefetch_audio(s, p);
 }
 
 static void play_sfx_named(App& app, const char* name) {
@@ -215,6 +240,7 @@ void CourtroomScreen::on_enter() {
         char rel[160]; std::snprintf(rel, sizeof(rel), "characters/%s/char.ini", lc);
         app_.asset_stream().prefetch(rel);
     }
+    prefetch_blip(app_.asset_stream(), "male");   // warm the typewriter blip
 
     // Queue the opening background asynchronously — never block on entry.
     if (gs.background[0]) {
@@ -413,6 +439,17 @@ void CourtroomScreen::begin_message() {
     if (m_use_pre_)  prefetch_emote(s, m_char_, m_preanim_, "");
     if (m_has_pair_) prefetch_emote(s, m_pair_char_, m_pair_emote_, "(a)");
     if (m_shout_ >= 1) prefetch_shout(s, m_char_, m_shout_);
+
+    // Warm the sounds this line plays so the non-blocking audio path has them
+    // ready (otherwise a blip/SFX would silently skip rather than stall).
+    prefetch_blip(s, m_blip_);
+    prefetch_sfx_named(s, ic.sfx);
+    if (m_realize_) prefetch_sfx_named(s, app_.theme().layout().sfx_realization);
+    if (m_shout_ >= 1) {
+        const ThemeLayout& tl = app_.theme().layout();
+        prefetch_sfx_named(s, m_shout_ == 1 ? tl.sfx_holdit
+                            : m_shout_ == 2 ? tl.sfx_objection : tl.sfx_takethat);
+    }
 
     // Decide which phase to enter once the sprite is ready.
     if (m_shout_ >= 1)      pending_phase_ = Phase::Shout;
@@ -800,12 +837,24 @@ void CourtroomScreen::render_chat_area() {
     r.fill_rect(aR, {30, 44, 78, 255}); r.draw_rect(aR, {90, 130, 200, 255});
     txt.draw("<", aL.x + (aL.w - txt.measure_w("<")) / 2, by, {185, 215, 255, 255});
     txt.draw(">", aR.x + (aR.w - txt.measure_w(">")) / 2, by, {185, 215, 255, 255});
+    int nx = aL.x + aL.w + 8;
+    // Little emote-button icon next to the name (when its thumbnail is cached).
+    if (own_loaded_ && own_char_.emotion_count > 0) {
+        SDL_Texture* eb = emote_button_tex(ic_emote_sel_, true);
+        if (!eb) eb = emote_button_tex(ic_emote_sel_, false);
+        if (eb) {
+            int side = bar.h - 10;
+            SDL_Rect d = {nx, bar.y + 5, side, side};
+            r.draw(eb, nullptr, &d);
+            nx += side + 6;
+        }
+    }
     const char* em = (own_loaded_ && own_char_.emotion_count > 0 &&
                       ic_emote_sel_ >= 0 && ic_emote_sel_ < own_char_.emotion_count)
                      ? own_char_.emotions[ic_emote_sel_].name : "normal";
-    char emn[24];
-    std::snprintf(emn, sizeof(emn), "%.14s", em);
-    txt.draw(emn, aL.x + aL.w + 8, by, {150, 200, 255, 255});
+    char emn[20];
+    std::snprintf(emn, sizeof(emn), "%.12s", em);
+    txt.draw(emn, nx, by, {150, 200, 255, 255});
 
     const char* shown = ic_text_[0] ? ic_text_ : "Tap here or Enter to talk...";
     txt.draw(shown, aR.x + aR.w + 12, by,
@@ -1121,9 +1170,11 @@ void CourtroomScreen::compose_and_send() {
     } else {
         std::strncpy(p.emote, "normal", sizeof(p.emote) - 1);
     }
-    std::strncpy(p.message,  text,             sizeof(p.message)  - 1);
-    std::strncpy(p.pos,      ic_pos_,          sizeof(p.pos)      - 1);
-    std::strncpy(p.showname, app_.username(),  sizeof(p.showname) - 1);
+    const char* sn = app_.settings().showname[0] ? app_.settings().showname
+                                                  : app_.username();
+    std::strncpy(p.message,  text,    sizeof(p.message)  - 1);
+    std::strncpy(p.pos,      ic_pos_, sizeof(p.pos)      - 1);
+    std::strncpy(p.showname, sn,      sizeof(p.showname) - 1);
     p.char_id    = cid;
     p.text_color = ic_color_;
 
@@ -1169,8 +1220,10 @@ void CourtroomScreen::compose_ooc() {
     bool ok = show_keyboard("OOC message", "", text, sizeof(text));
     kb_active_ = false;
     if (ok && text[0]) {
+        const char* sn = app_.settings().showname[0] ? app_.settings().showname
+                                                      : app_.username();
         char buf[512];
-        int n = cmd::ct(buf, sizeof(buf), app_.username(), text);
+        int n = cmd::ct(buf, sizeof(buf), sn, text);
         if (n > 0) app_.send_packet(buf, n);
     }
 }

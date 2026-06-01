@@ -12,6 +12,7 @@
 #include "net/network_thread.hpp"
 #include "net/packet_queue.hpp"
 #include "protocol/ao_client.hpp"
+#include "state/settings.hpp"
 
 namespace ao {
 
@@ -46,6 +47,7 @@ public:
     AssetStream&  asset_stream() { return asset_stream_; }
     AudioManager& audio()        { return audio_manager_; }
     MusicPlayer&  music()        { return music_player_; }
+    Settings&     settings()     { return settings_; }
     bool          running()      const { return running_; }
     void          quit()         { running_ = false; }
 
@@ -82,6 +84,7 @@ private:
     AssetStream   asset_stream_;
     AudioManager  audio_manager_;
     MusicPlayer   music_player_;
+    Settings      settings_;
 
     // Networking
     InQueue        in_queue_;

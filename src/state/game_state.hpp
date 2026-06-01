@@ -104,7 +104,7 @@ struct GameState {
     // ship 600+ characters in a single SC packet. Sized at 1024 to fit the
     // biggest public servers with room to spare. At 128 B per CharacterInfo
     // this is 128 KB — trivial on the 4 GB Switch.
-    static constexpr int MAX_CHARS = 1024;
+    static constexpr int MAX_CHARS = 4096;   // huge rosters: some servers ship 3000+
     CharacterInfo characters[MAX_CHARS];
     bool          char_taken[MAX_CHARS] = {};
     int           char_count            = 0;
@@ -120,7 +120,7 @@ struct GameState {
     // Big rosters again: music-heavy servers send several hundred tracks in
     // the single SM packet that also carries the area list. 2048 × 128 B
     // = 256 KB.
-    static constexpr int MAX_MUSIC = 2048;
+    static constexpr int MAX_MUSIC = 4096;
     char music_list[MAX_MUSIC][128];
     int  music_count = 0;
     char current_music[128] = {};

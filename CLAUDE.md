@@ -281,6 +281,30 @@ is a discrete press.
 
 ---
 
+### `src/state/settings.hpp` / `src/state/settings.cpp`
+
+**Struct:** `ao::Settings` — user preferences persisted across servers and launches.
+
+Plain `key = value` INI at `sdmc:/switch/ferris-ao/config.ini` (`./config.ini`
+on desktop). `App` owns one `Settings settings_`; `App::init()` calls `load()`
+and applies it (theme via `ThemeManager::load`, SFX/music volumes). `save()` is
+called whenever a value changes (best-effort; creates the dir).
+
+```cpp
+char showname[64];     // custom IC/OOC showname ("" → use username)
+char theme[64];        // active theme name (folder under base/themes or base/misc)
+char master_url[256];  // server-browser master URL
+char last_host[256], last_port[8];
+int  sfx_volume, music_volume;   // 0-128
+void load(); void save(); static const char* path();
+```
+
+The courtroom uses `settings().showname` for the `MS`/`CT` showname when set; the
+connect screen's **Settings tab** edits these. Saving is immediate so a custom
+showname survives a close.
+
+---
+
 ### `src/state/game_state.hpp`
 
 **Struct:** `ao::GameState` — single source of truth, **main-thread only**.
@@ -290,9 +314,9 @@ Never accessed from `NetworkThread`. `AOClient::process()` mutates it; screens r
 **Key members:**
 
 ```cpp
-static constexpr int MAX_CHARS    = 256;
+static constexpr int MAX_CHARS    = 4096;  // huge rosters (some servers ship 3000+)
 static constexpr int MAX_AREAS    = 64;
-static constexpr int MAX_MUSIC    = 512;
+static constexpr int MAX_MUSIC    = 4096;
 static constexpr int MAX_EVIDENCE = 48;
 
 CharacterInfo chars[MAX_CHARS];   // Populated from SC packet
@@ -752,14 +776,23 @@ static const char* romfs_base();  // "romfs:" (or "romfs" on desktop)
 
 **`open_rwops` returns a custom owning `SDL_RWops`** (`SDL_AllocRW()` + custom function pointers). Closing it (by SDL_image, SDL_mixer, or manually) frees the underlying buffer automatically — no separate bookkeeping.
 
+**`open_rwops_cached(rel)`** is the **non-blocking** variant: prefetch cache →
+`sdmc:` → `romfs:` only, **never HTTP**. Returns `nullptr` if the asset isn't
+already local/cached. The audio path uses it so a blip/SFX can be attempted every
+typewriter tick without ever stalling the render loop on a network fetch.
+
 **`fetch_bytes` consumption order:** prefetch cache (consumed, single-use) →
 primary HTTP (disk-cache-checked) → secondary HTTP (disk-cache-checked) →
 `sdmc:` → `romfs:`. `has_prefetch()` is the non-consuming peek the
 courtroom/char-select use to decide what to decode this frame.
 
-**Prefetch cache:** `PREFETCH_SLOTS = 768` `PrefetchEntry` array guarded by an `SDL_mutex`; FIFO
-eviction when full. `store_prefetch` is called by `AssetStream`; `fetch_bytes`
-removes the entry (single-use), while `has_prefetch` only checks.
+**Prefetch cache:** `PREFETCH_SLOTS = 768` `PrefetchEntry` array guarded by an
+`SDL_mutex`. Eviction is **O(1)** at a round-robin cursor (`s_prefetch_rr`) — the
+old code `memmove`'d the whole ~200 KB array on every store-when-full, which
+held the mutex long enough to stall the main thread's `has_prefetch`/`peek` calls
+and visibly hitch busy/large servers. `store_prefetch` is called by
+`AssetStream`; `fetch_bytes` removes the entry (single-use), while `has_prefetch`
+only checks.
 
 **All callers use relative paths** — never resolved absolute paths. The relative path is also the cache key in `TextureCache`.
 
@@ -1035,11 +1068,19 @@ void set_sfx_volume(int vol);        // 0–128 (MIX_MAX_VOLUME)
 
 **Cache:** `SfxEntry sfx_cache_[16]` — LRU by `last_used = SDL_GetTicks()`. `evict_sfx()` finds oldest occupied slot when all 16 are full.
 
-**`play_sfx(path)`:** takes a relative path.
-1. `find_sfx(path)` — linear search on relative path strings
-2. Miss: `AssetManager::open_rwops(path)` → `Mix_LoadWAV_RW(rw, 1)`, evict LRU if needed
-   - `freesrc=1`: SDL_mixer decodes WAV/OGG entirely upfront, so the RWops is not needed after load
-3. Hit or loaded: `Mix_PlayChannel(-1, chunk, 0)`
+**`play_sfx(path)` is NON-BLOCKING** — it must be safe to call every typewriter
+blip without a network stall:
+1. `find_sfx(path)` — cached chunk → play immediately.
+2. Miss: `AssetManager::open_rwops_cached(path)` (prefetch/local only, **no HTTP**)
+   → `Mix_LoadWAV_RW(rw, 1)`. If the bytes aren't ready it **returns false and
+   plays nothing** rather than blocking.
+3. Play: `Mix_PlayChannel(-1, chunk, 0)`.
+
+Because of (2), the courtroom **prefetches** the sounds a line will play
+(`prefetch_blip` on entry; `prefetch_blip`/`prefetch_sfx_named` in
+`begin_message`) so they're in the cache by the time they're played. This (plus
+the disk cache for repeats) is what removed the IC-typewriter clunk — previously
+each uncached blip did a blocking `open_rwops` on the main thread.
 
 ---
 
@@ -1164,13 +1205,24 @@ waiting_for_keyboard_ = false;
 
 ### `src/ui/screens/connect_screen.hpp` / `connect_screen.cpp`
 
-First screen the user sees. Three-tab UI: **Servers** (tab 0), **Direct Connect**
-(tab 1), and **Credits** (tab 2). L cycles tabs (`tab_ = (tab_+1)%3`); tapping a
-tab in the tab bar selects it directly. The Credits tab shows the project name,
-that it was created by **SyntaxNyah**, and the repo URL
-`https://github.com/SyntaxNyah/ferris-ao-switch`. Touch: tap a server row to
-select (tap the selected row to connect); tap a direct-connect field to edit it
-/ connect.
+First screen the user sees. Four-tab UI: **Servers** (0), **Direct Connect** (1),
+**Settings** (2), **Credits** (3). L cycles tabs (`tab_ = (tab_+1)%4`); tapping a
+tab selects it directly. Touch: tap a server row to select (tap the selected row
+to connect); tap a direct-connect field to edit it / connect.
+
+**Settings tab (tab 2):** edits the persisted `Settings` (Up/Down select a row,
+A / ←→ change, mouse-tap a row acts; every change `save()`s immediately):
+- **Showname** — keyboard sets a custom IC/OOC showname (blank = username).
+- **Theme** — cycles through themes discovered by `scan_themes()`, which lists
+  folders containing `courtroom_design.ini` under `base/themes/` and `base/misc/`
+  on the SD card (plus the built-in `default`). Selecting one calls
+  `apply_theme()` → `ThemeManager::load` + persists it; it also loads on startup.
+  This is the "import an AO2 theme" flow: drop a theme folder on the card, pick it.
+- **SFX / Music volume** — 0-128, applied live.
+
+The **Credits tab (3)** shows the project, that it was created by **SyntaxNyah**,
+and the repo URL `https://github.com/SyntaxNyah/ferris-ao-switch`. The master
+server URL (ZL on the Servers tab) is also persisted.
 
 **Server browser (tab 0):**
 - Background SDL thread (`fetch_thread_fn`) calls `http_get(ms_url_)` on entry; `SDL_AtomicSet` tracks fetch state (0=idle, 1=fetching, 2=done, 3=error)
@@ -1293,9 +1345,10 @@ reads as one shape — no floating plate). The incoming typewriter line is clipp
 to the box. Below it a persistent **IC input bar** is the fast-talk affordance:
 tapping it (or pressing Enter when idle) opens the keyboard and sends with the
 **current** emote/colour/pos — the emote is *not* reset between sends, so you can
-fire line after line. The bar carries inline **`<` `>` emote arrows**; Left/Right
-in the main view (no panel) also cycle the emote — both go through
-`cycle_emote()`, so changing emote never needs the composer. The IC keyboard
+fire line after line. The bar carries inline **`<` `>` emote arrows** and a little **emote-button icon**
+next to the name (the cached `button<N>` thumbnail); Left/Right in the main view
+(no panel) also cycle the emote — all through `cycle_emote()`, which re-warms the
+new emote's sprite + thumbnail, so changing emote never needs the composer. The IC keyboard
 opens with a fresh (empty) field each time. Own emote thumbnails are warmed at
 `on_enter` (`prefetch_emote_buttons`) so the composer grid/preview is ready when
 opened.
@@ -1791,7 +1844,7 @@ CourtroomScreen::update()
 
 | Resource | Count | Size each | Total |
 |----------|-------|-----------|-------|
-| Texture cache slots | 256 | ~64 KB avg (128×128 icon) | ~16 MB |
+| Texture cache slots | 512 | ~64 KB avg (128×128 icon) | ~32 MB |
 | SFX chunks | 16 | ~64 KB avg | ~1 MB |
 | APNG frames | 128 | ~32 KB avg | ~4 MB |
 | GameState (stack) | 1 | ~1.5 MB | ~1.5 MB |

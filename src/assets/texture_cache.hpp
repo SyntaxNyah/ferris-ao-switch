@@ -14,7 +14,7 @@ namespace ao {
 // (typical servers have 100-600 chars). Sized as a balance between VRAM
 // footprint (~16 MB at 64 KB per 128x128 RGBA icon) and the cost of the
 // linear slot-search that peek() runs every frame in CharSelectScreen.
-static constexpr int TEX_CACHE_SLOTS = 256;
+static constexpr int TEX_CACHE_SLOTS = 512;
 
 struct TexEntry {
     char          path[256] = {};

@@ -334,3 +334,15 @@ panel highlights the new room immediately.
   (96-slot) text cache and re-blit with no per-frame rasterisation or allocation
   (only the wrap-height math runs each frame, which is metrics-only). The wheel
   scrolls back through history.
+- **Audio never blocks the render loop.** `AudioManager::play_sfx` resolves only
+  from the prefetch cache or local files (`open_rwops_cached`, no HTTP) — if the
+  sound isn't ready it plays nothing rather than stalling. The courtroom
+  prefetches blips/SFX ahead (`on_enter`, `begin_message`), so they're cached when
+  played. This removed the typewriter clunk from blocking blip loads.
+- **O(1) prefetch-cache eviction.** `store_prefetch` evicts at a round-robin
+  cursor instead of `memmove`-ing the whole ~200 KB array while holding the mutex
+  — that memmove was a major source of main-thread hitching on busy/large servers
+  (the main thread blocks on the same mutex for `has_prefetch`/`peek`).
+- **Scaled for huge servers.** `MAX_CHARS`/`MAX_MUSIC` are 4096, the texture
+  cache is 512 slots, and `LOAD_GATE_MS` is 400 ms so IC text appears quickly and
+  the sprite pops in when ready — no long hold even on 3000+ character servers.

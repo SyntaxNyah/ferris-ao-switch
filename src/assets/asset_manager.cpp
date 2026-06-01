@@ -136,6 +136,7 @@ struct PrefetchEntry {
 
 static PrefetchEntry s_prefetch[PREFETCH_SLOTS] = {};
 static SDL_mutex*    s_prefetch_mutex           = nullptr;
+static int           s_prefetch_rr              = 0;   // round-robin eviction cursor
 
 static SDL_mutex* get_prefetch_mutex() {
     if (!s_prefetch_mutex) s_prefetch_mutex = SDL_CreateMutex();
@@ -144,20 +145,21 @@ static SDL_mutex* get_prefetch_mutex() {
 
 void AssetManager::store_prefetch(const char* relative, uint8_t* data, int size) {
     SDL_LockMutex(get_prefetch_mutex());
-    // Find empty slot or evict oldest (slot 0 = round-robin fallback)
+    // Find a free slot; if full, evict at the round-robin cursor. O(1) eviction —
+    // the old code memmove'd the whole ~200 KB array on every store-when-full,
+    // which stalled the prefetch mutex (and thus the main thread's has_prefetch/
+    // peek calls) hard on busy/large servers.
     int slot = -1;
-    for (int i = 0; i < PREFETCH_SLOTS; ++i) {
+    for (int i = 0; i < PREFETCH_SLOTS; ++i)
         if (!s_prefetch[i].occupied) { slot = i; break; }
-    }
     if (slot < 0) {
-        // Evict slot 0 and shift (simple FIFO)
-        SDL_free(s_prefetch[0].data);
-        std::memmove(&s_prefetch[0], &s_prefetch[1],
-            sizeof(PrefetchEntry) * (PREFETCH_SLOTS - 1));
-        slot = PREFETCH_SLOTS - 1;
-        s_prefetch[slot].occupied = false;
+        slot = s_prefetch_rr;
+        s_prefetch_rr = (s_prefetch_rr + 1) % PREFETCH_SLOTS;
+        SDL_free(s_prefetch[slot].data);
+        s_prefetch[slot].data = nullptr;
     }
     std::strncpy(s_prefetch[slot].rel, relative, sizeof(s_prefetch[slot].rel) - 1);
+    s_prefetch[slot].rel[sizeof(s_prefetch[slot].rel) - 1] = '\0';
     s_prefetch[slot].data     = data;
     s_prefetch[slot].size     = size;
     s_prefetch[slot].occupied = true;
@@ -499,11 +501,9 @@ static int own_close(SDL_RWops* ctx) {
     return 0;
 }
 
-SDL_RWops* AssetManager::open_rwops(const char* relative) {
-    int      size = 0;
-    uint8_t* data = fetch_bytes(relative, &size);
+// Wrap an SDL_malloc'd buffer in an owning SDL_RWops (close frees the buffer).
+static SDL_RWops* wrap_owning(uint8_t* data, int size) {
     if (!data) return nullptr;
-
     auto* b = (OwningBuf*)SDL_malloc(sizeof(OwningBuf));
     if (!b) { SDL_free(data); return nullptr; }
     b->data = data;
@@ -521,6 +521,18 @@ SDL_RWops* AssetManager::open_rwops(const char* relative) {
     rw->type  = SDL_RWOPS_UNKNOWN;
     rw->hidden.unknown.data1 = b;
     return rw;
+}
+
+SDL_RWops* AssetManager::open_rwops(const char* relative) {
+    int size = 0;
+    return wrap_owning(fetch_bytes(relative, &size), size);
+}
+
+SDL_RWops* AssetManager::open_rwops_cached(const char* relative) {
+    int size = 0;
+    uint8_t* data = consume_prefetch(relative, &size);   // in-memory handoff
+    if (!data) data = fetch_local(relative, &size);      // sdmc: then romfs:  (no HTTP)
+    return wrap_owning(data, size);
 }
 
 } // namespace ao

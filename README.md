@@ -60,6 +60,9 @@ ferris-ao-switch implements the full AO2 client protocol so Switch players can j
 - **HTTP & HTTPS streaming** — loads assets on-demand from a server CDN (`ASS` packet); `https://` (TLS) and `http://` URLs both supported; no base pack download needed
 - **Async, non-blocking loads** — sprites/backgrounds/music are prefetched on 8 worker threads and decoded from cache on the main thread, so the courtroom never stalls on the network
 - **Persistent disk cache** — streamed assets are saved to `sdmc:/switch/ferris-ao/cache` (keyed by full URL) and served from SD on the next view/relaunch, so repeat fetches skip the network entirely — pairs with HTTPS keep-alive to make the most of Cloudflare/CDN edge caching
+- **No-freeze loading** — char.ini, sprites, audio and music all load off the main thread (your own sprite is pre-warmed on join, audio plays only from cache); the render loop never blocks on the network, so there's no join freeze or IC stutter even on 3000+ character servers
+- **Saved settings** — a custom showname, theme, master-server URL and volumes persist across servers and launches (`sdmc:/switch/ferris-ao/config.ini`)
+- **Theme import** — drop AO2 theme folders on the SD card and pick them in Settings (applies `courtroom_design.ini` live)
 - **Four-tier fallback** — server CDN → community CDN (`attorneyoffline.de/base/`) → `sdmc:/switch/ferris-ao/base/` local pack → `romfs:/` bundled fallback
 - **Server background only** — the courtroom streams the server's real background and never substitutes a bundled default courtroom (black until it loads)
 - **Sprite reuse** — a character talking line after line never re-downloads or re-decodes its sprite (loads are path-cached)
@@ -399,6 +402,25 @@ Manually enter connection details for servers not on the public list:
 
 Press **A** on a field to open the system keyboard and edit it. Press **ZR** to connect.
 
+### Tab 3: Settings
+
+Everything here is saved to `sdmc:/switch/ferris-ao/config.ini` automatically and
+persists across servers and launches. Up/Down to select a row, **A** / **←→** to change (or tap):
+
+| Setting | What it does |
+|---|---|
+| **Showname** | Custom IC/OOC display name (blank = username). Persists on close. |
+| **Theme** | Cycles through AO2 theme folders found on the SD card (see below) + the built-in `default`; applies instantly. |
+| **SFX / Music Volume** | 0–128, applied live. |
+
+**Importing AO2 themes:** drop a standard AO2 theme folder (one containing
+`courtroom_design.ini`) into `sdmc:/switch/ferris-ao/base/themes/` (or `…/misc/`)
+and it appears in the Theme setting to select.
+
+### Tab 4: Credits
+
+Project info and the repo link (also see [Credits](#credits)).
+
 **WebSocket servers:** Prefix the host with `ws://` to connect in WebSocket mode, or `wss://` for TLS WebSocket (encrypted). Examples:
 - `ws://game.example.com` on port `27018` — plain WebSocket
 - `wss://game.example.com` on port `443` — TLS WebSocket (default port 443)
@@ -553,9 +575,10 @@ ferris-ao-switch/
     │   ├── ao_client.hpp/cpp       # Handshake state machine + all in-lobby packet handlers
     │   └── commands.hpp            # Outgoing packet builder free functions (stack buffers)
     ├── state/
-    │   └── game_state.hpp          # All mutable game state, main-thread only
-    │                               # (CharacterInfo, AreaInfo, EvidenceEntry,
-    │                               #  ChatLog ring buffer, ICAnimState — all here)
+    │   ├── game_state.hpp          # All mutable game state, main-thread only
+    │   │                           # (CharacterInfo, AreaInfo, EvidenceEntry,
+    │   │                           #  ChatLog ring buffer, ICAnimState — all here)
+    │   └── settings.hpp/cpp        # Persisted prefs (showname/theme/URL/volumes) → config.ini
     ├── assets/
     │   ├── asset_manager.hpp/cpp   # 4-tier resolution: prefetch → CDN×2 → sdmc: → romfs:
     │   ├── asset_stream.hpp/cpp    # Background worker threads that pre-warm the cache
@@ -727,7 +750,6 @@ Pull requests are welcome. Before contributing:
 
 ### Known limitations / TODO
 
-- No settings persistence — host/port/username reset on each launch; a `sdmc:/switch/ferris-ao/config.ini` save/load pass is planned
 - Evidence can be viewed but not yet attached to an outgoing IC message from the UI
 - Switch rooms from inside the courtroom via the **Rooms** panel (`−`); the separate Area Select screen pushed before the courtroom is currently bypassed (Character Select enters the courtroom directly)
 

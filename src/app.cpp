@@ -110,9 +110,15 @@ bool App::init() {
 
     game_state_ = new GameState();
 
-    // Load theme layout from base pack (misc/default/courtroom_design.ini) if present.
-    // Falls back to built-in Layout:: constants silently when files are absent.
-    theme_manager_.load("default");
+    // Load persisted settings (showname / theme / master URL / volumes) from
+    // sdmc:/switch/ferris-ao/config.ini. Missing file → defaults.
+    settings_.load();
+    audio_manager_.set_sfx_volume(settings_.sfx_volume);
+    music_player_.set_volume(settings_.music_volume);
+
+    // Load theme layout from base pack (misc/<theme>/courtroom_design.ini) if
+    // present. Falls back to built-in Layout:: constants silently when absent.
+    theme_manager_.load(settings_.theme);
 
     // Init text renderer — non-fatal if font is missing (text renders as nothing).
     // 20pt reads cleanly at TV distance and in handheld without overflowing the

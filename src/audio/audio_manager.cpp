@@ -39,16 +39,15 @@ int AudioManager::evict_sfx() const {
 }
 
 // `path` is a RELATIVE asset path (e.g. "sounds/sfx-guilty.ogg").
-// Resolution order: HTTP streaming → sdmc: local base → romfs: bundled fallback.
+// NON-BLOCKING: a cached chunk plays instantly; otherwise the bytes are only
+// taken from the prefetch cache or local files (NEVER the network), so this can
+// be called every typewriter blip without ever stalling the render loop. The
+// courtroom prefetches blip/SFX bytes ahead of time so they're ready here.
 bool AudioManager::play_sfx(const char* path) {
     int idx = find_sfx(path);
     if (idx < 0) {
-        // Load via AssetManager (HTTP, local, or romfs)
-        SDL_RWops* rw = AssetManager::open_rwops(path);
-        if (!rw) {
-            std::fprintf(stderr, "AudioManager: not found '%s'\n", path);
-            return false;
-        }
+        SDL_RWops* rw = AssetManager::open_rwops_cached(path);   // no HTTP
+        if (!rw) return false;   // not ready yet — skip silently (no freeze)
         // freesrc=1: Mix_LoadWAV_RW closes rw (which frees the owning buffer).
         // Mix_Chunk stores decoded PCM internally so we do not need to keep rw alive.
         Mix_Chunk* c = Mix_LoadWAV_RW(rw, 1);

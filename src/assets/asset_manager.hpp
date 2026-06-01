@@ -90,6 +90,11 @@ public:
     // Mix_LoadMUS_RW, Mix_LoadWAV_RW etc. with freesrc=1.
     static SDL_RWops* open_rwops(const char* relative);
 
+    // Non-blocking open: prefetch cache → sdmc: → romfs: ONLY (never HTTP).
+    // Returns nullptr if the asset isn't already local/cached. For the audio hot
+    // path and anything on the render thread that must not stall on the network.
+    static SDL_RWops* open_rwops_cached(const char* relative);
+
     // ── Prefetch cache (used by AssetStream) ───────────────────────────────────
     // Store pre-fetched data so the next fetch_bytes call for this relative path
     // returns immediately without a network round-trip.

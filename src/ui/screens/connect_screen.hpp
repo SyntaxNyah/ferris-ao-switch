@@ -34,6 +34,8 @@ private:
     void connect_to_server(const ServerEntry& s);
     void connect_direct();
     void open_keyboard(const char* hint, const char* initial, char* buf, int buf_sz, int max_len);
+    void scan_themes();              // find AO2 theme folders on the SD card
+    void apply_theme(const char* name); // load it + persist the choice
     void parse_url(const char* src, char* out_host, int host_cap,
                    uint16_t* out_port, ConnMode* out_mode) const;
     void load_server_cfg();
@@ -71,8 +73,15 @@ private:
 
     int  direct_sel_  = 0;  // 0=host, 1=port, 2=username, 3=connect
 
+    // ── Tab 2: Settings ─────────────────────────────────────────────────────────
+    int  settings_sel_ = 0;  // 0=showname, 1=theme, 2=sfx vol, 3=music vol
+    static constexpr int MAX_THEMES = 64;
+    char themes_[MAX_THEMES][64];
+    int  theme_count_ = 0;
+    int  theme_sel_   = 0;   // index into themes_
+
     // ── Shared ────────────────────────────────────────────────────────────────
-    int  tab_       = 0;   // 0=servers, 1=direct
+    int  tab_       = 0;   // 0=servers, 1=direct, 2=settings, 3=credits
     char status_[256] = {};
 
     static constexpr int VISIBLE_ROWS = 10;

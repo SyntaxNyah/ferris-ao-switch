@@ -113,7 +113,7 @@ private:
     bool pair_ready_     = false;
     bool shout_ready_    = false;
     uint32_t msg_age_ms_ = 0;     // ms since begin_message (load gate / give-up)
-    static constexpr uint32_t LOAD_GATE_MS   = 1200;  // start line anyway after this
+    static constexpr uint32_t LOAD_GATE_MS   = 400;   // start the line quickly; sprite pops in when ready
     static constexpr uint32_t ASSET_GIVEUP_MS = 8000; // stop probing missing assets
 
     Phase phase_ = Phase::Idle;
