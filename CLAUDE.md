@@ -1284,13 +1284,20 @@ char         ms_url_[256];         // master server URL (configurable)
 - Touch → tap a cell to highlight, tap the highlighted cell to pick (shares `pick_char`)
 - Taken slots dimmed; available slots show the icon (or a colored placeholder) + name
 
-**char.ini pre-warm.** `update()` also prefetches the **highlighted** character's
-`char.ini` as you browse (tiny file, deduped per selection via `ci_pf_sel_`). The
-courtroom must parse the char.ini before it can fetch emote sprites/buttons, so
-having it cached by the time you press A removes a whole round-trip from the
-"loading sprites" wait — `CourtroomScreen::on_enter` finds it already prefetched
-and `update()` parses it on the first frame, kicking off the sprite/button
-prefetch immediately.
+**Courtroom pre-warm (instant-ish entry).** While you browse, `CharSelectScreen`
+warms what the courtroom will need so it's cached by the time you press A:
+- `prefetch_area_scene()` (`on_enter`) — the room **background**/desk for the
+  common positions (char-independent; `gs.background` is known from the lobby
+  `BN`).
+- the **highlighted char's `char.ini`** (`update`, deduped via `ci_pf_sel_`).
+- `prefetch_sel_sprite()` — once that char.ini lands, parse it and prefetch the
+  **default emote's `(a)`/`(b)` sprite** (deduped via `sprite_pf_sel_`).
+
+So `CourtroomScreen::on_enter` usually finds the background + sprite already
+cached and shows them immediately, instead of fetching after entry. Parsing the
+char.ini here consumes the prefetch entry, but the **disk cache** still backs the
+courtroom's own read, so it doesn't re-hit the network. (First-ever view of a
+new asset is still one fetch; a local base pack makes even that instant.)
 
 **Search / filtering.** The navigable list is the filtered set when a query is
 active, else every slot. `selected_`/`scroll_` are positions in that list;

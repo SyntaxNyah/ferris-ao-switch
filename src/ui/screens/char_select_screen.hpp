@@ -16,6 +16,8 @@ private:
     void pick_char(int real_idx);   // claim a character (CC) and enter the courtroom
     void open_search();             // keyboard → set the name filter
     void rebuild_filter();          // recompute filt_ from search_
+    void prefetch_area_scene();     // warm the room background while you browse
+    void prefetch_sel_sprite();     // warm the highlighted char's default sprite
 
     // The visible/navigable list is the filtered set when searching, else every
     // slot. selected_/scroll_ are positions in THAT list; real_index() maps a
@@ -28,6 +30,7 @@ private:
     int  scroll_    = 0;     // row-aligned top position (multiple of COLS)
     int  pf_scroll_ = -1;    // scroll the icon window was last queued for
     int  ci_pf_sel_ = -1;    // selection the char.ini was last pre-warmed for
+    int  sprite_pf_sel_ = -1; // selection the default sprite was last pre-warmed for
     int  char_count_ = 0;    // last-seen gs.char_count (rebuild trigger)
 
     char search_[48]  = {};

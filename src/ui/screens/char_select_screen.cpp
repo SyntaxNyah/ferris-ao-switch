@@ -10,6 +10,7 @@
 #include "../../assets/asset_manager.hpp"
 #include "../../assets/asset_stream.hpp"
 #include "../../assets/extensions_config.hpp"
+#include "../../assets/char_ini_parser.hpp"
 #include <SDL2/SDL.h>
 #include <cstdio>
 #include <cstring>
@@ -25,15 +26,85 @@ static void lower_copy(char* dst, const char* src, int cap) {
     dst[i] = '\0';
 }
 
+// Mirror CourtroomScreen's emote candidate rules so we can pre-warm a picked
+// character's default sprite before the courtroom even opens (.png/.webp.static
+// use the bare name; every other format uses the (a)/(b) prefix).
+static void cs_emote_path(char* out, int cap, const char* c, const char* e,
+                          const char* prefix, const char* ext) {
+    if (!std::strcmp(ext, ".png"))
+        std::snprintf(out, cap, "characters/%s/%s.png", c, e);
+    else if (!std::strcmp(ext, ".webp.static"))
+        std::snprintf(out, cap, "characters/%s/%s.webp", c, e);
+    else
+        std::snprintf(out, cap, "characters/%s/%s%s%s", c, prefix, e, ext);
+}
+static void cs_prefetch_emote(AssetStream& s, const char* c, const char* e,
+                              const char* prefix) {
+    if (!c[0] || !e[0]) return;
+    const ExtensionsConfig& ec = ExtensionsConfig::get();
+    char p[256];
+    for (int i = 0; i < ec.emote_count; ++i) {
+        cs_emote_path(p, sizeof(p), c, e, prefix, ec.emote[i]);
+        if (!AssetManager::has_prefetch(p)) s.prefetch(p);
+    }
+}
+
 CharSelectScreen::CharSelectScreen(App& app) : Screen(app) {}
 
 void CharSelectScreen::on_enter() {
     selected_ = 0;
     scroll_   = 0;
     pf_scroll_ = -1;
+    ci_pf_sel_ = -1;
+    sprite_pf_sel_ = -1;
     search_[0] = '\0';
     char_count_ = app_.state().char_count;
     filt_count_ = 0;
+    // Warm the room background now so it's cached the instant a character is
+    // picked — it's the area's background, independent of which character.
+    prefetch_area_scene();
+}
+
+// Pre-warm the room background (common positions) while the user browses, so the
+// courtroom stage is already there when they pick. Char-independent.
+void CharSelectScreen::prefetch_area_scene() {
+    GameState& gs = app_.state();
+    if (!gs.background[0]) return;
+    char bg[128]; lower_copy(bg, gs.background, sizeof(bg));
+    const ExtensionsConfig& ec = ExtensionsConfig::get();
+    AssetStream& s = app_.asset_stream();
+    static const char* files[] = {
+        "witnessempty", "defenseempty", "prosecutorempty",   // backgrounds
+        "stand", "defensedesk", "prosecutiondesk"            // desks
+    };
+    char p[256];
+    for (int f = 0; f < 6; ++f)
+        for (int e = 0; e < ec.background_count; ++e) {
+            std::snprintf(p, sizeof(p), "background/%s/%s%s", bg, files[f], ec.background[e]);
+            if (!AssetManager::has_prefetch(p)) s.prefetch(p);
+        }
+}
+
+// Once the highlighted character's char.ini is cached, parse it and pre-warm its
+// default emote's (a)/(b) sprite — so the courtroom shows your character with no
+// extra round-trip after you press A. Done once per selection.
+void CharSelectScreen::prefetch_sel_sprite() {
+    GameState& gs = app_.state();
+    if (selected_ == sprite_pf_sel_) return;
+    int real = real_index(selected_);
+    if (real < 0 || real >= gs.char_count || !gs.characters[real].name[0]) return;
+    char lname[64]; lower_copy(lname, gs.characters[real].name, sizeof(lname));
+    char ini[160]; std::snprintf(ini, sizeof(ini), "characters/%s/char.ini", lname);
+    if (!AssetManager::has_prefetch(ini)) return;   // wait until char.ini is cached
+    // Parsing consumes the cached char.ini, but the disk cache still backs the
+    // courtroom's later read, so it doesn't re-hit the network.
+    CharDef def;
+    if (load_char_ini(gs.characters[real].name, def) && def.emotion_count > 0) {
+        char emo[64]; lower_copy(emo, def.emotions[0].idle_anim, sizeof(emo));
+        cs_prefetch_emote(app_.asset_stream(), lname, emo, "(a)");
+        cs_prefetch_emote(app_.asset_stream(), lname, emo, "(b)");
+    }
+    sprite_pf_sel_ = selected_;   // done for this selection (even if it had no emotes)
 }
 
 // Recompute the filtered index list from the current search query. Only used
@@ -186,6 +257,8 @@ void CharSelectScreen::update(uint32_t /*dt*/) {
             if (!AssetManager::has_prefetch(rel)) app_.asset_stream().prefetch(rel);
         }
     }
+    // Once that char.ini lands, pre-warm the character's default sprite too.
+    prefetch_sel_sprite();
 
     // On-demand icon streaming for the visible + lookahead window only (never
     // bulk-queued — that starved the courtroom on big servers). DECODE runs each

@@ -327,12 +327,16 @@ panel highlights the new room immediately.
   sprites are prefetched ahead of time (`prefetch_own_emote`, also on emote
   change). Other players' sprites stream in when they talk; pre-warming ours
   stops *our* first line from being the slow one.
-- **char.ini pre-warmed at character select.** `CharSelectScreen` prefetches the
-  highlighted character's `char.ini` while you browse, so by the time you pick it
-  the courtroom parses it on frame 1 and starts fetching emote sprites/buttons
-  immediately — removing the char.ini round-trip from the "loading sprites" wait
-  (the buttons themselves are then one parallel round-trip, instant on a revisit
-  thanks to the disk cache).
+- **Courtroom assets are pre-warmed at character select.** While you browse the
+  grid, `CharSelectScreen` prefetches: the **room background** (common positions —
+  char-independent, known from the lobby `BN`), the **highlighted character's
+  char.ini**, and — once that char.ini lands — its **default emote sprite**
+  (`(a)`/`(b)`). So by the time you press A, the background and your sprite are
+  usually already cached and the courtroom shows them immediately instead of
+  fetching them after entry. (`courtroom on_enter` finds them cached; the disk
+  cache makes every revisit instant.) The first-ever view of a brand-new asset on
+  a server is still one network fetch — truly instant needs a local base pack in
+  `sdmc:/switch/ferris-ao/base/`.
 - **Big-server icon flood is gone.** Character icons are prefetched on-demand for
   the visible window in `CharSelectScreen` (re-queued only when the scroll moves),
   not bulk-queued for all 600 at lobby-enter, and `CourtroomScreen::on_enter`
