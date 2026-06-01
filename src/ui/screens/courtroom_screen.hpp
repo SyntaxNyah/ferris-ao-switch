@@ -58,6 +58,7 @@ private:
     void join_area(int idx);   // send AO2 area-join (MC) for areas[idx]
     void play_music(int idx);  // send MC for music_list[idx]
     void compose_ooc();        // open keyboard, send a CT (OOC) line
+    void cycle_emote(int dir);  // change the selected emote by ±1 (main view + composer)
 
     // ── IC composer ───────────────────────────────────────────────────────
     void load_own_character();

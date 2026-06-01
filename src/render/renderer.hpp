@@ -56,8 +56,12 @@ namespace Layout {
     inline constexpr int CHAT_H = 176;
     inline constexpr int CHAT_Y = H - CHAT_H;                      // 544
     inline constexpr SDL_Rect CHAT_AREA     = {0, CHAT_Y, W, CHAT_H};
-    inline constexpr SDL_Rect NAMEPLATE     = {24, CHAT_Y + 8, 360, 34};   // width is a max; sized to the name at draw time
-    inline constexpr SDL_Rect CHATBOX       = {28, CHAT_Y + 46, 816, 120}; // IC text box, directly under the nameplate
+    // The showname is a corner tab merged onto the chatbox (sized to the name at
+    // draw time), not a floating plate; the chatbox + input bar are kept a
+    // sensible width (not stretched across the whole screen).
+    inline constexpr SDL_Rect NAMEPLATE     = {34, CHAT_Y + 2,  340, 28};  // tab on the chatbox top-left
+    inline constexpr SDL_Rect CHATBOX       = {28, CHAT_Y + 26, 760, 90};  // incoming IC text box
+    inline constexpr SDL_Rect IC_INPUT_BAR  = {28, CHAT_Y + 122, 760, 38}; // tap-to-talk bar, same width
 
     // HP bars over the top corners (each gets an inline label chip when drawn).
     inline constexpr SDL_Rect HP_DEF        = {28, 46, 330, 26};

@@ -264,6 +264,16 @@ cache, so opening the composer never blocks. D-pad ←/→ move through the grid
 confirm builds the 26-field client `MS` packet via `cmd::ms` (`emote_mod=1` when
 the chosen emote has a pre-anim), then closes the composer so the line can play.
 
+**Quick talk (no composer).** The chat bar carries a persistent **IC input bar**:
+tapping it (or pressing Enter when idle) opens the keyboard and sends with the
+**current** emote/colour/pos via the same `cmd::ms` path — the emote is not reset
+between sends, so rapid back-and-forth needs no menus. Inline `< >` arrows on the
+bar (and ←/→ in the main view) change the emote through `cycle_emote()` without
+opening the composer. The showname is drawn as a **corner tab merged onto the
+chatbox** (sized to the name), and the chatbox/input bar are kept a contained
+width rather than stretched across the screen. The local emote thumbnails are
+warmed at courtroom entry so the composer/preview is instant when opened.
+
 **Music panel** sends `MC` for the highlighted track; **OOC panel** sends `CT`.
 
 **Rooms panel** (`CourtroomPanel::Area`, opened with **−**) lists `gs.areas[]`
@@ -291,9 +301,15 @@ panel highlights the new room immediately.
   early-outs when every sprite/scene/shout this line needs is decoded, so the
   per-frame `has_prefetch()` mutex scans don't run during steady-state chat. A
   background change (`BN`) re-arms the scene's load window.
-- **Emote thumbnails are budgeted.** The composer decodes at most a handful of
-  prefetched button images per frame, the same pattern the char-select grid uses
-  to stay inside the 16 ms frame.
+- **Emote thumbnails are warmed early and budgeted.** The local character's
+  emote-button thumbnails are prefetched at courtroom entry (queued behind the
+  scene), and the composer decodes at most a handful of prefetched buttons per
+  frame — so by the time you open it (or change emote on the bar) the art is
+  already cached. With the disk cache, a second visit is instant.
+- **Character search keeps big rosters usable.** Filtering is a case-insensitive
+  substring rebuild only when the query/roster changes; navigation and on-demand
+  icon streaming run over the filtered index list, so a 600-character server
+  stays responsive.
 - **Sprites don't reload between lines.** `APNGPlayer::load` is a no-op when asked
   for the path it already holds, and `begin_message` skips re-prefetching the
   speaker sprite when the char+emote is unchanged — so a character talking line

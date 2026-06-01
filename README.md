@@ -42,7 +42,8 @@ ferris-ao-switch implements the full AO2 client protocol so Switch players can j
 - **Server browser** — fetches the public server list from the Attorney Online master server (`https://servers.aceattorneyonline.com/servers`); master server URL is configurable in-app
 
 ### Gameplay
-- **Character select** — full grid of server character slots; grayed-out slots for taken characters
+- **Character select** — full grid of server character slots (grayed-out when taken), with **name search/filter** and mouse-wheel scrolling for big rosters
+- **Quick talk** — a tap-to-talk IC bar (tap it or press Enter to type & send instantly) with inline `< >` emote arrows; the emote isn't reset between lines, so back-and-forth is fast
 - **Room switching** — in-courtroom **Rooms** panel lists every area with live player counts, statuses and lock states (ARUP); join one to move rooms without reconnecting
 - **IC messages** — typewriter effect, word wrap, per-message text colors (12 colors), shownames, objection/hold-it/take-that popups, realization flash, screenshake
 - **Emote picker** — IC composer shows a grid of your character's emotes with sprite-button thumbnails and a live preview of the selected one
@@ -439,7 +440,13 @@ If the server places you in an area automatically (single-area servers), the Are
 | Button | Action |
 |---|---|
 | **D-pad** | Move cursor |
+| **Mouse wheel** | Scroll the grid a row at a time |
 | **A** | Select character (if not taken) |
+| **Y** / **F** | Search characters by name (system keyboard) |
+| **B** | Clear the search |
+
+Searching filters the grid to matching names — the fast way to find one on a
+600+ character server.
 
 ### Area Select
 
@@ -451,21 +458,24 @@ If the server places you in an area automatically (single-area servers), the Are
 
 ### Courtroom
 
-The stage fills the whole screen; a chat bar is overlaid across the bottom with
-the showname plate, the IC text, and a row of status buttons (IC / OOC / Music /
-Evi / Rooms) whose key hints are printed on each button. HP bars sit in the top
-corners and the now-playing track runs along the top. When nobody is talking,
-the chat bar shows the control hints so the screen is never blank.
+The stage fills the whole screen; a chat bar is overlaid across the bottom. The
+chatbox has the **showname merged in as a corner tab** (not a floating plate),
+with the incoming IC text inside and a **tap-to-talk input bar** below it that
+carries inline **`<` `>` emote arrows**. A row of status buttons (IC / OOC /
+Music / Evi / Rooms) sits to the right with key hints; HP bars are in the top
+corners and the now-playing track runs along the top.
 
 | Button | Action |
 |---|---|
-| **X** | Toggle the IC composer |
+| **X** | Toggle the IC composer (full emote grid + preview) |
 | **L** | Toggle the OOC chat panel |
 | **R** | Toggle the music panel |
 | **Y** | Toggle the evidence panel |
 | **−** (Minus) | Toggle the **Rooms** panel (switch areas) |
-| **A** | Skip the typewriter, or confirm inside the open panel |
+| **← / →** | Cycle your emote (no composer needed) |
+| **A / Enter** | Quick-talk: type & send with the current emote — or skip the typewriter / confirm in a panel |
 | **D-pad Up/Down** | Navigate / scroll the open panel |
+| **Mouse wheel** | Scroll the open panel or the IC log |
 | **B** | Close the open panel |
 | **+** | Leave the courtroom (disconnect) |
 
@@ -502,8 +512,8 @@ Everything is tappable in handheld mode (and via mouse on Ryujinx):
 | Screen | Tap |
 |---|---|
 | Connect | Tap a tab (Servers / Direct / Credits); tap a server to select, tap it again to connect; tap a Direct field to edit/connect |
-| Character select | Tap a character to highlight, tap it again to pick |
-| Courtroom | Tap a HUD button to open its panel; **tap the chat box to type a line instantly** (with the current emote/colour/position), or skip the typewriter if one is playing |
+| Character select | Tap the search bar to filter; tap a character to highlight, tap it again to pick |
+| Courtroom | **Tap the IC input bar to type a line instantly** (current emote/colour/pos); tap the **`<` `>`** arrows on it to change emote; tap a HUD button to open its panel |
 | Music / Rooms panel | Tap a row to play that track / join that room |
 | IC composer | Tap an emote to select it; tap the message box to type & send |
 | OOC panel | Tap to open the keyboard |

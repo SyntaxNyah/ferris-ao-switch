@@ -147,8 +147,10 @@ overlaid on top (see `docs/RENDERING.md` §4 for the diagram):
 |----------|-------|---------|
 | `VIEWPORT` | 1280×720 | Full-screen courtroom stage (background + sprites) |
 | `CHAT_AREA` | bottom 176 px bar | Chat bar overlay |
-| `NAMEPLATE` | inside chat bar | Showname plate |
-| `CHATBOX` | inside chat bar | IC message text box |
+| `NAMEPLATE` | chatbox corner tab | Showname (merged onto the chatbox, sized to the name) |
+| `CHATBOX` | inside chat bar | Incoming IC message text box |
+| `IC_INPUT_BAR` | below the chatbox | Tap-to-talk bar with inline `< >` emote arrows |
+| `IC_LOG` | left column | Always-on IC scrollback |
 | `HP_DEF` / `HP_PROS` | top corners | Defense / prosecution HP bars (with label chips) |
 | `MUSIC_NAME` | top centre | Now-playing strip |
 | `BTN_IC` / `BTN_OOC` / `BTN_MUSIC` / `BTN_EVIDENCE` / `BTN_AREA` | chat-bar right edge | Panel toggle buttons (show key hints; `BTN_AREA` = Rooms) |
@@ -1213,13 +1215,20 @@ char         ms_url_[256];         // master server URL (configurable)
 
 ### `src/ui/screens/char_select_screen.hpp` / `char_select_screen.cpp`
 
-8×4 grid of character slots (32 per page). Infinite pages (scroll wraps at `gs.char_count`).
+8×4 grid (32 per page) over a **filtered** view of the roster.
 
-- D-pad → navigate grid
-- A → `pick_char(selected_)`: claim it if not taken → sends `CC` → `push_screen(new CourtroomScreen(...))` (the dedicated AreaSelectScreen is currently bypassed; rooms are switched from inside the courtroom)
+- D-pad → navigate; **mouse wheel** → scroll a row at a time (`scroll_` is kept row-aligned = a multiple of `COLS`, so the grid never half-shifts)
+- A → `pick_char(real_index(selected_))`: claim if not taken → `CC` → `push_screen(new CourtroomScreen(...))` (the dedicated AreaSelectScreen is bypassed; rooms switch from inside the courtroom)
+- **Y / F / tap the search bar** → `open_search()`: system keyboard sets a name filter; **B / Esc** clears it
 - Touch → tap a cell to highlight, tap the highlighted cell to pick (shares `pick_char`)
-- Taken slots rendered dimmed; available slots show the icon (or a colored placeholder) + name
-- Character names read from `gs.characters[i].name`
+- Taken slots dimmed; available slots show the icon (or a colored placeholder) + name
+
+**Search / filtering.** The navigable list is the filtered set when a query is
+active, else every slot. `selected_`/`scroll_` are positions in that list;
+`real_index(pos)` maps a position back to the `gs.characters[]` index, and
+`vis_count()` is the navigable length. `rebuild_filter()` (case-insensitive
+substring on the name) repopulates `filt_[]` when the query or roster changes —
+essential for picking a character on 600+ roster servers.
 
 **On-demand icon streaming.** `update()` decodes prefetched icons for the
 visible + lookahead window into the `TextureCache` (budgeted per frame), and
@@ -1277,6 +1286,20 @@ open) the IC log scrollback.
 local username (and that aren't server messages) get a highlighted row + a left
 accent bar + brighter text, so you can pick out your own lines.
 
+**Chat area & quick talk (`render_chat_area`).** The chatbox is a single
+contained box (not stretched across the screen) with the **showname merged in
+as a corner tab** (sized to the name, painted over the box's top border so it
+reads as one shape — no floating plate). The incoming typewriter line is clipped
+to the box. Below it a persistent **IC input bar** is the fast-talk affordance:
+tapping it (or pressing Enter when idle) opens the keyboard and sends with the
+**current** emote/colour/pos — the emote is *not* reset between sends, so you can
+fire line after line. The bar carries inline **`<` `>` emote arrows**; Left/Right
+in the main view (no panel) also cycle the emote — both go through
+`cycle_emote()`, so changing emote never needs the composer. The IC keyboard
+opens with a fresh (empty) field each time. Own emote thumbnails are warmed at
+`on_enter` (`prefetch_emote_buttons`) so the composer grid/preview is ready when
+opened.
+
 **`CourtroomPanel` enum:** `{ None, OOC, Music, Evidence, Area, ICInput }`
 
 **Animation players (all `APNGPlayer`, all stream via `AssetManager`):**
@@ -1327,10 +1350,13 @@ actually changes (tracked in `cur_pos_`/`cur_bg_`); music only (re)plays when
 | R = RIGHTSHOULDER (C) | Toggle Music panel |
 | Y (Y) | Toggle Evidence panel |
 | − = BACK (R) | Toggle **Area/Rooms** panel |
-| A / Enter | Skip typewriter; or panel-specific confirm |
+| ← / → (no panel) | Cycle the selected emote (`cycle_emote`) |
+| A / Enter (no panel) | Skip typewriter, or quick-talk (open keyboard, send with current emote) |
+| A / Enter (panel) | Panel-specific confirm |
 | B / Esc | Close panel |
 | + / Start (P) | Disconnect → pop to ConnectScreen |
 | D-pad / arrows | Navigate active panel |
+| Mouse wheel | Scroll the focused panel / IC log |
 
 **Area/Rooms panel (`CourtroomPanel::Area`):** lists `gs.areas[]` with live
 player count / status / lock (kept current by `ARUP`). ↑/↓ move, A joins the

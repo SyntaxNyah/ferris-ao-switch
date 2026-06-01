@@ -211,6 +211,9 @@ void CourtroomScreen::on_enter() {
         cur_pos_[sizeof(cur_pos_) - 1] = '\0';
         queue_scene();
     }
+    // Warm our own emote thumbnails now (queued behind the scene), so the
+    // composer's grid/preview is already cached by the time it's opened.
+    prefetch_emote_buttons();
 }
 
 void CourtroomScreen::load_own_character() {
@@ -490,7 +493,7 @@ void CourtroomScreen::update(uint32_t dt_ms) {
         if (cid >= 0 && cid < gs.char_count && gs.characters[cid].name[0]) {
             char lc[64]; lc_copy(lc, sizeof(lc), gs.characters[cid].name);
             char p[256];
-            int budget = 6;
+            int budget = 10;   // small 40x40 PNGs; warmed at courtroom entry
             for (int i = 0; i < own_char_.emotion_count && budget > 0; ++i) {
                 std::snprintf(p, sizeof(p), "characters/%s/emotions/button%d_off.png", lc, i + 1);
                 if (!app_.tex_cache().peek(p) && AssetManager::has_prefetch(p)) {
@@ -687,49 +690,67 @@ void CourtroomScreen::render_chat_area() {
     GameState& gs = app_.state();
     const ThemeLayout& tl = app_.theme().layout();
     TextRenderer& txt = app_.text();
-
-    // Chat bar: themed chatbox image if the server provides one, otherwise a
-    // clean dark bar with a bright top edge. (romfs ships no chatbox image, so
-    // the fallback is the usual path unless a CDN serves misc/default/chatbox.)
-    if (!chatbox_tried_) {
-        chatbox_tried_ = true;
-        char p[256];
-        if (app_.theme().resolve_image("chatbox", p, sizeof(p)))
-            chatbox_tex_ = app_.tex_cache().get(r.raw(), p);
-    }
-    if (chatbox_tex_) {
-        r.draw(chatbox_tex_, nullptr, &tl.chatbox);
-    } else {
-        r.fill_rect(tl.chatbox, {8, 10, 18, 232});
-        r.fill_rect({tl.chatbox.x, tl.chatbox.y, tl.chatbox.w, 2}, {70, 100, 165, 255});
-    }
-
-    // Showname plate — sized to the name (no big empty box), sitting flush at
-    // the top-left of the chat bar with an accent line tying it to the text.
     const ICAnimState& ic = gs.ic_anim;
-    const char* display_name = (ic.showname[0] != '\0') ? ic.showname : ic.char_name;
-    if (display_name[0] != '\0') {
+    const int lh = txt.line_h() > 0 ? txt.line_h() : 20;
+
+    // Subtle full-width base so the chat controls feel grounded on the stage.
+    r.fill_rect(tl.chatbox, {8, 10, 18, 216});
+    r.fill_rect({tl.chatbox.x, tl.chatbox.y, tl.chatbox.w, 2}, {70, 100, 165, 255});
+
+    // ── Chatbox (incoming IC text) with the showname MERGED in as a corner tab ──
+    const SDL_Rect box = tl.ic_text;
+    r.fill_rect(box, {14, 16, 30, 245});
+    r.draw_rect(box, {70, 95, 150, 255});
+
+    const char* display_name = ic.showname[0] ? ic.showname : ic.char_name;
+    if (display_name[0]) {
         int pw = txt.measure_w(display_name) + 24;
         if (pw > tl.nameplate.w) pw = tl.nameplate.w;
         if (pw < 60) pw = 60;
-        SDL_Rect plate = {tl.nameplate.x, tl.nameplate.y, pw, tl.nameplate.h};
-        r.fill_rect(plate, {34, 52, 104, 240});
-        r.fill_rect({plate.x, plate.y + plate.h - 2, plate.w, 2}, {120, 160, 230, 255});
-        int ty = plate.y + (plate.h - txt.line_h()) / 2;
-        txt.draw(display_name, plate.x + 12, ty, {255, 255, 255, 255});
+        SDL_Rect tab = {tl.nameplate.x, tl.nameplate.y, pw, tl.nameplate.h};
+        r.fill_rect(tab, {40, 60, 120, 255});
+        r.draw_rect(tab, {110, 150, 220, 255});
+        // Paint over the box's top border under the tab so they read as one shape.
+        r.fill_rect({tab.x + 1, box.y - 1, tab.w - 2, 3}, {40, 60, 120, 255});
+        int nyt = tab.y + (tab.h - lh) / 2;
+        txt.draw(display_name, tab.x + 12, nyt, {255, 255, 255, 255});
     }
 
-    // IC text: render the full message to one cached texture and reveal a prefix
-    // (tw_pos_ chars) — no per-character texture churn. See draw_wrapped_upto.
+    // IC text (typewriter) inside the box, clipped so a long line can't spill out.
+    SDL_Rect tbox = {box.x + 14, box.y + 10, box.w - 28, box.h - 18};
+    SDL_RenderSetClipRect(r.raw(), &tbox);
     if (tw_pos_ > 0) {
         SDL_Color col = TEXT_COLORS[(m_color_ >= 0 && m_color_ < 10) ? m_color_ : 0];
-        txt.draw_wrapped_upto(ic.message, tl.ic_text.x, tl.ic_text.y, tl.ic_text.w,
-                              col, tw_pos_);
-    } else if (active_panel_ == CourtroomPanel::None) {
-        // Idle: show the controls so the screen is never blank or confusing.
-        txt.draw("X IC    L OOC    R Music    Y Evidence    - Rooms    + leave",
-                 tl.ic_text.x, tl.ic_text.y, {120, 132, 158, 255});
+        txt.draw_wrapped_upto(ic.message, tbox.x, tbox.y, tbox.w, col, tw_pos_);
+    } else {
+        txt.draw("(IC messages appear here)", tbox.x, tbox.y, {90, 100, 125, 255});
     }
+    SDL_RenderSetClipRect(r.raw(), nullptr);
+
+    // ── Tap-to-talk input bar with inline emote arrows (easy emote access) ──────
+    // Tap the bar (anywhere but the arrows) or press Enter to type & send with
+    // the current emote/colour/pos; < > change the emote without the composer.
+    const SDL_Rect bar = Layout::IC_INPUT_BAR;
+    r.fill_rect(bar, {16, 22, 42, 245});
+    r.draw_rect(bar, {80, 120, 190, 255});
+    int by = bar.y + (bar.h - lh) / 2;
+
+    SDL_Rect aL = {bar.x + 4,   bar.y + 4, 30, bar.h - 8};   // keep in sync w/ handle_tap
+    SDL_Rect aR = {bar.x + 214, bar.y + 4, 30, bar.h - 8};
+    r.fill_rect(aL, {30, 44, 78, 255}); r.draw_rect(aL, {90, 130, 200, 255});
+    r.fill_rect(aR, {30, 44, 78, 255}); r.draw_rect(aR, {90, 130, 200, 255});
+    txt.draw("<", aL.x + (aL.w - txt.measure_w("<")) / 2, by, {185, 215, 255, 255});
+    txt.draw(">", aR.x + (aR.w - txt.measure_w(">")) / 2, by, {185, 215, 255, 255});
+    const char* em = (own_loaded_ && own_char_.emotion_count > 0 &&
+                      ic_emote_sel_ >= 0 && ic_emote_sel_ < own_char_.emotion_count)
+                     ? own_char_.emotions[ic_emote_sel_].name : "normal";
+    char emn[24];
+    std::snprintf(emn, sizeof(emn), "%.14s", em);
+    txt.draw(emn, aL.x + aL.w + 8, by, {150, 200, 255, 255});
+
+    const char* shown = ic_text_[0] ? ic_text_ : "Tap here or Enter to talk...";
+    txt.draw(shown, aR.x + aR.w + 12, by,
+             ic_text_[0] ? SDL_Color{225, 225, 235, 255} : SDL_Color{120, 128, 150, 255});
 }
 
 // Top/bottom HUD overlaid on the full-screen stage: HP bars in the top
@@ -1021,7 +1042,7 @@ void CourtroomScreen::compose_and_send() {
 
     char text[256] = {};
     kb_active_ = true;
-    bool ok = show_keyboard("IC message", ic_text_, text, sizeof(text));
+    bool ok = show_keyboard("IC message", "", text, sizeof(text));  // fresh field each time
     kb_active_ = false;
     if (!ok || !text[0]) return;
     std::strncpy(ic_text_, text, sizeof(ic_text_) - 1);
@@ -1095,6 +1116,14 @@ void CourtroomScreen::compose_ooc() {
     }
 }
 
+void CourtroomScreen::cycle_emote(int dir) {
+    if (!own_loaded_) load_own_character();
+    int n = own_char_.emotion_count;
+    if (n <= 0) return;
+    ic_emote_sel_ = (ic_emote_sel_ + dir + n) % n;
+    ic_buttons_dirty_ = true;   // warm the new emote's preview button
+}
+
 // ── Touch ───────────────────────────────────────────────────────────────────────
 
 void CourtroomScreen::handle_tap(int x, int y) {
@@ -1115,8 +1144,18 @@ void CourtroomScreen::handle_tap(int x, int y) {
         return;
     }
 
-    // Tapping the chat bar skips the typewriter, or (when idle) opens the
-    // keyboard to send a line immediately with the current emote/colour/pos.
+    // IC input bar: < > change emote; anywhere else opens the keyboard to talk.
+    {
+        const SDL_Rect bar = Layout::IC_INPUT_BAR;   // arrow rects in sync w/ render
+        SDL_Rect aL = {bar.x + 4,   bar.y + 4, 30, bar.h - 8};
+        SDL_Rect aR = {bar.x + 214, bar.y + 4, 30, bar.h - 8};
+        if (pt_in(x, y, aL)) { cycle_emote(-1); return; }
+        if (pt_in(x, y, aR)) { cycle_emote(+1); return; }
+        if (pt_in(x, y, bar)) { compose_and_send(); return; }
+    }
+
+    // Tapping the rest of the chat bar skips the typewriter, or (when idle)
+    // opens the keyboard to send a line with the current emote/colour/pos.
     if (pt_in(x, y, tl.chatbox) || pt_in(x, y, tl.nameplate)) {
         if (phase_ == Phase::Talking && tw_pos_ < tw_max_) tw_pos_ = tw_max_;
         else                                               compose_and_send();
@@ -1278,8 +1317,14 @@ void CourtroomScreen::handle_event(const SDL_Event& e) {
 
     switch (active_panel_) {
         case CourtroomPanel::None:
-            if (act == Confirm) tw_pos_ = tw_max_; // skip typewriter
-            if (act == Back)    app_.pop_screen();
+            if (act == Left)  cycle_emote(-1);   // change emote without the composer
+            if (act == Right) cycle_emote(+1);
+            if (act == Confirm) {
+                // Skip the typewriter if one is playing; otherwise quick-talk.
+                if (phase_ == Phase::Talking && tw_pos_ < tw_max_) tw_pos_ = tw_max_;
+                else compose_and_send();
+            }
+            if (act == Back) app_.pop_screen();
             break;
 
         case CourtroomPanel::Music:
@@ -1311,15 +1356,8 @@ void CourtroomScreen::handle_event(const SDL_Event& e) {
             break;
 
         case CourtroomPanel::ICInput:
-            if (!own_loaded_) load_own_character();
-            if (act == Left  && own_char_.emotion_count > 0) {
-                ic_emote_sel_ = (ic_emote_sel_ - 1 + own_char_.emotion_count) % own_char_.emotion_count;
-                ic_buttons_dirty_ = true;
-            }
-            if (act == Right && own_char_.emotion_count > 0) {
-                ic_emote_sel_ = (ic_emote_sel_ + 1) % own_char_.emotion_count;
-                ic_buttons_dirty_ = true;
-            }
+            if (act == Left)  cycle_emote(-1);
+            if (act == Right) cycle_emote(+1);
             if (act == Up)   ic_color_ = (ic_color_ + 1) % 10;
             if (act == Down) ic_color_ = (ic_color_ + 9) % 10;
             if (act == Back) active_panel_ = CourtroomPanel::None;
