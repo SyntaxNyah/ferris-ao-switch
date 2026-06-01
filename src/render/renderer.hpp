@@ -57,7 +57,7 @@ namespace Layout {
     inline constexpr int CHAT_Y = H - CHAT_H;                      // 544
     inline constexpr SDL_Rect CHAT_AREA     = {0, CHAT_Y, W, CHAT_H};
     inline constexpr SDL_Rect NAMEPLATE     = {28, CHAT_Y + 10, 380, 40};
-    inline constexpr SDL_Rect CHATBOX       = {36, CHAT_Y + 60, 852, 104}; // IC text box
+    inline constexpr SDL_Rect CHATBOX       = {36, CHAT_Y + 60, 808, 104}; // IC text box
 
     // HP bars over the top corners (each gets an inline label chip when drawn).
     inline constexpr SDL_Rect HP_DEF        = {28, 46, 330, 26};
@@ -66,15 +66,17 @@ namespace Layout {
     // Now-playing music strip, centred along the top.
     inline constexpr SDL_Rect MUSIC_NAME    = {400, 44, W - 800, 30};
 
-    // Action buttons: a row anchored to the right edge of the chat bar. Tall
-    // enough for a two-line label (function + control-key hint) at 20pt.
-    inline constexpr int BTN_W = 84, BTN_H = 64;
-    inline constexpr int BTN_Y = CHAT_Y + 50;
-    inline constexpr int BTN_X0 = W - 20 - (BTN_W * 4 + 8 * 3);   // 900
-    inline constexpr SDL_Rect BTN_IC        = {BTN_X0,                  BTN_Y, BTN_W, BTN_H};
-    inline constexpr SDL_Rect BTN_OOC       = {BTN_X0 + (BTN_W + 8) * 1, BTN_Y, BTN_W, BTN_H};
-    inline constexpr SDL_Rect BTN_MUSIC     = {BTN_X0 + (BTN_W + 8) * 2, BTN_Y, BTN_W, BTN_H};
-    inline constexpr SDL_Rect BTN_EVIDENCE  = {BTN_X0 + (BTN_W + 8) * 3, BTN_Y, BTN_W, BTN_H};
+    // Action buttons: a row of five anchored to the right edge of the chat bar.
+    // Tall enough for a two-line label (function + control-key hint) at 20pt.
+    inline constexpr int BTN_W = 76, BTN_H = 64, BTN_GAP = 6;
+    inline constexpr int BTN_Y  = CHAT_Y + 50;
+    inline constexpr int BTN_DX = BTN_W + BTN_GAP;
+    inline constexpr int BTN_X0 = W - 20 - (BTN_W * 5 + BTN_GAP * 4);   // 856
+    inline constexpr SDL_Rect BTN_IC        = {BTN_X0,             BTN_Y, BTN_W, BTN_H};
+    inline constexpr SDL_Rect BTN_OOC       = {BTN_X0 + BTN_DX * 1, BTN_Y, BTN_W, BTN_H};
+    inline constexpr SDL_Rect BTN_MUSIC     = {BTN_X0 + BTN_DX * 2, BTN_Y, BTN_W, BTN_H};
+    inline constexpr SDL_Rect BTN_EVIDENCE  = {BTN_X0 + BTN_DX * 3, BTN_Y, BTN_W, BTN_H};
+    inline constexpr SDL_Rect BTN_AREA      = {BTN_X0 + BTN_DX * 4, BTN_Y, BTN_W, BTN_H};
 
     // Side/log area — retained so theme-file panel derivation has a sane base;
     // it is no longer painted as an opaque block.
@@ -85,8 +87,8 @@ namespace Layout {
     inline constexpr SDL_Rect PANEL_MUSIC    = {W - 520, 0, 520, H};
     inline constexpr SDL_Rect PANEL_EVIDENCE = {W - 520, 0, 520, H};
 
-    // IC composer modal (centred).
-    inline constexpr SDL_Rect IC_COMPOSER    = {240, 168, 800, 384};
+    // IC composer modal (centred) — holds the emote grid + sprite preview.
+    inline constexpr SDL_Rect IC_COMPOSER    = {180, 96, 920, 528};
 }
 
 } // namespace ao

@@ -220,8 +220,10 @@ full-screen AO composition**, not the old boxed-in look:
   `CHATBOX` (IC text) sit inside it, the button row hugs its right edge.
 - HP bars get inline dark **label chips** (`DEF`/`PRO`) and the now-playing
   strip its own dark backing, so the HUD stays legible over any background.
-- Each action button prints its control-key hint (`X`/`ZL`/`ZR`/`Y`) and
-  highlights when its panel is open.
+- The button row has five toggles — **IC** (`X`), **OOC** (`L`), **Music**
+  (`R`), **Evi** (`Y`), **Rooms** (`−`) — each printing its control-key hint and
+  highlighting when its panel is open. (The courtroom reads raw controller
+  buttons, so OOC/Music are the shoulder buttons `L`/`R` and Rooms is `−`/BACK.)
 
 ### Theme files
 
@@ -235,12 +237,47 @@ image (`<theme>/chatbox`) is drawn over the chat bar when present.
 
 ---
 
-## 5. Sending messages
+## 5. Sending messages, switching rooms
 
-The IC composer (`CourtroomPanel::ICInput`, opened with **X**) is a centred
-modal that reads the local player's `char.ini` (`load_char_ini`) to list their
-emotes. ←/→ cycle emote, ↑/↓ cycle text colour (shown live as a swatch), and a
-preview of the typed line is displayed. **A** opens the system keyboard and on
+**IC composer** (`CourtroomPanel::ICInput`, opened with **X**) — a centred modal
+that reads the local player's `char.ini` (`load_char_ini`) and shows a **grid of
+their emotes**: each cell is the emote name plus its `emotions/button<N>_off.png`
+thumbnail, and the selected cell uses `button<N>_on.png` with a larger preview
+beside the grid. Those thumbnails are warmed exactly like the char-select icons
+— `prefetch_emote_buttons()` queues them on the `AssetStream` workers, `update()`
+decodes a few per frame, and the render path only ever `peek()`s the texture
+cache, so opening the composer never blocks. D-pad ←/→ move through the grid,
+↑/↓ cycle text colour (live swatch), and **A** opens the system keyboard and on
 confirm builds the 26-field client `MS` packet via `cmd::ms` (`emote_mod=1` when
 the chosen emote has a pre-anim), then closes the composer so the line can play.
-The Music panel sends `MC` for the highlighted track; the OOC panel sends `CT`.
+
+**Music panel** sends `MC` for the highlighted track; **OOC panel** sends `CT`.
+
+**Rooms panel** (`CourtroomPanel::Area`, opened with **−**) lists `gs.areas[]`
+with the live player count / status / lock state that `ARUP` keeps current.
+Joining an area reuses the **`MC`** packet — `cmd::mc(buf, sz,
+gs.areas[sel].name, char_id, username)` — because AO2 servers treat a
+music-change whose name matches an area as an area-join (this is exactly what
+webAO does); the server then re-sends `BN`/`HP`/charscheck for the new room and
+the courtroom updates itself. `gs.my_area_idx` is set optimistically so the
+panel highlights the new room immediately.
+
+---
+
+## 6. Performance notes (real-time chat)
+
+- **Typewriter renders one texture per message, not per character.**
+  `TextRenderer::draw_wrapped_upto(full_message, …, reveal)` rasterises the whole
+  IC line into a single cached texture once and blits a growing prefix of it. The
+  earlier code rendered the growing substring every 35 ms step, creating and
+  destroying a texture per character *and* evicting the rest of the UI text from
+  the 32-slot LRU (so shownames, buttons, music names, etc. re-rasterised every
+  frame). A small `wrap_*` cache holds the line offsets and is recomputed only
+  when the message or wrap width changes, so each frame's reveal is O(1).
+- **Asset probing stops once a message is fully loaded.** `resolve_assets()`
+  early-outs when every sprite/scene/shout this line needs is decoded, so the
+  per-frame `has_prefetch()` mutex scans don't run during steady-state chat. A
+  background change (`BN`) re-arms the scene's load window.
+- **Emote thumbnails are budgeted.** The composer decodes at most a handful of
+  prefetched button images per frame, the same pattern the char-select grid uses
+  to stay inside the 16 ms frame.

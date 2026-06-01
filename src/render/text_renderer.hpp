@@ -31,6 +31,16 @@ public:
     // Returns total height used (may be multiple lines), 0 on failure.
     int draw_wrapped(const char* text, int x, int y, int max_w, SDL_Color color);
 
+    // Typewriter helper: draw the first `reveal` characters of `text`, wrapped to
+    // max_w, using the layout of the FULL string. The full string is rendered to a
+    // single cached texture exactly once and a growing prefix is blitted from it —
+    // so a typing animation costs one texture, not one per character (the old
+    // growing-substring path created/destroyed a texture every step and thrashed
+    // the text cache, forcing all other UI text to re-render every frame).
+    // Returns the height used so far, 0 on failure.
+    int draw_wrapped_upto(const char* text, int x, int y, int max_w,
+                          SDL_Color color, int reveal);
+
     // Measure single-line text width without rendering (no cache).
     int measure_w(const char* text);
 
@@ -43,6 +53,10 @@ private:
     SDL_Texture* render_to_tex(const char* text, SDL_Color color, int max_w,
                                 int* out_w, int* out_h);
     int          lru_victim() const;
+
+    // Recompute wrap_starts_ (char index where each wrapped line begins) for the
+    // given text+width, unless it matches the last computation (cheap on repeat).
+    void ensure_wrap(const char* text, int max_w);
 
     SDL_Renderer* renderer_ = nullptr;
     TTF_Font*     font_     = nullptr;
@@ -63,6 +77,14 @@ private:
 
     Entry cache_[CACHE_SIZE] = {};
     int   frame_ = 0;
+
+    // Wrap cache for draw_wrapped_upto — recomputed only when the text or width
+    // changes, so progressive reveal is O(1) per frame.
+    static constexpr int MAX_WRAP_LINES = 32;
+    char wrap_text_[513]      = {};
+    int  wrap_max_w_          = -1;
+    int  wrap_starts_[MAX_WRAP_LINES] = {};
+    int  wrap_count_          = 0;
 };
 
 } // namespace ao

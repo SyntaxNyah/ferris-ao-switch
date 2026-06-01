@@ -29,6 +29,7 @@ void ThemeManager::reset_to_defaults() {
     layout_.btn_ooc         = Layout::BTN_OOC;
     layout_.btn_music       = Layout::BTN_MUSIC;
     layout_.btn_evidence    = Layout::BTN_EVIDENCE;
+    layout_.btn_area        = Layout::BTN_AREA;
     layout_.panel_ooc       = Layout::PANEL_OOC;
     layout_.panel_music     = Layout::PANEL_MUSIC;
     layout_.panel_evidence  = Layout::PANEL_EVIDENCE;
@@ -239,11 +240,12 @@ void ThemeManager::scale_layout(float sx, float sy) {
 
     // Buttons: stacked at the bottom-right of the log panel
     int bx = layout_.log.x + layout_.log.w - 80;
-    int by = layout_.log.y + layout_.log.h - 176;
+    int by = layout_.log.y + layout_.log.h - 220;
     layout_.btn_ic       = {bx, by,       76, 36};
     layout_.btn_ooc      = {bx, by + 44,  76, 36};
     layout_.btn_music    = {bx, by + 88,  76, 36};
     layout_.btn_evidence = {bx, by + 132, 76, 36};
+    layout_.btn_area     = {bx, by + 176, 76, 36};
 }
 
 // ── load ──────────────────────────────────────────────────────────────────────

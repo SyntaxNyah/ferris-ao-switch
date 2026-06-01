@@ -43,8 +43,9 @@ ferris-ao-switch implements the full AO2 client protocol so Switch players can j
 
 ### Gameplay
 - **Character select** — full grid of server character slots; grayed-out slots for taken characters
-- **Area select** — scrollable list with live player counts, statuses, CM labels, and lock states via ARUP
+- **Room switching** — in-courtroom **Rooms** panel lists every area with live player counts, statuses and lock states (ARUP); join one to move rooms without reconnecting
 - **IC messages** — typewriter effect, word wrap, per-message text colors (12 colors), shownames, objection/hold-it/take-that popups, realization flash, screenshake
+- **Emote picker** — IC composer shows a grid of your character's emotes with sprite-button thumbnails and a live preview of the selected one
 - **Pairing** — renders two characters side by side with individual offsets and flip states
 - **Evidence panel** — view, present, add, edit, and delete evidence; grid view with thumbnails
 - **Music panel** — full server music list; select and play any track; shows currently playing track
@@ -58,7 +59,7 @@ ferris-ao-switch implements the full AO2 client protocol so Switch players can j
 - **Four-tier fallback** — server CDN → community CDN (`attorneyoffline.de/base/`) → `sdmc:/switch/ferris-ao/base/` local pack → `romfs:/` bundled fallback
 - **Local base optional** — the SD card base folder is only needed on servers without a CDN
 - **APNG + GIF animations** — character idle, talk, and pre-animations via `IMG_LoadAnimation_RW()`
-- **LRU texture cache** — 64-slot cache; all lookups use relative paths as keys, regardless of source
+- **LRU texture cache** — 256-slot cache; all lookups use relative paths as keys, regardless of source
 - **Background pre-fetcher** — `AssetStream` thread pre-loads upcoming assets into memory before the render loop needs them
 - **1280×720 layout** — matches Switch native resolution in both docked and handheld modes; full-screen courtroom stage with an overlaid chat bar, corner HP bars, and a now-playing strip (authentic AO composition, themeable via `courtroom_design.ini`)
 
@@ -448,30 +449,44 @@ If the server places you in an area automatically (single-area servers), the Are
 
 The stage fills the whole screen; a chat bar is overlaid across the bottom with
 the showname plate, the IC text, and a row of status buttons (IC / OOC / Music /
-Evi) whose key hints are printed on each button. HP bars sit in the top corners
-and the now-playing track runs along the top. When nobody is talking, the chat
-bar shows the control hints so the screen is never blank.
+Evi / Rooms) whose key hints are printed on each button. HP bars sit in the top
+corners and the now-playing track runs along the top. When nobody is talking,
+the chat bar shows the control hints so the screen is never blank.
 
 | Button | Action |
 |---|---|
 | **X** | Toggle the IC composer |
-| **ZL** | Toggle the OOC chat panel |
-| **ZR** | Toggle the music panel |
+| **L** | Toggle the OOC chat panel |
+| **R** | Toggle the music panel |
 | **Y** | Toggle the evidence panel |
+| **−** (Minus) | Toggle the **Rooms** panel (switch areas) |
 | **A** | Skip the typewriter, or confirm inside the open panel |
 | **D-pad Up/Down** | Navigate / scroll the open panel |
 | **B** | Close the open panel |
 | **+** | Leave the courtroom (disconnect) |
 
+Keyboard equivalents: `X` IC, `Z` OOC, `C` Music, `Y` Evidence, `R` Rooms,
+`P` leave, arrows/Enter/Esc for navigate/confirm/back.
+
+### Rooms panel (switching areas)
+
+Open with **−** (Minus) / `R`. Lists every area the server advertised with its
+live player count, status (`IDLE`/`CASING`/…) and a `[LOCKED]` marker; your
+current room is highlighted. **Up/Down** to move, **A** to join (the client
+sends the AO2 area-join and the server swaps your background, HP and roster),
+**B** to close.
+
 ### IC Input (composer overlay)
 
-Opened with **X**. Shows the selected emote, the text colour (with a live
-swatch), the position, and a preview of your message. It closes itself after a
-line is sent so you can watch it play.
+Opened with **X**. Shows a grid of your character's emotes (with sprite-button
+thumbnails when the server provides them), a larger preview of the selected
+emote, the text colour with a live swatch, your position, and a preview of the
+typed message. It closes itself after a line is sent so you can watch it play.
+Thumbnails stream in the background, so opening it never stalls the courtroom.
 
 | Button | Action |
 |---|---|
-| **D-pad Left/Right** | Cycle your emote (from your `char.ini`) |
+| **D-pad Left/Right** | Move through the emote grid (from your `char.ini`) |
 | **D-pad Up/Down** | Cycle the text colour |
 | **A** | Open the system keyboard, then type and send the line |
 | **B** / **X** | Close the composer |
@@ -683,7 +698,7 @@ Pull requests are welcome. Before contributing:
 - No settings persistence — host/port/username reset on each launch; a `sdmc:/switch/ferris-ao/config.ini` save/load pass is planned
 - No touch input — the on-screen courtroom buttons are status indicators only; use the mapped buttons (handheld touch is a possible future addition)
 - Evidence can be viewed but not yet attached to an outgoing IC message from the UI
-- Character Select enters the courtroom directly; the dedicated Area Select screen is not in the active flow yet
+- Switch rooms from inside the courtroom via the **Rooms** panel (`−`); the separate Area Select screen pushed before the courtroom is currently bypassed (Character Select enters the courtroom directly)
 
 ---
 

@@ -132,4 +132,100 @@ int TextRenderer::measure_w(const char* text) {
     return w;
 }
 
+// ── Progressive reveal (typewriter) ──────────────────────────────────────────────
+
+void TextRenderer::ensure_wrap(const char* text, int max_w) {
+    if (max_w == wrap_max_w_ &&
+        std::strncmp(text, wrap_text_, sizeof(wrap_text_) - 1) == 0)
+        return;  // already computed for this exact text + width
+
+    std::strncpy(wrap_text_, text, sizeof(wrap_text_) - 1);
+    wrap_text_[sizeof(wrap_text_) - 1] = '\0';
+    wrap_max_w_ = max_w;
+    wrap_count_ = 0;
+    wrap_starts_[wrap_count_++] = 0;
+
+    const int n = (int)std::strlen(text);
+    char buf[600];
+    int line_start = 0;
+    int i = 0;
+    while (i < n && wrap_count_ < MAX_WRAP_LINES) {
+        // Next word spans [i, we).
+        int we = i;
+        while (we < n && text[we] != ' ' && text[we] != '\n') ++we;
+
+        // Does the line so far plus this word still fit?
+        int seg = we - line_start;
+        if (seg > (int)sizeof(buf) - 1) seg = (int)sizeof(buf) - 1;
+        std::memcpy(buf, text + line_start, seg);
+        buf[seg] = '\0';
+        bool fits = (max_w <= 0) || measure_w(buf) <= max_w;
+
+        if (!fits && i > line_start) {
+            // Break before this word — it starts the next line.
+            line_start = i;
+            wrap_starts_[wrap_count_++] = line_start;
+            continue;  // re-measure the word on its fresh line
+        }
+
+        i = we;
+        while (i < n && text[i] == ' ') ++i;      // consume trailing spaces
+        if (we < n && text[we] == '\n') {          // explicit hard break
+            i = we + 1;
+            line_start = i;
+            if (wrap_count_ < MAX_WRAP_LINES) wrap_starts_[wrap_count_++] = line_start;
+        }
+    }
+}
+
+int TextRenderer::draw_wrapped_upto(const char* text, int x, int y, int max_w,
+                                    SDL_Color color, int reveal) {
+    if (!font_ || !text || text[0] == '\0' || reveal <= 0) return 0;
+
+    int w = 0, h = 0;
+    SDL_Texture* tex = get_cached(text, color, max_w, &w, &h);  // full string, cached
+    if (!tex) return 0;
+
+    const int n = (int)std::strlen(text);
+    if (reveal >= n) {                                          // fully revealed
+        SDL_Rect dst = {x, y, w, h};
+        SDL_RenderCopy(renderer_, tex, nullptr, &dst);
+        return h;
+    }
+
+    ensure_wrap(text, max_w);
+    const int ls = line_h_ > 0 ? line_h_ : 1;
+
+    // Current line = last wrap start that is at or before the last revealed char.
+    int L = 0;
+    for (int k = 1; k < wrap_count_; ++k) {
+        if (wrap_starts_[k] <= reveal - 1) L = k; else break;
+    }
+
+    // Fully revealed lines [0, L) blit as one block.
+    if (L > 0) {
+        int bh = L * ls; if (bh > h) bh = h;
+        SDL_Rect src = {0, 0, w, bh};
+        SDL_Rect dst = {x, y, w, bh};
+        SDL_RenderCopy(renderer_, tex, &src, &dst);
+    }
+
+    // Partial current line L: reveal up to (reveal - line_start) chars.
+    int lstart = wrap_starts_[L];
+    int count  = reveal - lstart; if (count < 0) count = 0;
+    char buf[600];
+    int seg = count; if (seg > (int)sizeof(buf) - 1) seg = (int)sizeof(buf) - 1;
+    std::memcpy(buf, text + lstart, seg);
+    buf[seg] = '\0';
+    int pw = measure_w(buf); if (pw > w) pw = w;
+    int sy = L * ls;
+    int sh = ls; if (sy + sh > h) sh = h - sy;
+    if (pw > 0 && sh > 0) {
+        SDL_Rect src = {0, sy, pw, sh};
+        SDL_Rect dst = {x, y + sy, pw, sh};
+        SDL_RenderCopy(renderer_, tex, &src, &dst);
+    }
+    return (L + 1) * ls;
+}
+
 } // namespace ao

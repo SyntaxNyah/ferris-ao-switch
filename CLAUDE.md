@@ -151,7 +151,7 @@ overlaid on top (see `docs/RENDERING.md` §4 for the diagram):
 | `CHATBOX` | inside chat bar | IC message text box |
 | `HP_DEF` / `HP_PROS` | top corners | Defense / prosecution HP bars (with label chips) |
 | `MUSIC_NAME` | top centre | Now-playing strip |
-| `BTN_IC` / `BTN_OOC` / `BTN_MUSIC` / `BTN_EVIDENCE` | chat-bar right edge | Panel toggle buttons (show key hints) |
+| `BTN_IC` / `BTN_OOC` / `BTN_MUSIC` / `BTN_EVIDENCE` / `BTN_AREA` | chat-bar right edge | Panel toggle buttons (show key hints; `BTN_AREA` = Rooms) |
 | `SIDE_PANEL` | right strip | Base rect for theme-file panel derivation (not painted) |
 | `PANEL_OOC` / `PANEL_MUSIC` / `PANEL_EVIDENCE` | right 40% overlay | OOC / music / evidence panels |
 | `IC_COMPOSER` | centred modal | IC composer overlay |
@@ -185,6 +185,13 @@ int  draw(const char* text, int x, int y, SDL_Color color);
 int  draw_wrapped(const char* text, int x, int y, int max_w, SDL_Color color);
     // Word-wrapped within max_w pixels. Returns total height used.
 
+int  draw_wrapped_upto(const char* text, int x, int y, int max_w,
+                       SDL_Color color, int reveal);
+    // Typewriter: render the FULL string to one cached texture (created once)
+    // and blit the first `reveal` characters from it, using the full string's
+    // wrap layout. One texture per message instead of one per character — see
+    // the performance note below.
+
 int  measure_w(const char* text);
     // Single-line pixel width without rendering (TTF_SizeUTF8, no cache).
 
@@ -200,7 +207,12 @@ bool ready() const;
 - Cache key: `(text, color RGBA, max_w)` — same text at different wrap widths gets separate entries
 - LRU eviction: `frame_` increments on every `get_cached` call; victim = entry with the lowest `lru` value
 - On eviction: `SDL_DestroyTexture(old_tex)` before overwriting the slot
-- During IC typewriter animation each in-progress frame produces a unique key; the 32-slot LRU evicts stale entries automatically without any special handling
+- The IC typewriter uses `draw_wrapped_upto`, which renders the **full** message
+  once (one stable cache key) and reveals a prefix from it. The old approach
+  rendered the growing substring every step — a new texture per character that
+  also thrashed the 32-slot LRU, forcing every other UI string to re-render each
+  frame. A separate `wrap_*` cache stores the wrapped line offsets and is
+  recomputed only when the text/width changes, so reveal is O(1) per frame.
 
 **Rendering backend:**
 - Single-line: `TTF_RenderUTF8_Blended` → `SDL_CreateTextureFromSurface`
@@ -211,7 +223,7 @@ bool ready() const;
 | UI element | Method | Source field |
 |---|---|---|
 | Showname / character name | `draw()` | `gs.ic_anim.showname` or `.char_name` |
-| IC message text (typewriter) | `draw_wrapped()` | `ic.message` substring of `typewriter_pos_` chars |
+| IC message text (typewriter) | `draw_wrapped_upto()` | full `ic.message`, revealing `tw_pos_` chars |
 | OOC entry header | `draw()` | `ce.name` formatted as `[name]` |
 | OOC entry body | `draw_wrapped()` | `ce.message` |
 | Music track name | `draw()` | `gs.music_list[i]` |
@@ -1220,24 +1232,37 @@ width (pairing draws the partner behind the speaker). Layer order:
 actually changes (tracked in `cur_pos_`/`cur_bg_`); music only (re)plays when
 `gs.current_music` changes (tracked in `cur_music_`).
 
-**Controller / keyboard mapping:**
+**Controller / keyboard mapping:** the courtroom reads raw `SDL_CONTROLLERBUTTONDOWN`
+/ `SDL_KEYDOWN` (not `InputManager`), so these are the literal button enums.
 
 | Button (key) | Action |
 |--------------|--------|
-| ZL (Z) | Toggle OOC panel |
-| ZR (C) | Toggle Music panel |
-| Y (Y) | Toggle Evidence panel |
 | X (X) | Toggle IC composer |
+| L = LEFTSHOULDER (Z) | Toggle OOC panel |
+| R = RIGHTSHOULDER (C) | Toggle Music panel |
+| Y (Y) | Toggle Evidence panel |
+| − = BACK (R) | Toggle **Area/Rooms** panel |
 | A / Enter | Skip typewriter; or panel-specific confirm |
 | B / Esc | Close panel |
 | + / Start (P) | Disconnect → pop to ConnectScreen |
 | D-pad / arrows | Navigate active panel |
 
-**IC composer (ICInput panel):** D-pad ←/→ cycle the player's own emotes (read
-from their `char.ini` via `load_char_ini`), ↑/↓ cycle text colour, A opens the
-system keyboard and on confirm builds + sends the 26-field `MS` packet via
-`cmd::ms`. **Music panel:** A sends `MC` for the highlighted track.
-**OOC panel:** A opens the keyboard and sends `CT`.
+**Area/Rooms panel (`CourtroomPanel::Area`):** lists `gs.areas[]` with live
+player count / status / lock (kept current by `ARUP`). ↑/↓ move, A joins the
+selected area. **Switching areas reuses the `MC` packet** — `cmd::mc(buf, sz,
+gs.areas[sel].name, char_id, username)` — exactly as AO2/webAO do: the server
+treats a music-change whose name matches an area as an area-join and follows up
+with `BN`/`HP`/charscheck. `gs.my_area_idx` is updated optimistically.
+
+**IC composer (ICInput panel):** a centred modal showing a **grid of the
+player's emotes** (names + `emotions/button<N>_{on,off}.png` thumbnails, warmed
+via prefetch + `peek()` like the char-select grid — never blocks) and a larger
+**sprite preview** of the selected emote. D-pad ←/→ move through the emote grid
+(read from `char.ini` via `load_char_ini`), ↑/↓ cycle text colour (shown as a
+live swatch), A opens the system keyboard and on confirm builds + sends the
+26-field `MS` packet via `cmd::ms`, then closes the composer. **Music panel:**
+A sends `MC` for the highlighted track. **OOC panel:** A opens the keyboard and
+sends `CT`.
 
 **Text colours (`TEXT_COLORS[10]`, AO2 canonical 0–9):** white, green, red,
 orange, blue, yellow, pink, cyan, grey, rainbow (rainbow renders as white).
@@ -1406,9 +1431,11 @@ struct ThemeLayout {
     SDL_Rect hp_pro;         // Prosecution HP bar
     SDL_Rect log;            // OOC log scrollback area (side panel)
     SDL_Rect music_name;     // Currently playing music name strip
+    SDL_Rect btn_ic;         // IC composer toggle button
     SDL_Rect btn_ooc;        // OOC toggle button
     SDL_Rect btn_music;      // Music toggle button
     SDL_Rect btn_evidence;   // Evidence toggle button
+    SDL_Rect btn_area;       // Rooms/area toggle button
     SDL_Rect panel_ooc;      // OOC overlay panel
     SDL_Rect panel_music;    // Music overlay panel
     SDL_Rect panel_evidence; // Evidence overlay panel

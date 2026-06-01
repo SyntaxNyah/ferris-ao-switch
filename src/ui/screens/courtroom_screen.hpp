@@ -6,7 +6,7 @@
 
 namespace ao {
 
-enum class CourtroomPanel { None, OOC, Music, Evidence, ICInput };
+enum class CourtroomPanel { None, OOC, Music, Evidence, Area, ICInput };
 
 // Main gameplay screen. Renders the AO2 courtroom in real time: streamed
 // backgrounds, desks, character idle/talk sprites, pre-animations, shout
@@ -136,15 +136,25 @@ private:
     int music_scroll_ = 0;
     int music_sel_    = 0;
     int evi_scroll_   = 0;
+    int area_scroll_  = 0;
+    int area_sel_     = 0;
 
     // ── IC composer state (own character) ─────────────────────────────────
     CharDef own_char_;
     bool    own_loaded_  = false;
     int     ic_emote_sel_= 0;
+    int     ic_emote_scroll_ = 0;  // top row of the emote grid
+    bool    ic_buttons_dirty_ = true; // re-queue emote-button prefetch on open/move
     int     ic_color_    = 0;
     char    ic_pos_[16]  = "wit";
     char    ic_text_[256]= {};
     bool    kb_active_   = false;
+
+    // IC composer emote preview: warm the selected emote's button thumbnail into
+    // the texture cache without blocking the render loop (prefetch + peek, like
+    // the character-select grid). Returns the cached texture or nullptr.
+    void         prefetch_emote_buttons();          // queue visible/selected buttons
+    SDL_Texture* emote_button_tex(int emote_idx, bool on) const; // peek-only
 };
 
 } // namespace ao

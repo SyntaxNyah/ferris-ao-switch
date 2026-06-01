@@ -29,6 +29,7 @@ struct ThemeLayout {
     SDL_Rect btn_ooc;
     SDL_Rect btn_music;
     SDL_Rect btn_evidence;
+    SDL_Rect btn_area;
 
     // ── Overlay panels (full-width, slide over courtroom) ──────────────────────
     SDL_Rect panel_ooc;

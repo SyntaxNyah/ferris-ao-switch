@@ -215,12 +215,49 @@ void CourtroomScreen::load_own_character() {
     own_loaded_ = load_char_ini(gs.characters[cid].name, own_char_);
 }
 
+// ── IC composer emote thumbnails (AO2 emotions/button<N>_{on,off}.png) ──────────
+// Queue the player's emote-button thumbnails for background prefetch so the
+// composer grid/preview can show real sprite art without the render loop ever
+// blocking on a network fetch. Off-state for every emote, plus the selected
+// emote's on-state. has_prefetch()/peek() guards keep this from re-queueing
+// already-resolved buttons.
+void CourtroomScreen::prefetch_emote_buttons() {
+    if (!own_loaded_ || own_char_.emotion_count <= 0) return;
+    GameState& gs = app_.state();
+    int cid = gs.my_char_id;
+    if (cid < 0 || cid >= gs.char_count || !gs.characters[cid].name[0]) return;
+    char lc[64]; lc_copy(lc, sizeof(lc), gs.characters[cid].name);
+    AssetStream& s = app_.asset_stream();
+    char p[256];
+    for (int i = 0; i < own_char_.emotion_count; ++i) {
+        std::snprintf(p, sizeof(p), "characters/%s/emotions/button%d_off.png", lc, i + 1);
+        if (!AssetManager::has_prefetch(p) && !app_.tex_cache().peek(p)) s.prefetch(p);
+    }
+    std::snprintf(p, sizeof(p), "characters/%s/emotions/button%d_on.png",
+                  lc, ic_emote_sel_ + 1);
+    if (!AssetManager::has_prefetch(p) && !app_.tex_cache().peek(p)) s.prefetch(p);
+}
+
+// Peek-only: returns the cached emote-button texture, or nullptr if it hasn't
+// been decoded yet (never triggers a blocking load).
+SDL_Texture* CourtroomScreen::emote_button_tex(int emote_idx, bool on) const {
+    GameState& gs = app_.state();
+    int cid = gs.my_char_id;
+    if (cid < 0 || cid >= gs.char_count || !gs.characters[cid].name[0]) return nullptr;
+    char lc[64]; lc_copy(lc, sizeof(lc), gs.characters[cid].name);
+    char p[256];
+    std::snprintf(p, sizeof(p), "characters/%s/emotions/button%d_%s.png",
+                  lc, emote_idx + 1, on ? "on" : "off");
+    return app_.tex_cache().peek(p);
+}
+
 // ── Async scene/sprite resolution ─────────────────────────────────────────────
 
 void CourtroomScreen::queue_scene() {
     AssetStream& s = app_.asset_stream();
     scene_pending_ = true;
     bg_ready_ = desk_ready_ = false;
+    msg_age_ms_ = 0;   // give this scene load its own give-up window (e.g. BN mid-idle)
     prefetch_bgimg(s, cur_bg_,   bg_filename(cur_pos_));
     prefetch_bgimg(s, "default", bg_filename(cur_pos_));
     prefetch_bgimg(s, cur_bg_,   desk_filename(cur_pos_));
@@ -229,6 +266,15 @@ void CourtroomScreen::queue_scene() {
 
 void CourtroomScreen::resolve_assets() {
     SDL_Renderer* r = app_.renderer().raw();
+
+    // Fast path: once everything this message needs is decoded there is nothing
+    // left to probe, so skip the per-frame has_prefetch() mutex scans entirely.
+    bool pending = scene_pending_ || !idle_ready_ || !talk_ready_ ||
+                   (m_use_pre_  && !preanim_ready_) ||
+                   (m_has_pair_ && !pair_ready_) ||
+                   (m_shout_ >= 1 && !shout_ready_);
+    if (!pending) return;
+
     if (msg_age_ms_ > ASSET_GIVEUP_MS && phase_ != Phase::Loading) {
         // Past the give-up window — stop probing missing assets to save cycles.
         return;
@@ -243,6 +289,7 @@ void CourtroomScreen::resolve_assets() {
             desk_ready_ = resolve_bgimg(desk_player_, r, cur_bg_, desk_filename(cur_pos_));
             if (!desk_ready_) desk_ready_ = resolve_bgimg(desk_player_, r, "default", desk_filename(cur_pos_));
         }
+        if (bg_ready_ && desk_ready_) scene_pending_ = false;
     }
 
     if (!idle_ready_) idle_ready_ = resolve_emote(idle_player_, r, m_char_, m_emote_, "(a)");
@@ -410,6 +457,30 @@ void CourtroomScreen::update(uint32_t dt_ms) {
     music_age_ms_ += dt_ms;
     resolve_assets();   // decode anything that's now in the prefetch cache
 
+    // IC composer: warm emote-button thumbnails without blocking — prefetch on
+    // open/move, then decode a few prefetched buttons per frame (char-select style).
+    if (active_panel_ == CourtroomPanel::ICInput && own_loaded_ &&
+        own_char_.emotion_count > 0) {
+        if (ic_buttons_dirty_) { prefetch_emote_buttons(); ic_buttons_dirty_ = false; }
+        int cid = gs.my_char_id;
+        if (cid >= 0 && cid < gs.char_count && gs.characters[cid].name[0]) {
+            char lc[64]; lc_copy(lc, sizeof(lc), gs.characters[cid].name);
+            char p[256];
+            int budget = 6;
+            for (int i = 0; i < own_char_.emotion_count && budget > 0; ++i) {
+                std::snprintf(p, sizeof(p), "characters/%s/emotions/button%d_off.png", lc, i + 1);
+                if (!app_.tex_cache().peek(p) && AssetManager::has_prefetch(p)) {
+                    app_.tex_cache().get(app_.renderer().raw(), p);
+                    --budget;
+                }
+            }
+            std::snprintf(p, sizeof(p), "characters/%s/emotions/button%d_on.png",
+                          lc, ic_emote_sel_ + 1);
+            if (!app_.tex_cache().peek(p) && AssetManager::has_prefetch(p))
+                app_.tex_cache().get(app_.renderer().raw(), p);
+        }
+    }
+
     // Advance animations.
     bg_player_.update(dt_ms);
     if (desk_ready_) desk_player_.update(dt_ms);
@@ -571,17 +642,15 @@ void CourtroomScreen::render_chat_area() {
         txt.draw(display_name, tl.nameplate.x + 10, ty, {255, 255, 255, 255});
     }
 
-    // IC text, typewriter-clipped, word-wrapped inside the ic_text box.
+    // IC text: render the full message to one cached texture and reveal a prefix
+    // (tw_pos_ chars) — no per-character texture churn. See draw_wrapped_upto.
     if (tw_pos_ > 0) {
-        char msg_buf[512];
-        int len = tw_pos_ < (int)sizeof(msg_buf) - 1 ? tw_pos_ : (int)sizeof(msg_buf) - 1;
-        std::memcpy(msg_buf, ic.message, len);
-        msg_buf[len] = '\0';
         SDL_Color col = TEXT_COLORS[(m_color_ >= 0 && m_color_ < 10) ? m_color_ : 0];
-        txt.draw_wrapped(msg_buf, tl.ic_text.x, tl.ic_text.y, tl.ic_text.w, col);
+        txt.draw_wrapped_upto(ic.message, tl.ic_text.x, tl.ic_text.y, tl.ic_text.w,
+                              col, tw_pos_);
     } else if (active_panel_ == CourtroomPanel::None) {
         // Idle: show the controls so the screen is never blank or confusing.
-        txt.draw("X: type IC     ZL: OOC     ZR: Music     Y: Evidence     +: leave",
+        txt.draw("X IC    L OOC    R Music    Y Evidence    - Rooms    + leave",
                  tl.ic_text.x, tl.ic_text.y, {120, 132, 158, 255});
     }
 }
@@ -640,9 +709,10 @@ void CourtroomScreen::render_side_panel() {
         txt.draw(key, kx, rect.y + pad + lh, {150, 168, 205, 255});
     };
     draw_btn(tl.btn_ic,       active_panel_ == CourtroomPanel::ICInput,  "IC",    "X");
-    draw_btn(tl.btn_ooc,      active_panel_ == CourtroomPanel::OOC,      "OOC",   "ZL");
-    draw_btn(tl.btn_music,    active_panel_ == CourtroomPanel::Music,    "Music", "ZR");
+    draw_btn(tl.btn_ooc,      active_panel_ == CourtroomPanel::OOC,      "OOC",   "L");
+    draw_btn(tl.btn_music,    active_panel_ == CourtroomPanel::Music,    "Music", "R");
     draw_btn(tl.btn_evidence, active_panel_ == CourtroomPanel::Evidence, "Evi",   "Y");
+    draw_btn(tl.btn_area,     active_panel_ == CourtroomPanel::Area,     "Rooms", "-");
 }
 
 void CourtroomScreen::render_active_panel() {
@@ -706,47 +776,150 @@ void CourtroomScreen::render_active_panel() {
             txt.draw(gs.evidence[i].name, tl.panel_evidence.x + 8, ry, {210, 220, 240, 255});
         }
 
+    } else if (active_panel_ == CourtroomPanel::Area) {
+        const SDL_Rect panel = tl.panel_music;   // panels share the right-side rect
+        r.fill_rect(panel, {10, 10, 20, 235});
+        r.draw_rect(panel, {60, 80, 140, 255});
+        txt.draw("Rooms  (A: join   B: close)", panel.x + 10, panel.y + 6,
+                 {200, 220, 255, 255});
+
+        const int row_h   = lh + 14;
+        const int top     = panel.y + 10 + lh + 6;
+        const int avail   = panel.y + panel.h - top - 6;
+        const int visible = row_h > 0 ? avail / row_h : 1;
+        if (area_sel_ >= gs.area_count) area_sel_ = gs.area_count - 1;
+        if (area_sel_ < 0) area_sel_ = 0;
+        if (area_sel_ < area_scroll_) area_scroll_ = area_sel_;
+        if (visible > 0 && area_sel_ >= area_scroll_ + visible)
+            area_scroll_ = area_sel_ - visible + 1;
+        if (area_scroll_ < 0) area_scroll_ = 0;
+
+        for (int i = 0; i < visible && (area_scroll_ + i) < gs.area_count; ++i) {
+            int idx = area_scroll_ + i;
+            const AreaInfo& a = gs.areas[idx];
+            SDL_Rect row = {panel.x + 4, top + i * row_h, panel.w - 8, row_h - 2};
+            bool here = idx == gs.my_area_idx;
+            bool sel  = idx == area_sel_;
+            r.fill_rect(row, sel ? SDL_Color{50,100,180,225}
+                                 : (here ? SDL_Color{40,70,110,200} : SDL_Color{20,20,40,180}));
+            r.draw_rect(row, {50, 50, 80, 255});
+            SDL_Color tc = sel ? SDL_Color{255,255,255,255}
+                               : (here ? SDL_Color{255,255,150,255} : SDL_Color{205,212,230,255});
+            txt.draw(a.name, row.x + 8, row.y + (row.h - lh) / 2, tc);
+            // Right-aligned player count + status (+ lock marker).
+            char meta[80];
+            bool locked = std::strcmp(a.lock_state, "LOCKED") == 0;
+            std::snprintf(meta, sizeof(meta), "%d  %s%s", a.players, a.status,
+                          locked ? "  [LOCKED]" : "");
+            int mw = txt.measure_w(meta);
+            txt.draw(meta, row.x + row.w - mw - 8, row.y + (row.h - lh) / 2,
+                     {150, 175, 205, 255});
+        }
+        if (gs.area_count == 0)
+            txt.draw("(no area list from this server)", panel.x + 10, top,
+                     {150, 150, 160, 255});
+
     } else if (active_panel_ == CourtroomPanel::ICInput) {
         const SDL_Rect box = Layout::IC_COMPOSER;
-        r.fill_rect(box, {12, 14, 26, 245});
+        r.fill_rect(box, {12, 14, 26, 246});
         r.draw_rect(box, {90, 130, 210, 255});
         r.fill_rect({box.x, box.y, box.w, lh + 16}, {30, 45, 90, 255});
-        txt.draw("Compose IC Message", box.x + 16, box.y + 8, {225, 235, 255, 255});
+        const char* cn = (gs.my_char_id >= 0 && gs.my_char_id < gs.char_count)
+                         ? gs.characters[gs.my_char_id].name : "";
+        char title[96];
+        std::snprintf(title, sizeof(title), "Compose IC Message%s%s",
+                      cn[0] ? "   -   " : "", cn);
+        txt.draw(title, box.x + 16, box.y + 8, {225, 235, 255, 255});
 
-        const int x    = box.x + 24;
-        const int step = lh + 16;
-        int y = box.y + lh + 30;
+        const int content_y = box.y + lh + 28;
+        const int total = own_loaded_ ? own_char_.emotion_count : 0;
 
-        const char* emote_name = "normal (default)";
-        if (own_loaded_ && own_char_.emotion_count > 0 &&
-            ic_emote_sel_ >= 0 && ic_emote_sel_ < own_char_.emotion_count)
-            emote_name = own_char_.emotions[ic_emote_sel_].name;
-        char line[200];
-        std::snprintf(line, sizeof(line), "Emote   ( < > ):  %s", emote_name);
-        txt.draw(line, x, y, {220, 224, 235, 255}); y += step;
+        // ── Emote grid (left): names + sprite thumbnails, selected highlighted ──
+        const int cols = 4, cell_w = 144, cell_h = 56, gap = 6, rows_vis = 5;
+        const int grid_x = box.x + 20, grid_y = content_y;
+        if (ic_emote_sel_ < 0) ic_emote_sel_ = 0;
+        if (total > 0 && ic_emote_sel_ >= total) ic_emote_sel_ = total - 1;
+        int sel_row = total > 0 ? ic_emote_sel_ / cols : 0;
+        if (sel_row < ic_emote_scroll_) ic_emote_scroll_ = sel_row;
+        if (sel_row >= ic_emote_scroll_ + rows_vis) ic_emote_scroll_ = sel_row - rows_vis + 1;
+        if (ic_emote_scroll_ < 0) ic_emote_scroll_ = 0;
 
-        std::snprintf(line, sizeof(line), "Colour  (up/dn):  %d", ic_color_);
-        int cw = txt.draw(line, x, y, {220, 224, 235, 255});
-        SDL_Rect swatch = {x + cw + 18, y + 2, 30, lh - 4};
-        r.fill_rect(swatch, TEXT_COLORS[(ic_color_ >= 0 && ic_color_ < 10) ? ic_color_ : 0]);
-        r.draw_rect(swatch, {200, 200, 210, 255});
-        y += step;
+        if (total == 0)
+            txt.draw("(no char.ini emotes — your line will use 'normal')",
+                     grid_x, grid_y, {165, 165, 175, 255});
 
-        std::snprintf(line, sizeof(line), "Position:  %s", ic_pos_);
-        txt.draw(line, x, y, {200, 205, 220, 255}); y += step + 4;
+        for (int vr = 0; vr < rows_vis; ++vr) {
+            for (int col = 0; col < cols; ++col) {
+                int idx = (ic_emote_scroll_ + vr) * cols + col;
+                if (idx >= total) continue;
+                SDL_Rect cell = {grid_x + col * (cell_w + gap),
+                                 grid_y + vr * (cell_h + gap), cell_w, cell_h};
+                bool sel = idx == ic_emote_sel_;
+                r.fill_rect(cell, sel ? SDL_Color{50, 90, 170, 235}
+                                      : SDL_Color{22, 26, 46, 220});
+                r.draw_rect(cell, sel ? SDL_Color{150, 190, 255, 255}
+                                      : SDL_Color{70, 80, 120, 255});
+                SDL_Texture* th = emote_button_tex(idx, sel);
+                if (!th) th = emote_button_tex(idx, false);
+                int tx_off = 6;
+                if (th) {
+                    SDL_Rect td = {cell.x + 5, cell.y + (cell_h - 44) / 2, 44, 44};
+                    r.draw(th, nullptr, &td);
+                    tx_off = 56;
+                }
+                char nm[20];
+                std::snprintf(nm, sizeof(nm), "%.13s", own_char_.emotions[idx].name);
+                txt.draw(nm, cell.x + tx_off, cell.y + (cell_h - lh) / 2,
+                         sel ? SDL_Color{255, 255, 255, 255}
+                             : SDL_Color{210, 215, 232, 255});
+            }
+        }
 
-        // Typed-message preview box.
-        SDL_Rect prev = {x, y, box.w - 48, lh * 2 + 12};
+        // ── Preview + options (right) ──────────────────────────────────────────
+        const int rx = grid_x + cols * (cell_w + gap) + 14;
+        SDL_Rect prev = {rx, content_y, box.x + box.w - rx - 20, 200};
         r.fill_rect(prev, {6, 8, 16, 255});
-        r.draw_rect(prev, {60, 70, 110, 255});
+        r.draw_rect(prev, {70, 90, 140, 255});
+        SDL_Texture* pv = nullptr;
+        if (total > 0) {
+            pv = emote_button_tex(ic_emote_sel_, true);
+            if (!pv) pv = emote_button_tex(ic_emote_sel_, false);
+        }
+        if (pv) {
+            int side = (prev.w < prev.h ? prev.w : prev.h) - 24;
+            SDL_Rect pd = {prev.x + (prev.w - side) / 2, prev.y + (prev.h - side) / 2,
+                           side, side};
+            r.draw(pv, nullptr, &pd);
+        } else {
+            const char* msg = total > 0 ? "loading sprite..." : "no sprite art";
+            txt.draw(msg, prev.x + 12, prev.y + prev.h / 2 - lh / 2, {120, 128, 150, 255});
+        }
+
+        int oy = prev.y + prev.h + 12;
+        char line[160];
+        const char* en = total > 0 ? own_char_.emotions[ic_emote_sel_].name : "normal";
+        std::snprintf(line, sizeof(line), "Emote: %.20s", en);
+        txt.draw(line, rx, oy, {220, 224, 235, 255}); oy += lh + 6;
+        std::snprintf(line, sizeof(line), "Colour: %d", ic_color_);
+        int cw = txt.draw(line, rx, oy, {220, 224, 235, 255});
+        SDL_Rect sw = {rx + cw + 12, oy + 2, 26, lh - 4};
+        r.fill_rect(sw, TEXT_COLORS[(ic_color_ >= 0 && ic_color_ < 10) ? ic_color_ : 0]);
+        r.draw_rect(sw, {200, 200, 210, 255}); oy += lh + 6;
+        std::snprintf(line, sizeof(line), "Position: %s", ic_pos_);
+        txt.draw(line, rx, oy, {200, 205, 220, 255});
+
+        // ── Message preview + controls (bottom) ────────────────────────────────
+        int by2 = grid_y + rows_vis * (cell_h + gap) + 14;
+        SDL_Rect mp = {box.x + 20, by2, box.w - 40, lh * 2 + 12};
+        r.fill_rect(mp, {6, 8, 16, 255});
+        r.draw_rect(mp, {60, 70, 110, 255});
         bool has = ic_text_[0] != '\0';
         txt.draw_wrapped(has ? ic_text_ : "(press A to type your message)",
-                         prev.x + 8, prev.y + 6, prev.w - 16,
+                         mp.x + 8, mp.y + 6, mp.w - 16,
                          has ? SDL_Color{235, 235, 245, 255}
                              : SDL_Color{120, 128, 150, 255});
-
-        txt.draw("A: type message & send          B: cancel",
-                 x, box.y + box.h - lh - 14, {160, 175, 205, 255});
+        txt.draw("< >  emote     up/dn  colour     A  type & send     B  close",
+                 box.x + 20, box.y + box.h - lh - 12, {160, 175, 205, 255});
     }
 }
 
@@ -801,7 +974,7 @@ void CourtroomScreen::handle_event(const SDL_Event& e) {
     GameState& gs = app_.state();
 
     enum Act { None, Up, Down, Left, Right, Confirm, Back,
-               TogOOC, TogMusic, TogEvi, TogIC, Disconnect } act = None;
+               TogOOC, TogMusic, TogEvi, TogIC, TogArea, Disconnect } act = None;
 
     if (e.type == SDL_KEYDOWN) {
         switch (e.key.keysym.sym) {
@@ -815,6 +988,7 @@ void CourtroomScreen::handle_event(const SDL_Event& e) {
             case SDLK_c: act = TogMusic; break;
             case SDLK_y: act = TogEvi;   break;
             case SDLK_x: act = TogIC;    break;
+            case SDLK_r: act = TogArea;  break;
             case SDLK_p: act = Disconnect; break;
             default: break;
         }
@@ -824,13 +998,14 @@ void CourtroomScreen::handle_event(const SDL_Event& e) {
             case SDL_CONTROLLER_BUTTON_DPAD_DOWN:  act = Down;  break;
             case SDL_CONTROLLER_BUTTON_DPAD_LEFT:  act = Left;  break;
             case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: act = Right; break;
-            case SDL_CONTROLLER_BUTTON_A:          act = Confirm; break;
-            case SDL_CONTROLLER_BUTTON_B:          act = Back;    break;
-            case SDL_CONTROLLER_BUTTON_LEFTSTICK:  act = TogOOC;   break;
-            case SDL_CONTROLLER_BUTTON_RIGHTSTICK: act = TogMusic; break;
-            case SDL_CONTROLLER_BUTTON_Y:          act = TogEvi;   break;
-            case SDL_CONTROLLER_BUTTON_X:          act = TogIC;    break;
-            case SDL_CONTROLLER_BUTTON_START:      act = Disconnect; break;
+            case SDL_CONTROLLER_BUTTON_A:             act = Confirm; break;
+            case SDL_CONTROLLER_BUTTON_B:             act = Back;    break;
+            case SDL_CONTROLLER_BUTTON_LEFTSHOULDER:  act = TogOOC;   break;  // L
+            case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER: act = TogMusic; break;  // R
+            case SDL_CONTROLLER_BUTTON_Y:             act = TogEvi;   break;
+            case SDL_CONTROLLER_BUTTON_X:             act = TogIC;    break;
+            case SDL_CONTROLLER_BUTTON_BACK:          act = TogArea;  break;  // -
+            case SDL_CONTROLLER_BUTTON_START:         act = Disconnect; break; // +
             default: break;
         }
     }
@@ -844,7 +1019,17 @@ void CourtroomScreen::handle_event(const SDL_Event& e) {
         case TogOOC:     toggle(CourtroomPanel::OOC);      return;
         case TogMusic:   toggle(CourtroomPanel::Music);    return;
         case TogEvi:     toggle(CourtroomPanel::Evidence); return;
-        case TogIC:      toggle(CourtroomPanel::ICInput);  return;
+        case TogIC:
+            toggle(CourtroomPanel::ICInput);
+            if (active_panel_ == CourtroomPanel::ICInput) ic_buttons_dirty_ = true;
+            return;
+        case TogArea:
+            toggle(CourtroomPanel::Area);
+            // Start the cursor on the current room when opening the panel.
+            if (active_panel_ == CourtroomPanel::Area &&
+                gs.my_area_idx >= 0 && gs.my_area_idx < gs.area_count)
+                area_sel_ = gs.my_area_idx;
+            return;
         case Disconnect: app_.pop_screen();                return;
         default: break;
     }
@@ -891,12 +1076,34 @@ void CourtroomScreen::handle_event(const SDL_Event& e) {
             if (act == Back) active_panel_ = CourtroomPanel::None;
             break;
 
+        case CourtroomPanel::Area:
+            if (act == Up)   { if (area_sel_ > 0) --area_sel_; }
+            if (act == Down) { if (area_sel_ < gs.area_count - 1) ++area_sel_; }
+            if (act == Back) active_panel_ = CourtroomPanel::None;
+            if (act == Confirm && area_sel_ >= 0 && area_sel_ < gs.area_count) {
+                // AO2 joins an area by sending a music-change to the area's name;
+                // the server moves us and follows up with BN / HP / chars, etc.
+                char buf[256];
+                int n = cmd::mc(buf, sizeof(buf), gs.areas[area_sel_].name,
+                                gs.my_char_id < 0 ? 0 : gs.my_char_id, app_.username());
+                if (n > 0) {
+                    app_.send_packet(buf, n);
+                    gs.my_area_idx = area_sel_;                 // optimistic
+                    active_panel_ = CourtroomPanel::None;
+                }
+            }
+            break;
+
         case CourtroomPanel::ICInput:
             if (!own_loaded_) load_own_character();
-            if (act == Left  && own_char_.emotion_count > 0)
+            if (act == Left  && own_char_.emotion_count > 0) {
                 ic_emote_sel_ = (ic_emote_sel_ - 1 + own_char_.emotion_count) % own_char_.emotion_count;
-            if (act == Right && own_char_.emotion_count > 0)
+                ic_buttons_dirty_ = true;
+            }
+            if (act == Right && own_char_.emotion_count > 0) {
                 ic_emote_sel_ = (ic_emote_sel_ + 1) % own_char_.emotion_count;
+                ic_buttons_dirty_ = true;
+            }
             if (act == Up)   ic_color_ = (ic_color_ + 1) % 10;
             if (act == Down) ic_color_ = (ic_color_ + 9) % 10;
             if (act == Back) active_panel_ = CourtroomPanel::None;
