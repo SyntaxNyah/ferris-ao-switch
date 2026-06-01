@@ -165,7 +165,7 @@ gate) and then runs this state machine (`enum class Phase`):
           └──────────────┘
 ```
 
-- **Typewriter:** `TYPEWRITER_MS` (35 ms) per character; A/Enter skips to the
+- **Typewriter:** `TYPEWRITER_MS` (18 ms) per character; A/Enter (or a tap on the chat box) skips to the
   end. A blip SFX fires every `BLIP_EVERY` visible characters.
 - **Realization:** a white viewport flash fading over `REALIZE_MS` (350 ms),
   plus the theme `realization` SFX.
@@ -282,7 +282,7 @@ panel highlights the new room immediately.
 - **Typewriter renders one texture per message, not per character.**
   `TextRenderer::draw_wrapped_upto(full_message, …, reveal)` rasterises the whole
   IC line into a single cached texture once and blits a growing prefix of it. The
-  earlier code rendered the growing substring every 35 ms step, creating and
+  earlier code rendered the growing substring every typewriter step, creating and
   destroying a texture per character *and* evicting the rest of the UI text from
   the text LRU (so shownames, buttons, music names, etc. re-rasterised every
   frame). A small `wrap_*` cache holds the line offsets and is recomputed only
@@ -307,6 +307,8 @@ panel highlights the new room immediately.
 - **Persistent disk cache.** Repeat views/relaunches read assets from SD instead
   of the network (see §1), so steady-state chat on a server you've used before is
   almost entirely cache hits.
-- **The IC log costs ~one blit per visible line.** Each log line is a stable
-  string that stays in the (96-slot) text cache, so the always-on log re-blits
-  cached textures with no per-frame rasterisation, wrapping, or allocation.
+- **The IC log re-blits cached textures.** Each entry is a showname line plus a
+  word-wrapped message block; the strings are stable so they stay in the
+  (96-slot) text cache and re-blit with no per-frame rasterisation or allocation
+  (only the wrap-height math runs each frame, which is metrics-only). The wheel
+  scrolls back through history.

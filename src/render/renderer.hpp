@@ -56,8 +56,8 @@ namespace Layout {
     inline constexpr int CHAT_H = 176;
     inline constexpr int CHAT_Y = H - CHAT_H;                      // 544
     inline constexpr SDL_Rect CHAT_AREA     = {0, CHAT_Y, W, CHAT_H};
-    inline constexpr SDL_Rect NAMEPLATE     = {28, CHAT_Y + 10, 380, 40};
-    inline constexpr SDL_Rect CHATBOX       = {36, CHAT_Y + 60, 808, 104}; // IC text box
+    inline constexpr SDL_Rect NAMEPLATE     = {24, CHAT_Y + 8, 360, 34};   // width is a max; sized to the name at draw time
+    inline constexpr SDL_Rect CHATBOX       = {28, CHAT_Y + 46, 816, 120}; // IC text box, directly under the nameplate
 
     // HP bars over the top corners (each gets an inline label chip when drawn).
     inline constexpr SDL_Rect HP_DEF        = {28, 46, 330, 26};

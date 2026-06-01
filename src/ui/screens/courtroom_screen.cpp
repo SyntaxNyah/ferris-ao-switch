@@ -312,6 +312,8 @@ void CourtroomScreen::begin_message() {
     ic.pending      = false;
     AssetStream& s  = app_.asset_stream();
 
+    ic_log_scroll_ = 0;   // snap the log back to the newest line
+
     // Remember the previous speaker sprite so we can avoid reloading it.
     char prev_char[64], prev_emote[64];
     std::strncpy(prev_char,  m_char_,  sizeof(prev_char));  prev_char[sizeof(prev_char) - 1]  = '\0';
@@ -591,10 +593,12 @@ void CourtroomScreen::render() {
     render_active_panel();
 }
 
-// Always-on IC log. Optimised for the 60 Hz loop: every line is a stable string,
-// so after its first frame each draw is a TextRenderer cache hit (a texture blit,
-// no rasterisation). One clip rect keeps long lines off the stage; no per-frame
-// wrapping or allocation. Newest line is anchored to the bottom.
+// Always-on IC log. Each entry is a showname line plus its word-wrapped message
+// (so nothing is cut off), stacked from the BOTTOM with the newest line last.
+// Drawn strings are stable, so after their first frame every draw is a
+// TextRenderer cache hit (a blit, no rasterisation); a clip rect trims the
+// top-most partially-visible entry. ic_log_scroll_ (mouse wheel) skips that many
+// newest entries to read back through history.
 void CourtroomScreen::render_ic_log() {
     GameState& gs = app_.state();
     const ChatLog& log = gs.ic_log;
@@ -611,19 +615,26 @@ void CourtroomScreen::render_ic_log() {
     SDL_Rect clip = {box.x + 8, box.y + 6, box.w - 16, box.h - 12};
     SDL_RenderSetClipRect(r.raw(), &clip);
 
-    const int row_h   = lh + 4;
-    int visible = clip.h / row_h;
-    if (visible < 1) visible = 1;
-    int start = log.count > visible ? log.count - visible : 0;
-    for (int i = start; i < log.count; ++i) {
+    if (ic_log_scroll_ < 0) ic_log_scroll_ = 0;
+    if (ic_log_scroll_ > log.count - 1) ic_log_scroll_ = log.count - 1;
+
+    const int gap = 8;
+    int newest = log.count - 1 - ic_log_scroll_;   // bottom-most entry to draw
+    int y = clip.y + clip.h;                        // fill upward from the bottom
+    for (int i = newest; i >= 0 && y > clip.y; --i) {
         const ChatEntry& e = log.at(i);
-        int y = clip.y + (i - start) * row_h;
-        // Showname in a neutral tint, message in its AO text colour.
+        int mh = txt.wrapped_height(e.message, clip.w);
+        if (mh < lh) mh = lh;
+        int eh  = lh + mh;                          // name line + wrapped message
+        int top = y - eh;
+
         char nm[80];
         std::snprintf(nm, sizeof(nm), "%s:", e.name);
-        int nw = txt.draw(nm, clip.x, y, {180, 200, 235, 255});
+        txt.draw(nm, clip.x, top, {170, 200, 240, 255});
         SDL_Color col = TEXT_COLORS[(e.color < 10) ? e.color : 0];
-        txt.draw(e.message, clip.x + nw + 8, y, col);
+        txt.draw_wrapped(e.message, clip.x, top + lh, clip.w, col);
+
+        y = top - gap;
     }
 
     SDL_RenderSetClipRect(r.raw(), nullptr);
@@ -693,14 +704,19 @@ void CourtroomScreen::render_chat_area() {
         r.fill_rect({tl.chatbox.x, tl.chatbox.y, tl.chatbox.w, 2}, {70, 100, 165, 255});
     }
 
-    // Showname plate.
+    // Showname plate — sized to the name (no big empty box), sitting flush at
+    // the top-left of the chat bar with an accent line tying it to the text.
     const ICAnimState& ic = gs.ic_anim;
     const char* display_name = (ic.showname[0] != '\0') ? ic.showname : ic.char_name;
     if (display_name[0] != '\0') {
-        r.fill_rect(tl.nameplate, {40, 70, 140, 235});
-        r.draw_rect(tl.nameplate, {120, 160, 230, 255});
-        int ty = tl.nameplate.y + (tl.nameplate.h - txt.line_h()) / 2;
-        txt.draw(display_name, tl.nameplate.x + 10, ty, {255, 255, 255, 255});
+        int pw = txt.measure_w(display_name) + 24;
+        if (pw > tl.nameplate.w) pw = tl.nameplate.w;
+        if (pw < 60) pw = 60;
+        SDL_Rect plate = {tl.nameplate.x, tl.nameplate.y, pw, tl.nameplate.h};
+        r.fill_rect(plate, {34, 52, 104, 240});
+        r.fill_rect({plate.x, plate.y + plate.h - 2, plate.w, 2}, {120, 160, 230, 255});
+        int ty = plate.y + (plate.h - txt.line_h()) / 2;
+        txt.draw(display_name, plate.x + 12, ty, {255, 255, 255, 255});
     }
 
     // IC text: render the full message to one cached texture and reveal a prefix
@@ -793,16 +809,27 @@ void CourtroomScreen::render_active_panel() {
         int start = gs.ooc_log.count > visible ? gs.ooc_log.count - visible : 0;
         start -= ooc_scroll_;
         if (start < 0) start = 0;
+        const char* me = app_.username();
         for (int i = 0; i < visible && (start + i) < gs.ooc_log.count; ++i) {
             const ChatEntry& ce = gs.ooc_log.at(start + i);
             int ry = tl.panel_ooc.y + 4 + i * row_h;
+            bool mine = !ce.server && me[0] && std::strcmp(ce.name, me) == 0;
+            if (mine) {
+                // Highlight + left accent so your own lines are easy to spot.
+                r.fill_rect({tl.panel_ooc.x + 2, ry - 2, tl.panel_ooc.w - 4, row_h},
+                            {30, 46, 74, 190});
+                r.fill_rect({tl.panel_ooc.x + 2, ry - 2, 3, row_h}, {120, 200, 255, 255});
+            }
             char header[96];
             std::snprintf(header, sizeof(header), "[%s]", ce.name);
-            SDL_Color name_col = ce.server
-                ? SDL_Color{255, 200, 120, 255} : SDL_Color{140, 200, 140, 255};
+            SDL_Color name_col = ce.server ? SDL_Color{255, 200, 120, 255}
+                               : mine      ? SDL_Color{130, 210, 255, 255}
+                                           : SDL_Color{140, 200, 140, 255};
             txt.draw(header, tl.panel_ooc.x + 8, ry, name_col);
             txt.draw_wrapped(ce.message, tl.panel_ooc.x + 8, ry + lh,
-                             tl.panel_ooc.w - 16, {220, 220, 220, 255});
+                             tl.panel_ooc.w - 16,
+                             mine ? SDL_Color{255, 255, 255, 255}
+                                  : SDL_Color{215, 215, 222, 255});
         }
         txt.draw("A: OOC msg   B: close", tl.panel_ooc.x + 8,
                  tl.panel_ooc.y + tl.panel_ooc.h - lh - 4, {150, 150, 170, 255});
@@ -1160,6 +1187,33 @@ void CourtroomScreen::handle_event(const SDL_Event& e) {
     // Touch / mouse tap → route to the HUD buttons, chat bar, or open panel.
     int tx, ty;
     if (tap_point(e, app_.renderer().raw(), tx, ty)) { handle_tap(tx, ty); return; }
+
+    // Mouse wheel scrolls whatever is in focus (wheel up = back/older/up the list).
+    if (e.type == SDL_MOUSEWHEEL && e.wheel.y != 0) {
+        int d = e.wheel.y;
+        auto clamp = [](int v, int hi) { return v < 0 ? 0 : (v > hi ? hi : v); };
+        switch (active_panel_) {
+            case CourtroomPanel::Music:
+                music_sel_ = clamp(music_sel_ - d, gs.music_count - 1); break;
+            case CourtroomPanel::Area:
+                area_sel_  = clamp(area_sel_ - d,  gs.area_count - 1);  break;
+            case CourtroomPanel::Evidence:
+                evi_scroll_ = clamp(evi_scroll_ - d, 1 << 20);          break;
+            case CourtroomPanel::OOC:
+                ooc_scroll_ = clamp(ooc_scroll_ + d, 1 << 20);          break;
+            case CourtroomPanel::ICInput:
+                if (own_loaded_ && own_char_.emotion_count > 0) {
+                    ic_emote_sel_ = clamp(ic_emote_sel_ - d * 4, own_char_.emotion_count - 1);
+                    ic_buttons_dirty_ = true;
+                }
+                break;
+            case CourtroomPanel::None:    // scroll the always-on IC log
+                if (gs.ic_log.count > 0)
+                    ic_log_scroll_ = clamp(ic_log_scroll_ + d, gs.ic_log.count - 1);
+                break;
+        }
+        return;
+    }
 
     enum Act { None, Up, Down, Left, Right, Confirm, Back,
                TogOOC, TogMusic, TogEvi, TogIC, TogArea, Disconnect } act = None;

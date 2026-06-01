@@ -483,6 +483,17 @@ void ConnectScreen::handle_event(const SDL_Event& e) {
         return;  // credits tab: tabs handled above, nothing else tappable
     }
 
+    // Mouse wheel scrolls the server list.
+    if (e.type == SDL_MOUSEWHEEL && e.wheel.y != 0 && tab_ == 0 && server_count_ > 0) {
+        server_sel_ -= e.wheel.y;
+        if (server_sel_ < 0) server_sel_ = 0;
+        if (server_sel_ > server_count_ - 1) server_sel_ = server_count_ - 1;
+        if (server_sel_ < scroll_offset_) scroll_offset_ = server_sel_;
+        if (server_sel_ >= scroll_offset_ + VISIBLE_ROWS)
+            scroll_offset_ = server_sel_ - VISIBLE_ROWS + 1;
+        return;
+    }
+
     // ── Tab switch (L / R shoulder on either tab) ──────────────────────────────
     if (btn_down(SDL_CONTROLLER_BUTTON_LEFTSHOULDER) ||
         (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_q)) {

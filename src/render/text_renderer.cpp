@@ -132,6 +132,13 @@ int TextRenderer::measure_w(const char* text) {
     return w;
 }
 
+int TextRenderer::wrapped_height(const char* text, int max_w) {
+    if (!font_ || !text || text[0] == '\0') return 0;
+    ensure_wrap(text, max_w);
+    const int ls = line_h_ > 0 ? line_h_ : 1;
+    return wrap_count_ * ls;
+}
+
 // ── Progressive reveal (typewriter) ──────────────────────────────────────────────
 
 void TextRenderer::ensure_wrap(const char* text, int max_w) {

@@ -44,6 +44,11 @@ public:
     // Measure single-line text width without rendering (no cache).
     int measure_w(const char* text);
 
+    // Height (px) the text would occupy when word-wrapped to max_w, using the
+    // same greedy wrap as draw_wrapped_upto. For laying out stacked wrapped
+    // blocks (e.g. the IC log) without rendering them first.
+    int wrapped_height(const char* text, int max_w);
+
     int  line_h() const { return line_h_; }
     bool ready()  const { return font_ != nullptr; }
 

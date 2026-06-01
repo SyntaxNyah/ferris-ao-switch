@@ -1251,11 +1251,14 @@ inlined here (there are **no** separate `chatbox.cpp` / `ic_input.cpp` files; an
 earlier revision split them out but the current screen is monolithic).
 
 **Always-on IC log (`render_ic_log`).** A translucent column down the left of
-the stage (`Layout::IC_LOG`) draws the tail of `gs.ic_log` (showname tint +
-message in its AO colour), newest at the bottom, clipped so long lines never
-spill onto the stage. Every line is a stable string, so after its first frame
-each draw is a `TextRenderer` cache hit (a blit, no rasterisation) — there is no
-per-frame wrapping or allocation.
+the stage (`Layout::IC_LOG`) draws the tail of `gs.ic_log`: each entry is a
+showname line (neutral tint) plus its **word-wrapped** message (its AO colour),
+stacked from the **bottom** with the newest line last — so nothing is cut off.
+Heights come from `TextRenderer::wrapped_height`; a clip rect trims the topmost
+partially-visible entry. The mouse wheel scrolls back through history
+(`ic_log_scroll_` = entries skipped from the newest; reset to 0 on each new
+line). The drawn strings are stable, so after their first frame the message
+blocks are `TextRenderer` cache hits (no re-rasterisation).
 
 **Touch (`handle_tap` / `handle_panel_tap`).** Taps (Switch touchscreen or a
 Ryujinx mouse, via `ui/touch.hpp::tap_point`) are hit-tested against the HUD
@@ -1265,6 +1268,14 @@ emote/colour/pos), and the open panel (music/area rows select+act, the emote
 grid picks an emote, the OOC panel opens the keyboard). A tap outside an open
 panel closes it. Controller/keyboard, and touch all funnel through the shared
 `join_area` / `play_music` / `compose_ooc` / `compose_and_send` helpers.
+
+**Mouse wheel (`SDL_MOUSEWHEEL`).** Scrolls whatever has focus — the open
+music/rooms/evidence/OOC panel, the composer's emote grid, or (with no panel
+open) the IC log scrollback.
+
+**OOC own-message highlight.** In the OOC panel, entries whose name equals the
+local username (and that aren't server messages) get a highlighted row + a left
+accent bar + brighter text, so you can pick out your own lines.
 
 **`CourtroomPanel` enum:** `{ None, OOC, Music, Evidence, Area, ICInput }`
 
@@ -1291,7 +1302,7 @@ setting the `*_ready_` flags. The exact candidate paths follow the
 2. `Preanim` — if `emote_mod ∈ {1,2,6}` and `pre_anim` is set/≠`-`: play the
    pre-anim once (a static pre-anim is treated as instantly finished so the
    phase can't hang).
-3. `Talking` — `(b)` talk sprite, typewriter at `TYPEWRITER_MS` (35 ms/char),
+3. `Talking` — `(b)` talk sprite, typewriter at `TYPEWRITER_MS` (18 ms/char),
    blip SFX every `BLIP_EVERY` visible chars, message SFX at start, optional
    realization white-flash (`REALIZE_MS`).
 4. Idle — once the typewriter finishes, the `(a)` idle sprite is drawn.

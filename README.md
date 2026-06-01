@@ -46,7 +46,8 @@ ferris-ao-switch implements the full AO2 client protocol so Switch players can j
 - **Room switching** — in-courtroom **Rooms** panel lists every area with live player counts, statuses and lock states (ARUP); join one to move rooms without reconnecting
 - **IC messages** — typewriter effect, word wrap, per-message text colors (12 colors), shownames, objection/hold-it/take-that popups, realization flash, screenshake
 - **Emote picker** — IC composer shows a grid of your character's emotes with sprite-button thumbnails and a live preview of the selected one
-- **IC log** — always-on scrollback column showing recent IC lines (showname + colored message), newest at the bottom
+- **IC log** — always-on scrollback column showing recent IC lines (showname + colored, word-wrapped message), newest at the bottom; scroll back through history with the mouse wheel
+- **OOC chat** — your own messages are highlighted so they're easy to find in the log
 - **Pairing** — renders two characters side by side with individual offsets and flip states
 - **Evidence panel** — view, present, add, edit, and delete evidence; grid view with thumbnails
 - **Music panel** — full server music list; select and play any track; shows currently playing track
@@ -507,6 +508,10 @@ Everything is tappable in handheld mode (and via mouse on Ryujinx):
 | IC composer | Tap an emote to select it; tap the message box to type & send |
 | OOC panel | Tap to open the keyboard |
 | Any panel | Tap outside it to close |
+
+**Mouse wheel** (Ryujinx/desktop) scrolls whatever has focus — the IC log
+scrollback, the music/rooms/evidence/OOC panels, the composer's emote grid, the
+character grid, and the server list.
 
 ---
 

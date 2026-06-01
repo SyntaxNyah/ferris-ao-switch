@@ -70,6 +70,14 @@ void CharSelectScreen::handle_event(const SDL_Event& e) {
         return;
     }
 
+    // Mouse wheel scrolls the grid a row at a time (update() syncs scroll_).
+    if (e.type == SDL_MOUSEWHEEL && e.wheel.y != 0) {
+        selected_ -= e.wheel.y * COLS;
+        if (selected_ < 0) selected_ = 0;
+        if (selected_ >= total) selected_ = total - 1;
+        return;
+    }
+
     // Use keyboard for emulator convenience
     if (e.type == SDL_KEYDOWN) {
         switch (e.key.keysym.sym) {

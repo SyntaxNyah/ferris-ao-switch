@@ -128,8 +128,8 @@ private:
     int      tw_max_ = 0;
     uint32_t tw_acc_ = 0;
     int      tw_since_blip_ = 0;
-    static constexpr uint32_t TYPEWRITER_MS = 35;
-    static constexpr int      BLIP_EVERY    = 2;   // chars per blip
+    static constexpr uint32_t TYPEWRITER_MS = 18;  // ms per char (snappier than AO default)
+    static constexpr int      BLIP_EVERY    = 3;   // chars per blip (fewer SFX triggers)
 
     // phase timers
     uint32_t shout_acc_  = 0;
@@ -148,6 +148,7 @@ private:
     int evi_scroll_   = 0;
     int area_scroll_  = 0;
     int area_sel_     = 0;
+    int ic_log_scroll_ = 0;   // entries skipped from the newest (mouse-wheel scrollback)
 
     // ── IC composer state (own character) ─────────────────────────────────
     CharDef own_char_;
