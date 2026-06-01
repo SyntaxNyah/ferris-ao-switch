@@ -283,8 +283,12 @@ bool App::connect(const char* host, uint16_t port, ConnMode mode) {
     // Tear down any existing connection
     disconnect();
 
-    // Reset game state for a fresh connection
-    *game_state_       = GameState();
+    // Reset game state for a fresh connection. Copy from a static blank template
+    // rather than `*game_state_ = GameState()` — GameState is ~1.3 MB (4096-char
+    // rosters), and a temporary that size on the stack overflowed the main
+    // thread's stack and crashed on connect. The template lives in static storage.
+    static const GameState BLANK_STATE;
+    *game_state_       = BLANK_STATE;
     was_in_lobby_      = false;
     fallback_asset_url_[0] = '\0';
 

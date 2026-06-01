@@ -1680,6 +1680,17 @@ Call `theme_manager_.load("newtheme")` — parses and rescales immediately. `Cou
 
 `Packet`, `InPacket`, `OutPacket`, `ICAnimState`, `ChatLog`, `SPSCQueue` all use fixed-size arrays. `std::string` and `std::vector` are fine in initialization code (e.g., char.ini parsing) but must not appear in per-frame paths.
 
+### 2b. Never put `GameState` (or `App`) on the stack — main stack is ~1 MB
+
+`GameState` is **~1.3 MB** (the 4096-entry `characters[]`/`music_list[]` arrays),
+and the libnx main-thread stack is **~1 MB**. `App` owns it via a pointer
+(`new GameState()`), and `main()` heap-allocates `App` for the same reason
+(its `InQueue` + `AssetStream` buffers are ~2 MB). **Do not** construct or copy a
+`GameState` as a stack temporary — `*game_state_ = GameState();` overflowed the
+stack and crashed on connect once the arrays grew. `App::connect()` resets via a
+`static const GameState BLANK_STATE` template (static storage) instead. Any big
+struct: keep it on the heap or in static storage, never a stack local/temporary.
+
 ### 3. `ws_upgrade` and `show_keyboard` block
 
 Both functions are **synchronous blocking calls**. They must not be called from `App::run()`'s frame loop directly. `ws_upgrade` is called inside `NetworkThread::connect()` (on the network thread). `show_keyboard` is called from screen event handlers — it blocks the entire main thread (and game loop) until the user dismisses the keyboard, which is acceptable on Switch.
