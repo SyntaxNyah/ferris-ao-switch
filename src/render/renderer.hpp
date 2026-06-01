@@ -89,6 +89,10 @@ namespace Layout {
 
     // IC composer modal (centred) — holds the emote grid + sprite preview.
     inline constexpr SDL_Rect IC_COMPOSER    = {180, 96, 920, 528};
+
+    // Always-on IC chat log — translucent column down the left of the stage,
+    // between the HP bars and the chat bar. Newest line sits at the bottom.
+    inline constexpr SDL_Rect IC_LOG         = {12, 92, 452, CHAT_Y - 92 - 8};
 }
 
 } // namespace ao

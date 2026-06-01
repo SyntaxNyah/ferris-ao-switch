@@ -1,4 +1,5 @@
 #include "courtroom_screen.hpp"
+#include "../touch.hpp"
 #include "../../app.hpp"
 #include "../../render/renderer.hpp"
 #include "../../state/game_state.hpp"
@@ -194,6 +195,10 @@ void CourtroomScreen::on_enter() {
     active_panel_ = CourtroomPanel::None;
     phase_        = Phase::Idle;
     tw_pos_ = tw_max_ = 0;
+    // Drop any character-select icon prefetches still queued so our background,
+    // desk and sprite prefetches go to the workers first — otherwise the first
+    // few IC lines on a 600-character server wait behind a wall of icon fetches.
+    app_.asset_stream().clear_pending();
     load_own_character();
     GameState& gs = app_.state();
     std::strncpy(ic_pos_, (own_loaded_ && own_char_.side[0]) ? own_char_.side : "wit",
@@ -258,10 +263,12 @@ void CourtroomScreen::queue_scene() {
     scene_pending_ = true;
     bg_ready_ = desk_ready_ = false;
     msg_age_ms_ = 0;   // give this scene load its own give-up window (e.g. BN mid-idle)
-    prefetch_bgimg(s, cur_bg_,   bg_filename(cur_pos_));
-    prefetch_bgimg(s, "default", bg_filename(cur_pos_));
-    prefetch_bgimg(s, cur_bg_,   desk_filename(cur_pos_));
-    prefetch_bgimg(s, "default", desk_filename(cur_pos_));
+    // Stream the SERVER's background only — never substitute the bundled
+    // background/default courtroom (that's what made rooms look wrong while the
+    // real background was still downloading). The viewport stays black until the
+    // server's background streams in.
+    prefetch_bgimg(s, cur_bg_, bg_filename(cur_pos_));
+    prefetch_bgimg(s, cur_bg_, desk_filename(cur_pos_));
 }
 
 void CourtroomScreen::resolve_assets() {
@@ -281,14 +288,11 @@ void CourtroomScreen::resolve_assets() {
     }
 
     if (scene_pending_) {
-        if (!bg_ready_) {
+        // Server background only — keep trying until it streams in (no default).
+        if (!bg_ready_)
             bg_ready_ = resolve_bgimg(bg_player_, r, cur_bg_, bg_filename(cur_pos_));
-            if (!bg_ready_) bg_ready_ = resolve_bgimg(bg_player_, r, "default", bg_filename(cur_pos_));
-        }
-        if (!desk_ready_) {
+        if (!desk_ready_)
             desk_ready_ = resolve_bgimg(desk_player_, r, cur_bg_, desk_filename(cur_pos_));
-            if (!desk_ready_) desk_ready_ = resolve_bgimg(desk_player_, r, "default", desk_filename(cur_pos_));
-        }
         if (bg_ready_ && desk_ready_) scene_pending_ = false;
     }
 
@@ -307,6 +311,11 @@ void CourtroomScreen::begin_message() {
     ICAnimState& ic = gs.ic_anim;
     ic.pending      = false;
     AssetStream& s  = app_.asset_stream();
+
+    // Remember the previous speaker sprite so we can avoid reloading it.
+    char prev_char[64], prev_emote[64];
+    std::strncpy(prev_char,  m_char_,  sizeof(prev_char));  prev_char[sizeof(prev_char) - 1]  = '\0';
+    std::strncpy(prev_emote, m_emote_, sizeof(prev_emote)); prev_emote[sizeof(prev_emote) - 1] = '\0';
 
     lc_copy(m_char_,    sizeof(m_char_),    ic.char_name);
     lc_copy(m_emote_,   sizeof(m_emote_),   ic.emote);
@@ -333,9 +342,12 @@ void CourtroomScreen::begin_message() {
         m_has_pair_  = true;
     }
 
-    // Background: only reload when position or room changed.
+    // Background: only reload when position or room changed. An empty pos means
+    // "stay where we are" — keep the current pos instead of snapping to the
+    // witness stand (which made the background flip to a courtroom mid-scene).
     char pos[16];
-    std::strncpy(pos, ic.pos[0] ? ic.pos : "wit", sizeof(pos) - 1);
+    const char* want_pos = ic.pos[0] ? ic.pos : (cur_pos_[0] ? cur_pos_ : "wit");
+    std::strncpy(pos, want_pos, sizeof(pos) - 1);
     pos[sizeof(pos) - 1] = '\0';
     char bg_lc[128];
     lc_copy(bg_lc, sizeof(bg_lc), gs.background);
@@ -345,11 +357,21 @@ void CourtroomScreen::begin_message() {
         queue_scene();
     }
 
-    // Reset per-message readiness and queue all sprite prefetches up front.
-    idle_ready_ = talk_ready_ = preanim_ready_ = pair_ready_ = shout_ready_ = false;
+    // Reset per-message readiness and queue sprite prefetches. Skip the speaker
+    // sprite entirely when it's the same char+emote as the last line — its
+    // textures are still loaded, so there is nothing to re-fetch or re-decode.
+    // This is the main fix for "characters reload every time someone talks", and
+    // it also lets repeated lines skip the Loading gate (char_ready() stays true).
+    bool same_sprite = (idle_ready_ || talk_ready_) &&
+                       std::strcmp(prev_char,  m_char_)  == 0 &&
+                       std::strcmp(prev_emote, m_emote_) == 0;
+    preanim_ready_ = pair_ready_ = shout_ready_ = false;
     msg_age_ms_ = 0;
-    prefetch_emote(s, m_char_, m_emote_, "(a)");
-    prefetch_emote(s, m_char_, m_emote_, "(b)");
+    if (!same_sprite) {
+        idle_ready_ = talk_ready_ = false;
+        prefetch_emote(s, m_char_, m_emote_, "(a)");
+        prefetch_emote(s, m_char_, m_emote_, "(b)");
+    }
     if (m_use_pre_)  prefetch_emote(s, m_char_, m_preanim_, "");
     if (m_has_pair_) prefetch_emote(s, m_pair_char_, m_pair_emote_, "(a)");
     if (m_shout_ >= 1) prefetch_shout(s, m_char_, m_shout_);
@@ -563,9 +585,48 @@ void CourtroomScreen::draw_sprite_fill(APNGPlayer& p, int off_x_pct, bool flip) 
 
 void CourtroomScreen::render() {
     render_viewport();
+    render_ic_log();        // history, under the chat bar and any open panel
     render_chat_area();
     render_side_panel();
     render_active_panel();
+}
+
+// Always-on IC log. Optimised for the 60 Hz loop: every line is a stable string,
+// so after its first frame each draw is a TextRenderer cache hit (a texture blit,
+// no rasterisation). One clip rect keeps long lines off the stage; no per-frame
+// wrapping or allocation. Newest line is anchored to the bottom.
+void CourtroomScreen::render_ic_log() {
+    GameState& gs = app_.state();
+    const ChatLog& log = gs.ic_log;
+    if (log.count == 0) return;
+
+    Renderer&     r   = app_.renderer();
+    TextRenderer& txt = app_.text();
+    const SDL_Rect box = Layout::IC_LOG;
+    const int lh = txt.line_h() > 0 ? txt.line_h() : 20;
+
+    r.fill_rect(box, {6, 8, 16, 170});
+    r.draw_rect(box, {50, 60, 95, 180});
+
+    SDL_Rect clip = {box.x + 8, box.y + 6, box.w - 16, box.h - 12};
+    SDL_RenderSetClipRect(r.raw(), &clip);
+
+    const int row_h   = lh + 4;
+    int visible = clip.h / row_h;
+    if (visible < 1) visible = 1;
+    int start = log.count > visible ? log.count - visible : 0;
+    for (int i = start; i < log.count; ++i) {
+        const ChatEntry& e = log.at(i);
+        int y = clip.y + (i - start) * row_h;
+        // Showname in a neutral tint, message in its AO text colour.
+        char nm[80];
+        std::snprintf(nm, sizeof(nm), "%s:", e.name);
+        int nw = txt.draw(nm, clip.x, y, {180, 200, 235, 255});
+        SDL_Color col = TEXT_COLORS[(e.color < 10) ? e.color : 0];
+        txt.draw(e.message, clip.x + nw + 8, y, col);
+    }
+
+    SDL_RenderSetClipRect(r.raw(), nullptr);
 }
 
 void CourtroomScreen::render_viewport() {
@@ -969,9 +1030,136 @@ void CourtroomScreen::compose_and_send() {
     }
 }
 
+// ── Shared actions (controller / keyboard / touch all funnel here) ──────────────
+
+void CourtroomScreen::play_music(int idx) {
+    GameState& gs = app_.state();
+    if (idx < 0 || idx >= gs.music_count) return;
+    char buf[256];
+    int n = cmd::mc(buf, sizeof(buf), gs.music_list[idx],
+                    gs.my_char_id < 0 ? 0 : gs.my_char_id, app_.username());
+    if (n > 0) app_.send_packet(buf, n);
+}
+
+void CourtroomScreen::join_area(int idx) {
+    GameState& gs = app_.state();
+    if (idx < 0 || idx >= gs.area_count) return;
+    // AO2 joins an area by sending a music-change to the area's name; the server
+    // moves us and follows up with BN / HP / chars, etc.
+    char buf[256];
+    int n = cmd::mc(buf, sizeof(buf), gs.areas[idx].name,
+                    gs.my_char_id < 0 ? 0 : gs.my_char_id, app_.username());
+    if (n > 0) {
+        app_.send_packet(buf, n);
+        gs.my_area_idx = idx;                  // optimistic
+        active_panel_ = CourtroomPanel::None;
+    }
+}
+
+void CourtroomScreen::compose_ooc() {
+    char text[256] = {};
+    kb_active_ = true;
+    bool ok = show_keyboard("OOC message", "", text, sizeof(text));
+    kb_active_ = false;
+    if (ok && text[0]) {
+        char buf[512];
+        int n = cmd::ct(buf, sizeof(buf), app_.username(), text);
+        if (n > 0) app_.send_packet(buf, n);
+    }
+}
+
+// ── Touch ───────────────────────────────────────────────────────────────────────
+
+void CourtroomScreen::handle_tap(int x, int y) {
+    GameState& gs = app_.state();
+    const ThemeLayout& tl = app_.theme().layout();
+
+    // While a panel is open it covers the HUD buttons, so route taps to it.
+    if (active_panel_ != CourtroomPanel::None) { handle_panel_tap(x, y); return; }
+
+    // HUD buttons open their panel.
+    if (pt_in(x, y, tl.btn_ic)) { active_panel_ = CourtroomPanel::ICInput; ic_buttons_dirty_ = true; return; }
+    if (pt_in(x, y, tl.btn_ooc))      { active_panel_ = CourtroomPanel::OOC;      return; }
+    if (pt_in(x, y, tl.btn_music))    { active_panel_ = CourtroomPanel::Music;    return; }
+    if (pt_in(x, y, tl.btn_evidence)) { active_panel_ = CourtroomPanel::Evidence; return; }
+    if (pt_in(x, y, tl.btn_area)) {
+        active_panel_ = CourtroomPanel::Area;
+        if (gs.my_area_idx >= 0 && gs.my_area_idx < gs.area_count) area_sel_ = gs.my_area_idx;
+        return;
+    }
+
+    // Tapping the chat bar skips the typewriter, or (when idle) opens the
+    // keyboard to send a line immediately with the current emote/colour/pos.
+    if (pt_in(x, y, tl.chatbox) || pt_in(x, y, tl.nameplate)) {
+        if (phase_ == Phase::Talking && tw_pos_ < tw_max_) tw_pos_ = tw_max_;
+        else                                               compose_and_send();
+    }
+}
+
+// Hit-test the open panel. Geometry MUST match render_active_panel().
+void CourtroomScreen::handle_panel_tap(int x, int y) {
+    GameState& gs = app_.state();
+    const ThemeLayout& tl = app_.theme().layout();
+    const int lh = app_.text().line_h() > 0 ? app_.text().line_h() : 20;
+
+    if (active_panel_ == CourtroomPanel::Music) {
+        const SDL_Rect& p = tl.panel_music;
+        if (!pt_in(x, y, p)) { active_panel_ = CourtroomPanel::None; return; }
+        const int row_h = lh + 10;
+        int i = (y - (p.y + 4)) / row_h;
+        int idx = music_scroll_ + i;
+        if (i >= 0 && idx >= 0 && idx < gs.music_count) { music_sel_ = idx; play_music(idx); }
+        return;
+    }
+    if (active_panel_ == CourtroomPanel::Area) {
+        const SDL_Rect& p = tl.panel_music;   // area panel shares this rect
+        if (!pt_in(x, y, p)) { active_panel_ = CourtroomPanel::None; return; }
+        const int row_h = lh + 14;
+        const int top   = p.y + 10 + lh + 6;
+        if (y >= top) {
+            int idx = area_scroll_ + (y - top) / row_h;
+            if (idx >= 0 && idx < gs.area_count) { area_sel_ = idx; join_area(idx); }
+        }
+        return;
+    }
+    if (active_panel_ == CourtroomPanel::OOC) {
+        if (!pt_in(x, y, tl.panel_ooc)) { active_panel_ = CourtroomPanel::None; return; }
+        compose_ooc();   // tap the OOC panel to type a line
+        return;
+    }
+    if (active_panel_ == CourtroomPanel::Evidence) {
+        if (!pt_in(x, y, tl.panel_evidence)) active_panel_ = CourtroomPanel::None;
+        return;
+    }
+    if (active_panel_ == CourtroomPanel::ICInput) {
+        const SDL_Rect box = Layout::IC_COMPOSER;
+        if (!pt_in(x, y, box)) { active_panel_ = CourtroomPanel::None; return; }
+        const int content_y = box.y + lh + 28;
+        const int cols = 4, cell_w = 144, cell_h = 56, gap = 6, rows_vis = 5;
+        const int grid_x = box.x + 20, grid_y = content_y;
+        const int total = own_loaded_ ? own_char_.emotion_count : 0;
+        for (int vr = 0; vr < rows_vis; ++vr)
+            for (int col = 0; col < cols; ++col) {
+                int idx = (ic_emote_scroll_ + vr) * cols + col;
+                if (idx >= total) continue;
+                SDL_Rect cell = {grid_x + col * (cell_w + gap),
+                                 grid_y + vr * (cell_h + gap), cell_w, cell_h};
+                if (pt_in(x, y, cell)) { ic_emote_sel_ = idx; ic_buttons_dirty_ = true; return; }
+            }
+        SDL_Rect mp = {box.x + 20, grid_y + rows_vis * (cell_h + gap) + 14,
+                       box.w - 40, lh * 2 + 12};
+        if (pt_in(x, y, mp)) compose_and_send();
+        return;
+    }
+}
+
 void CourtroomScreen::handle_event(const SDL_Event& e) {
     if (kb_active_) return;
     GameState& gs = app_.state();
+
+    // Touch / mouse tap → route to the HUD buttons, chat bar, or open panel.
+    int tx, ty;
+    if (tap_point(e, app_.renderer().raw(), tx, ty)) { handle_tap(tx, ty); return; }
 
     enum Act { None, Up, Down, Left, Right, Confirm, Back,
                TogOOC, TogMusic, TogEvi, TogIC, TogArea, Disconnect } act = None;
@@ -1044,12 +1232,7 @@ void CourtroomScreen::handle_event(const SDL_Event& e) {
             if (act == Up)   { if (music_sel_ > 0) --music_sel_; }
             if (act == Down) { if (music_sel_ < gs.music_count - 1) ++music_sel_; }
             if (act == Back) active_panel_ = CourtroomPanel::None;
-            if (act == Confirm && music_sel_ >= 0 && music_sel_ < gs.music_count) {
-                char buf[256];
-                int n = cmd::mc(buf, sizeof(buf), gs.music_list[music_sel_],
-                                gs.my_char_id < 0 ? 0 : gs.my_char_id, app_.username());
-                if (n > 0) app_.send_packet(buf, n);
-            }
+            if (act == Confirm) play_music(music_sel_);
             break;
 
         case CourtroomPanel::OOC:
@@ -1057,17 +1240,7 @@ void CourtroomScreen::handle_event(const SDL_Event& e) {
             if (act == Down) ++ooc_scroll_;
             if (ooc_scroll_ < 0) ooc_scroll_ = 0;
             if (act == Back) active_panel_ = CourtroomPanel::None;
-            if (act == Confirm) {
-                char text[256] = {};
-                kb_active_ = true;
-                bool ok = show_keyboard("OOC message", "", text, sizeof(text));
-                kb_active_ = false;
-                if (ok && text[0]) {
-                    char buf[512];
-                    int n = cmd::ct(buf, sizeof(buf), app_.username(), text);
-                    if (n > 0) app_.send_packet(buf, n);
-                }
-            }
+            if (act == Confirm) compose_ooc();
             break;
 
         case CourtroomPanel::Evidence:
@@ -1080,18 +1253,7 @@ void CourtroomScreen::handle_event(const SDL_Event& e) {
             if (act == Up)   { if (area_sel_ > 0) --area_sel_; }
             if (act == Down) { if (area_sel_ < gs.area_count - 1) ++area_sel_; }
             if (act == Back) active_panel_ = CourtroomPanel::None;
-            if (act == Confirm && area_sel_ >= 0 && area_sel_ < gs.area_count) {
-                // AO2 joins an area by sending a music-change to the area's name;
-                // the server moves us and follows up with BN / HP / chars, etc.
-                char buf[256];
-                int n = cmd::mc(buf, sizeof(buf), gs.areas[area_sel_].name,
-                                gs.my_char_id < 0 ? 0 : gs.my_char_id, app_.username());
-                if (n > 0) {
-                    app_.send_packet(buf, n);
-                    gs.my_area_idx = area_sel_;                 // optimistic
-                    active_panel_ = CourtroomPanel::None;
-                }
-            }
+            if (act == Confirm) join_area(area_sel_);
             break;
 
         case CourtroomPanel::ICInput:

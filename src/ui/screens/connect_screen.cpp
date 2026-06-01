@@ -1,4 +1,5 @@
 #include "connect_screen.hpp"
+#include "../touch.hpp"
 #include "../../app.hpp"
 #include "../../render/renderer.hpp"
 #include "../../input/virtual_keyboard.hpp"
@@ -441,10 +442,58 @@ void ConnectScreen::handle_event(const SDL_Event& e) {
         return e.type == SDL_CONTROLLERBUTTONDOWN && e.cbutton.button == b;
     };
 
+    // ── Touch / mouse ──────────────────────────────────────────────────────────
+    int tx, ty;
+    if (tap_point(e, app_.renderer().raw(), tx, ty)) {
+        // Tab bar [y 50..80]: Servers | Direct | Credits
+        if (ty >= 50 && ty < 80) {
+            if      (tx < 180) tab_ = 0;
+            else if (tx < 362) tab_ = 1;
+            else if (tx < 544) tab_ = 2;
+            return;
+        }
+        if (tab_ == 0 && server_count_ > 0 && ty >= 80) {
+            int i = (ty - 80) / ROW_H;
+            int idx = scroll_offset_ + i;
+            if (i >= 0 && i < VISIBLE_ROWS && idx < server_count_) {
+                if (idx == server_sel_) connect_to_server(servers_[idx]);
+                else                    server_sel_ = idx;
+            }
+            return;
+        }
+        if (tab_ == 1) {
+            for (int i = 0; i < 4; ++i) {
+                SDL_Rect row = {100, 80 + 20 + i * 100, Renderer::WIDTH - 200, 70};
+                if (pt_in(tx, ty, row)) {
+                    direct_sel_ = i;
+                    if      (i == 0) open_keyboard("Server address", host_, host_, sizeof(host_), 255);
+                    else if (i == 1) open_keyboard("Port", port_str_, port_str_, sizeof(port_str_), 7);
+                    else if (i == 2) {
+                        char uname[64];
+                        std::strncpy(uname, app_.username(), sizeof(uname) - 1);
+                        uname[sizeof(uname) - 1] = '\0';
+                        open_keyboard("Username", uname, uname, sizeof(uname), 63);
+                        app_.set_username(uname);
+                    } else connect_direct();
+                    return;
+                }
+            }
+            return;
+        }
+        return;  // credits tab: tabs handled above, nothing else tappable
+    }
+
     // ── Tab switch (L / R shoulder on either tab) ──────────────────────────────
     if (btn_down(SDL_CONTROLLER_BUTTON_LEFTSHOULDER) ||
         (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_q)) {
-        tab_ = (tab_ == 0) ? 1 : 0;
+        tab_ = (tab_ + 1) % 3;   // Servers → Direct → Credits → …
+        return;
+    }
+    // Credits tab: only quit is actionable.
+    if (tab_ == 2) {
+        if (btn_down(SDL_CONTROLLER_BUTTON_START) ||
+            (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_ESCAPE))
+            app_.quit();
         return;
     }
     if (btn_down(SDL_CONTROLLER_BUTTON_RIGHTSHOULDER) && tab_ == 1) {
@@ -622,8 +671,10 @@ void ConnectScreen::render() {
     // ── Tab bar [0,50,1280,30] ────────────────────────────────────────────────
     r.fill_rect({0,   50, 180, 30}, tab_ == 0 ? TAB_ACT : TAB_INACT);
     r.fill_rect({182, 50, 180, 30}, tab_ == 1 ? TAB_ACT : TAB_INACT);
+    r.fill_rect({364, 50, 180, 30}, tab_ == 2 ? TAB_ACT : TAB_INACT);
     text.draw("Servers",       10,  57, tab_ == 0 ? YELLOW : GRAY);
     text.draw("Direct Connect",192, 57, tab_ == 1 ? YELLOW : GRAY);
+    text.draw("Credits",       374, 57, tab_ == 2 ? YELLOW : GRAY);
 
     // ── Content area [0,80,1280,560] ──────────────────────────────────────────
     const int CONTENT_Y = 80;
@@ -684,7 +735,7 @@ void ConnectScreen::render() {
                                   10, desc_y + 4, CONTENT_W - 20, GRAY);
             }
         }
-    } else {
+    } else if (tab_ == 1) {
         // ── Direct connect ────────────────────────────────────────────────────
         const char* labels[] = { "Server Address:", "Port:", "Username:", "[ Connect ]" };
         const char* values[] = { host_, port_str_, app_.username(), "" };
@@ -708,6 +759,21 @@ void ConnectScreen::render() {
                           sel ? YELLOW : WHITE);
             }
         }
+    } else {
+        // ── Credits ───────────────────────────────────────────────────────────
+        SDL_Rect box = {Renderer::WIDTH / 2 - 360, CONTENT_Y + 60, 720, 280};
+        r.fill_rect(box, {20, 22, 44, 255});
+        r.draw_rect(box, {70, 90, 150, 255});
+        int cx = box.x + 30;
+        int cy = box.y + 28;
+        text.draw("ferris-ao-switch", cx, cy, YELLOW);                       cy += 46;
+        text.draw("A Nintendo Switch homebrew client for Attorney Online 2",
+                  cx, cy, WHITE);                                            cy += 50;
+        text.draw("Created by SyntaxNyah", cx, cy, WHITE);                   cy += 36;
+        text.draw("https://github.com/SyntaxNyah/ferris-ao-switch",
+                  cx, cy, {130, 190, 255, 255});                            cy += 52;
+        text.draw("Not affiliated with the official Attorney Online project.",
+                  cx, cy, GRAY);
     }
 
     // ── Status bar [0,640,1280,50] ────────────────────────────────────────────

@@ -2,6 +2,10 @@
 #include "../net/http_fetch.hpp"
 #include <cstdio>
 #include <cstring>
+#include <cstdint>
+#ifdef __SWITCH__
+#include <sys/stat.h>   // mkdir for the disk cache
+#endif
 
 namespace ao {
 
@@ -267,6 +271,66 @@ static uint8_t* read_local_file(const char* path, int* out_size) {
     return buf;
 }
 
+// ── Persistent HTTP disk cache ──────────────────────────────────────────────────
+// Streamed assets are written to sdmc:/switch/ferris-ao/cache keyed by a hash of
+// their FULL URL (so two servers' "characters/x/(a)normal.webp" don't collide),
+// then served straight from SD on the next view or relaunch — repeat fetches
+// skip the network entirely, which is the biggest win on HTTPS/Cloudflare CDNs.
+//
+// Performance note: this lives *only* on the HTTP tiers, which only ever run on
+// the AssetStream worker threads (and the one-shot MC music load) — never on the
+// render loop. A miss costs one extra fopen + (after download) one capped write;
+// a hit replaces a whole network round-trip. So it speeds fetching up and can't
+// stall the courtroom. Files larger than the cap are streamed but not cached.
+
+#ifdef __SWITCH__
+static constexpr const char* CACHE_BASE = "sdmc:/switch/ferris-ao/cache";
+static constexpr long DISK_CACHE_MAX_BYTES = 8L * 1024 * 1024;
+static bool s_cache_dir_ready = false;
+static bool s_cache_enabled   = true;
+
+static uint64_t fnv1a64(const char* s) {
+    uint64_t h = 1469598103934665603ULL;
+    for (; *s; ++s) { h ^= (unsigned char)*s; h *= 1099511628211ULL; }
+    return h;
+}
+
+static void cache_path_for(const char* url, char* out, int cap) {
+    std::snprintf(out, cap, "%s/%016llx.bin", CACHE_BASE,
+                  (unsigned long long)fnv1a64(url));
+}
+
+static void ensure_cache_dir() {
+    if (s_cache_dir_ready) return;
+    ::mkdir("sdmc:/switch",            0777);   // ignore EEXIST
+    ::mkdir("sdmc:/switch/ferris-ao",  0777);
+    ::mkdir(CACHE_BASE,                0777);
+    s_cache_dir_ready = true;
+}
+
+static uint8_t* disk_cache_read(const char* url, int* out_size) {
+    if (!s_cache_enabled) return nullptr;
+    char path[256];
+    cache_path_for(url, path, sizeof(path));
+    if (!file_exists(path)) return nullptr;
+    return read_local_file(path, out_size);   // SDL_malloc'd, caller owns
+}
+
+static void disk_cache_write(const char* url, const uint8_t* data, int size) {
+    if (!s_cache_enabled || !data || size <= 0 || size > DISK_CACHE_MAX_BYTES) return;
+    ensure_cache_dir();
+    char path[256];
+    cache_path_for(url, path, sizeof(path));
+    FILE* f = std::fopen(path, "wb");
+    if (!f) return;                              // best-effort; failures are silent
+    std::fwrite(data, 1, (size_t)size, f);
+    std::fclose(f);
+}
+#else
+static uint8_t* disk_cache_read(const char*, int*)            { return nullptr; }
+static void     disk_cache_write(const char*, const uint8_t*, int) {}
+#endif
+
 // ── resolve (local paths only) ────────────────────────────────────────────────
 
 bool AssetManager::resolve(const char* relative, char* out_path, int out_cap) {
@@ -307,7 +371,6 @@ static uint8_t* try_http_mount(const char* base, FailSet& fs, const char* tag,
                                const char* relative, int* out_size,
                                HttpClient* client) {
     if (!base || !base[0])          return nullptr;
-    if (is_failed(fs, relative))    return nullptr;
 
     char url[2048]; // base (512) + percent-encoded path (1024) + slack
     if (!build_http_url(base, relative, url, sizeof(url))) {
@@ -315,8 +378,14 @@ static uint8_t* try_http_mount(const char* base, FailSet& fs, const char* tag,
         return nullptr;
     }
 
+    // Persistent disk cache (keyed by full URL) — a hit skips the network.
+    if (uint8_t* cached = disk_cache_read(url, out_size)) return cached;
+
+    if (is_failed(fs, relative))    return nullptr;
+
     HttpResult hr = client ? client->get(url) : http_get(url);
     if (hr.ok) {
+        disk_cache_write(url, hr.data, hr.size);   // populate for next time
         *out_size = hr.size;
         return hr.data; // caller owns
     }

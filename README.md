@@ -46,6 +46,7 @@ ferris-ao-switch implements the full AO2 client protocol so Switch players can j
 - **Room switching** — in-courtroom **Rooms** panel lists every area with live player counts, statuses and lock states (ARUP); join one to move rooms without reconnecting
 - **IC messages** — typewriter effect, word wrap, per-message text colors (12 colors), shownames, objection/hold-it/take-that popups, realization flash, screenshake
 - **Emote picker** — IC composer shows a grid of your character's emotes with sprite-button thumbnails and a live preview of the selected one
+- **IC log** — always-on scrollback column showing recent IC lines (showname + colored message), newest at the bottom
 - **Pairing** — renders two characters side by side with individual offsets and flip states
 - **Evidence panel** — view, present, add, edit, and delete evidence; grid view with thumbnails
 - **Music panel** — full server music list; select and play any track; shows currently playing track
@@ -55,15 +56,17 @@ ferris-ao-switch implements the full AO2 client protocol so Switch players can j
 
 ### Assets
 - **HTTP & HTTPS streaming** — loads assets on-demand from a server CDN (`ASS` packet); `https://` (TLS) and `http://` URLs both supported; no base pack download needed
-- **Async, non-blocking loads** — sprites/backgrounds/music are prefetched on worker threads and decoded from cache on the main thread, so the courtroom never stalls on the network
+- **Async, non-blocking loads** — sprites/backgrounds/music are prefetched on 8 worker threads and decoded from cache on the main thread, so the courtroom never stalls on the network
+- **Persistent disk cache** — streamed assets are saved to `sdmc:/switch/ferris-ao/cache` (keyed by full URL) and served from SD on the next view/relaunch, so repeat fetches skip the network entirely — pairs with HTTPS keep-alive to make the most of Cloudflare/CDN edge caching
 - **Four-tier fallback** — server CDN → community CDN (`attorneyoffline.de/base/`) → `sdmc:/switch/ferris-ao/base/` local pack → `romfs:/` bundled fallback
-- **Local base optional** — the SD card base folder is only needed on servers without a CDN
+- **Server background only** — the courtroom streams the server's real background and never substitutes a bundled default courtroom (black until it loads)
+- **Sprite reuse** — a character talking line after line never re-downloads or re-decodes its sprite (loads are path-cached)
 - **APNG + GIF animations** — character idle, talk, and pre-animations via `IMG_LoadAnimation_RW()`
 - **LRU texture cache** — 256-slot cache; all lookups use relative paths as keys, regardless of source
-- **Background pre-fetcher** — `AssetStream` thread pre-loads upcoming assets into memory before the render loop needs them
-- **1280×720 layout** — matches Switch native resolution in both docked and handheld modes; full-screen courtroom stage with an overlaid chat bar, corner HP bars, and a now-playing strip (authentic AO composition, themeable via `courtroom_design.ini`)
+- **1280×720 layout** — matches Switch native resolution in both docked and handheld modes; full-screen courtroom stage with an overlaid chat bar, corner HP bars, a now-playing strip, and an always-on IC log (authentic AO composition, themeable via `courtroom_design.ini`)
 
 ### Input
+- **Touchscreen** — tap buttons, panels, server/character lists, emote grid; tap the chat box to type a line instantly. Works in handheld mode (and via mouse on Ryujinx)
 - **Joy-Con + Pro Controller** — full D-pad/stick/button mapping
 - **System keyboard** — uses libnx `swkbdShow()` for all text entry; works correctly on Ryujinx
 - **Keyboard fallback** — arrow keys + Enter + letter shortcuts for desktop/emulator development
@@ -491,6 +494,20 @@ Thumbnails stream in the background, so opening it never stalls the courtroom.
 | **A** | Open the system keyboard, then type and send the line |
 | **B** / **X** | Close the composer |
 
+### Touchscreen
+
+Everything is tappable in handheld mode (and via mouse on Ryujinx):
+
+| Screen | Tap |
+|---|---|
+| Connect | Tap a tab (Servers / Direct / Credits); tap a server to select, tap it again to connect; tap a Direct field to edit/connect |
+| Character select | Tap a character to highlight, tap it again to pick |
+| Courtroom | Tap a HUD button to open its panel; **tap the chat box to type a line instantly** (with the current emote/colour/position), or skip the typewriter if one is playing |
+| Music / Rooms panel | Tap a row to play that track / join that room |
+| IC composer | Tap an emote to select it; tap the message box to type & send |
+| OOC panel | Tap to open the keyboard |
+| Any panel | Tap outside it to close |
+
 ---
 
 ## Project Structure
@@ -696,9 +713,16 @@ Pull requests are welcome. Before contributing:
 ### Known limitations / TODO
 
 - No settings persistence — host/port/username reset on each launch; a `sdmc:/switch/ferris-ao/config.ini` save/load pass is planned
-- No touch input — the on-screen courtroom buttons are status indicators only; use the mapped buttons (handheld touch is a possible future addition)
 - Evidence can be viewed but not yet attached to an outgoing IC message from the UI
 - Switch rooms from inside the courtroom via the **Rooms** panel (`−`); the separate Area Select screen pushed before the courtroom is currently bypassed (Character Select enters the courtroom directly)
+
+---
+
+## Credits
+
+Created by **SyntaxNyah** — <https://github.com/SyntaxNyah/ferris-ao-switch>
+
+Also reachable in-app from the **Credits** tab on the connect screen.
 
 ---
 

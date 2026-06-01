@@ -9,8 +9,8 @@ AO2-Client, AO-SDL, webAO, the LemmyAO viewport, and the aolib JSON schemas).
 
 ## 1. Asset streaming (where files come from)
 
-Nothing is bundled except UI fallbacks. Every sprite/background/sound is
-resolved at runtime by `AssetManager`, which searches four tiers in order:
+Only the UI font is bundled. Every sprite/background/sound is resolved at
+runtime by `AssetManager`, which searches these tiers in order:
 
 1. **Prefetch cache** — in-memory, filled by the `AssetStream` worker threads.
 2. **Primary HTTP CDN** — the URL from the server's `ASS` handshake packet.
@@ -20,6 +20,15 @@ resolved at runtime by `AssetManager`, which searches four tiers in order:
 Each tier that 404s falls through to the next; per-URL failures are cached so a
 dead server is never hammered. HTTP paths are **lowercased** and percent-encoded
 (preserving `()` so `(a)normal.png` round-trips). See `asset_manager.cpp`.
+
+**Persistent disk cache (HTTPS/Cloudflare).** Both HTTP tiers are wrapped by an
+on-disk cache at `sdmc:/switch/ferris-ao/cache`, keyed by a hash of the full URL.
+`try_http_mount` checks the cache file before hitting the network and writes the
+bytes after a successful download (≤ 8 MB/file, best-effort). It runs only on the
+worker threads, so it makes repeat fetches (and relaunches) instant without ever
+touching the render loop. Combined with per-worker keep-alive `HttpClient`s, this
+is how the client leans on Cloudflare/CDN edge caching. Delete the folder to
+reclaim space; disabled on non-Switch builds.
 
 `open_rwops(rel)` returns an owning `SDL_RWops` (closing it frees the buffer),
 so it drops straight into `IMG_Load_RW`, `IMG_LoadAnimation_RW`,
@@ -98,7 +107,11 @@ character root**, except `.png`/`.webp.static` which use the **bare** name:
 | `jur` | `jurystand` | `jurydesk` |
 | `sea` | `seancestand` | `seancedesk` |
 
-Both fall back to `background/default/...`.
+The courtroom streams the **server's** background only — it does **not**
+substitute `background/default/...`, and an empty MS `pos` keeps the current
+position instead of snapping to `wit`. The viewport stays black until the
+server's background streams in, so a slow or no-pos line never flips the room to
+a bundled courtroom.
 
 ### Shout bubbles (`load_shout_bubble`)
 
@@ -271,7 +284,7 @@ panel highlights the new room immediately.
   IC line into a single cached texture once and blits a growing prefix of it. The
   earlier code rendered the growing substring every 35 ms step, creating and
   destroying a texture per character *and* evicting the rest of the UI text from
-  the 32-slot LRU (so shownames, buttons, music names, etc. re-rasterised every
+  the text LRU (so shownames, buttons, music names, etc. re-rasterised every
   frame). A small `wrap_*` cache holds the line offsets and is recomputed only
   when the message or wrap width changes, so each frame's reveal is O(1).
 - **Asset probing stops once a message is fully loaded.** `resolve_assets()`
@@ -281,3 +294,19 @@ panel highlights the new room immediately.
 - **Emote thumbnails are budgeted.** The composer decodes at most a handful of
   prefetched button images per frame, the same pattern the char-select grid uses
   to stay inside the 16 ms frame.
+- **Sprites don't reload between lines.** `APNGPlayer::load` is a no-op when asked
+  for the path it already holds, and `begin_message` skips re-prefetching the
+  speaker sprite when the char+emote is unchanged — so a character talking line
+  after line does zero asset work and skips the Loading gate. This was the main
+  cause of "characters reload every time someone talks".
+- **Big-server icon flood is gone.** Character icons are prefetched on-demand for
+  the visible window in `CharSelectScreen` (re-queued only when the scroll moves),
+  not bulk-queued for all 600 at lobby-enter, and `CourtroomScreen::on_enter`
+  calls `AssetStream::clear_pending()`. IC sprites no longer sit behind a wall of
+  icon fetches, so the first lines on a huge server are fast.
+- **Persistent disk cache.** Repeat views/relaunches read assets from SD instead
+  of the network (see §1), so steady-state chat on a server you've used before is
+  almost entirely cache hits.
+- **The IC log costs ~one blit per visible line.** Each log line is a stable
+  string that stays in the (96-slot) text cache, so the always-on log re-blits
+  cached textures with no per-frame rasterisation, wrapping, or allocation.

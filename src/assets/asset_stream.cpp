@@ -69,6 +69,13 @@ bool AssetStream::prefetch(const char* relative) {
     return true;
 }
 
+void AssetStream::clear_pending() {
+    if (!req_mutex_) return;
+    SDL_LockMutex(req_mutex_);
+    req_head_ = req_tail_;   // discard everything still queued
+    SDL_UnlockMutex(req_mutex_);
+}
+
 // ── Multi-extension prefetch helpers ─────────────────────────────────────────
 // Queue one prefetch per configured extension. AO-SDL fires all of these in
 // parallel through its HttpPool; we lean on the N_WORKERS worker threads for

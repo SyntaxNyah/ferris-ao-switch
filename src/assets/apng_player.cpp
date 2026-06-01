@@ -17,11 +17,19 @@ void APNGPlayer::unload() {
     accum_ms_      = 0;
     done_          = false;
     width_ = height_ = 0;
+    path_[0]       = '\0';
 }
 
 // `path` is a RELATIVE asset path.
 // Resolution order: HTTP streaming → sdmc: local base → romfs: bundled fallback.
 bool APNGPlayer::load(SDL_Renderer* r, const char* path) {
+    // Already showing this exact asset — keep the decoded frames. This is what
+    // makes a character talking line-after-line cheap: the courtroom re-requests
+    // the same (a)/(b) sprite every message, and without this each one paid a
+    // full re-decode (and a re-fetch if the prefetch entry had been evicted).
+    if (frame_count_ > 0 && path && std::strcmp(path, path_) == 0)
+        return true;
+
     unload();
 
     SDL_RWops* rw = AssetManager::open_rwops(path);
@@ -46,6 +54,10 @@ bool APNGPlayer::load(SDL_Renderer* r, const char* path) {
         width_  = anim->w;
         height_ = anim->h;
         IMG_FreeAnimation(anim);
+        if (frame_count_ > 0) {
+            std::strncpy(path_, path, sizeof(path_) - 1);
+            path_[sizeof(path_) - 1] = '\0';
+        }
         return frame_count_ > 0;
     }
     if (anim) IMG_FreeAnimation(anim);
@@ -68,6 +80,10 @@ bool APNGPlayer::load(SDL_Renderer* r, const char* path) {
     height_    = surf->h;
     SDL_FreeSurface(surf);
     frame_count_ = frames_[0] ? 1 : 0;
+    if (frame_count_ > 0) {
+        std::strncpy(path_, path, sizeof(path_) - 1);
+        path_[sizeof(path_) - 1] = '\0';
+    }
     return frame_count_ > 0;
 }
 

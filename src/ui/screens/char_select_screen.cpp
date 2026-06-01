@@ -1,5 +1,6 @@
 #include "char_select_screen.hpp"
 #include "courtroom_screen.hpp"
+#include "../touch.hpp"
 #include "../../app.hpp"
 #include "../../render/renderer.hpp"
 #include "../../state/game_state.hpp"
@@ -34,10 +35,40 @@ void CharSelectScreen::on_enter() {
     // prefetch cache.
 }
 
+// Claim a character (CC) and enter the courtroom. Optimistically records
+// my_char_id so the IC composer works before the server's PV confirmation lands.
+void CharSelectScreen::pick_char(int idx) {
+    GameState& gs = app_.state();
+    if (idx < 0 || idx >= gs.char_count || gs.char_taken[idx]) return;
+    gs.my_char_id = idx;
+    char buf[256];
+    int n = cmd::cc(buf, sizeof(buf), gs.my_uid, idx, "ferris-ao-switch");
+    app_.send_packet(buf, n);
+    app_.push_screen(new CourtroomScreen(app_));
+}
+
 void CharSelectScreen::handle_event(const SDL_Event& e) {
     GameState& gs = app_.state();
     int total = gs.char_count;
     if (total == 0) return;
+
+    // Touch / mouse: tap a cell to highlight it, tap the highlighted cell to pick.
+    int tx, ty;
+    if (tap_point(e, app_.renderer().raw(), tx, ty)) {
+        for (int row = 0; row < ROWS; ++row)
+            for (int col = 0; col < COLS; ++col) {
+                int idx = scroll_ + row * COLS + col;
+                if (idx >= total) continue;
+                SDL_Rect cell = {START_X + col * (CELL_W + CELL_GAP),
+                                 START_Y + row * (CELL_H + CELL_GAP), CELL_W, CELL_H};
+                if (pt_in(tx, ty, cell)) {
+                    if (idx == selected_) pick_char(idx);
+                    else                  selected_ = idx;
+                    return;
+                }
+            }
+        return;
+    }
 
     // Use keyboard for emulator convenience
     if (e.type == SDL_KEYDOWN) {
@@ -46,17 +77,7 @@ void CharSelectScreen::handle_event(const SDL_Event& e) {
             case SDLK_LEFT:  selected_ = (selected_ - 1 + total) % total; break;
             case SDLK_DOWN:  selected_ = (selected_ + COLS) % total; break;
             case SDLK_UP:    selected_ = (selected_ - COLS + total) % total; break;
-            case SDLK_RETURN:
-                if (!gs.char_taken[selected_]) {
-                    // Optimistically record our char_id so the courtroom IC
-                    // composer works before the server's PV confirmation lands.
-                    gs.my_char_id = selected_;
-                    char buf[256];
-                    int n = cmd::cc(buf, sizeof(buf), gs.my_uid, selected_, "ferris-ao-switch");
-                    app_.send_packet(buf, n);
-                    app_.push_screen(new CourtroomScreen(app_));
-                }
-                break;
+            case SDLK_RETURN: pick_char(selected_); break;
             default: break;
         }
     }
@@ -66,17 +87,7 @@ void CharSelectScreen::handle_event(const SDL_Event& e) {
             case SDL_CONTROLLER_BUTTON_DPAD_LEFT:  selected_=(selected_-1+total)%total; break;
             case SDL_CONTROLLER_BUTTON_DPAD_DOWN:  selected_=(selected_+COLS)%total; break;
             case SDL_CONTROLLER_BUTTON_DPAD_UP:    selected_=(selected_-COLS+total)%total; break;
-            case SDL_CONTROLLER_BUTTON_A:
-                if (!gs.char_taken[selected_]) {
-                    // Optimistically record our char_id so the courtroom IC
-                    // composer works before the server's PV confirmation lands.
-                    gs.my_char_id = selected_;
-                    char buf[256];
-                    int n = cmd::cc(buf, sizeof(buf), gs.my_uid, selected_, "ferris-ao-switch");
-                    app_.send_packet(buf, n);
-                    app_.push_screen(new CourtroomScreen(app_));
-                }
-                break;
+            case SDL_CONTROLLER_BUTTON_A:          pick_char(selected_); break;
             default: break;
         }
     }
@@ -92,41 +103,51 @@ void CharSelectScreen::update(uint32_t /*dt*/) {
     if (selected_ >= scroll_ + PAGE) scroll_ = selected_ - PAGE + 1;
     if (scroll_ < 0) scroll_ = 0;
 
-    // Decode up to DECODE_BUDGET prefetched icons per frame into the texture
-    // cache. Look ahead one full page past the visible region so scrolling
-    // down shows hot textures immediately. Budget is tuned to fit in the
-    // 16 ms frame budget — each PNG decode is ~0.5-1.5 ms on Switch. Try
-    // each charicon extension in order; use the first one that is ready.
+    // On-demand icon streaming for the visible + lookahead window only. Icons
+    // are NOT bulk-queued at lobby-enter (that flooded the AssetStream queue on
+    // big servers and starved the courtroom).
+    //
+    // Two passes, deliberately split so neither slows fetching:
+    //   - DECODE runs every frame: cheap peek() (no lock) + has_prefetch(), and
+    //     self-limits as icons land (a decoded icon hits peek() and is skipped).
+    //   - ENQUEUE runs ONLY when the scroll window moved. Queueing takes the
+    //     worker queue lock, so doing it every frame for still-downloading icons
+    //     would contend with the 8 workers and slow them down — gating on scroll
+    //     means we queue each window exactly once.
     constexpr int DECODE_BUDGET   = 12;
     constexpr int LOOKAHEAD_PAGES = 2;  // scan 2 pages (current + next)
     const ExtensionsConfig& ec = ExtensionsConfig::get();
+    const bool do_enqueue = (scroll_ != pf_scroll_);
     int decoded = 0;
     int scan_start = scroll_;
     int scan_end   = scroll_ + PAGE * LOOKAHEAD_PAGES;
     if (scan_end > total) scan_end = total;
-    for (int i = scan_start; i < scan_end && decoded < DECODE_BUDGET; ++i) {
+    for (int i = scan_start; i < scan_end; ++i) {
         if (!gs.characters[i].name[0]) continue;
         char lname[64]; lower_copy(lname, gs.characters[i].name, sizeof(lname));
-        bool already_cached = false;
+
+        bool cached = false, prefetched = false;
         for (int e = 0; e < ec.charicon_count; ++e) {
             char path[256];
             std::snprintf(path, sizeof(path), "characters/%s/char_icon%s",
                 lname, ec.charicon[e]);
-            if (app_.tex_cache().peek(path)) { already_cached = true; break; }
-        }
-        if (already_cached) continue;
-        // Try to decode whichever extension is already prefetched
-        for (int e = 0; e < ec.charicon_count; ++e) {
-            char path[256];
-            std::snprintf(path, sizeof(path), "characters/%s/char_icon%s",
-                lname, ec.charicon[e]);
-            if (AssetManager::has_prefetch(path)) {
-                app_.tex_cache().get(app_.renderer().raw(), path);
-                ++decoded;
-                break;
+            if (app_.tex_cache().peek(path)) { cached = true; break; }
+            if (!prefetched && AssetManager::has_prefetch(path)) {
+                if (decoded < DECODE_BUDGET) {
+                    app_.tex_cache().get(app_.renderer().raw(), path);
+                    ++decoded;
+                }
+                prefetched = true;   // bytes are in cache; decoded now or soon
             }
         }
+        if (cached || prefetched || !do_enqueue) continue;
+
+        // Not cached and not yet downloaded — queue it once for this window.
+        char base[256];
+        std::snprintf(base, sizeof(base), "characters/%s/char_icon", lname);
+        app_.asset_stream().prefetch_charicon(base);
     }
+    pf_scroll_ = scroll_;
 }
 
 void CharSelectScreen::render() {
@@ -155,19 +176,15 @@ void CharSelectScreen::render() {
         return;
     }
 
-    // Character grid
-    static constexpr int CELL_W = 140;
-    static constexpr int CELL_H = 140;
-    static constexpr int START_X = 40;
-    static constexpr int START_Y = 80;
-
+    // Character grid (geometry constants live in the header so the touch
+    // hit-test in handle_event stays in lockstep with this layout).
     for (int row = 0; row < ROWS; ++row) {
         for (int col = 0; col < COLS; ++col) {
             int idx = scroll_ + row * COLS + col;
             if (idx >= gs.char_count) break;
 
-            int x = START_X + col * (CELL_W + 8);
-            int y = START_Y + row * (CELL_H + 8);
+            int x = START_X + col * (CELL_W + CELL_GAP);
+            int y = START_Y + row * (CELL_H + CELL_GAP);
             SDL_Rect cell = {x, y, CELL_W, CELL_H};
 
             SDL_Color bg = gs.char_taken[idx]

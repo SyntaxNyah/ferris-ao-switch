@@ -44,10 +44,20 @@ private:
 
     // ── Rendering ─────────────────────────────────────────────────────────
     void render_viewport();
+    void render_ic_log();        // always-on IC scrollback (left column)
     void render_chat_area();
     void render_side_panel();
     void render_active_panel();
     void draw_sprite_fill(APNGPlayer& p, int off_x_pct, bool flip);
+
+    // ── Touch ───────────────────────────────────────────────────────────────
+    void handle_tap(int x, int y);        // route a tap to a button / chatbox / panel
+    void handle_panel_tap(int x, int y);  // tap inside the open panel
+
+    // ── Actions (shared by controller, keyboard and touch) ──────────────────
+    void join_area(int idx);   // send AO2 area-join (MC) for areas[idx]
+    void play_music(int idx);  // send MC for music_list[idx]
+    void compose_ooc();        // open keyboard, send a CT (OOC) line
 
     // ── IC composer ───────────────────────────────────────────────────────
     void load_own_character();

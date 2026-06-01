@@ -203,7 +203,7 @@ bool ready() const;
 ```
 
 **Cache internals:**
-- 32 `Entry` slots: `{text[256], color, max_w, tex, w, h, lru, valid}`
+- `CACHE_SIZE = 96` `Entry` slots: `{text[256], color, max_w, tex, w, h, lru, valid}` — sized to hold the always-on IC log + HUD + an open panel's rows without thrashing
 - Cache key: `(text, color RGBA, max_w)` — same text at different wrap widths gets separate entries
 - LRU eviction: `frame_` increments on every `get_cached` call; victim = entry with the lowest `lru` value
 - On eviction: `SDL_DestroyTexture(old_tex)` before overwriting the slot
@@ -255,6 +255,27 @@ full-screen screen hides everything beneath it (the courtroom never shows the
 character grid behind it). Transparent overlay screens override `opaque()` to
 return `false`; all current screens are opaque and the courtroom panels are
 inline, not separate screens.
+
+---
+
+### `src/ui/touch.hpp`
+
+Header-only tap helpers shared by every screen.
+
+```cpp
+bool tap_point(const SDL_Event& e, SDL_Renderer* r, int& x, int& y);
+bool pt_in(int x, int y, const SDL_Rect& rc);
+```
+
+`tap_point` returns true on a tap and fills **logical (1280×720)** coordinates:
+- `SDL_FINGERDOWN` (Switch touchscreen) — normalized 0..1 × `Renderer::WIDTH/HEIGHT`.
+- `SDL_MOUSEBUTTONDOWN` left click (Ryujinx/desktop) — mapped via
+  `SDL_RenderWindowToLogical`. SDL's synthetic touch-as-mouse events
+  (`which == SDL_TOUCH_MOUSEID`) are ignored so a tap is never handled twice.
+
+Each screen calls `tap_point` at the top of `handle_event` and hit-tests with
+`pt_in` against the same rects it renders. There is no cursor state — every tap
+is a discrete press.
 
 ---
 
@@ -651,13 +672,14 @@ std::function<void()> on_disconnect;    // Connection lost → pop to ConnectScr
 
 **Static class:** `ao::AssetManager`
 
-Four-tier asset resolution with HTTP streaming support (mirrors AO-SDL's
-`MountManager`).
+Four-tier asset resolution with HTTP streaming + an on-disk HTTP cache (mirrors
+AO-SDL's `MountManager`).
 
 **Priority order:**
 
 | Tier | Source | When active |
 |------|--------|-------------|
+| 0 | In-memory prefetch cache | Warmed by `AssetStream` workers |
 | 1 | Primary HTTP — `<asset_url>/<relative>` | Server sent an `ASS` packet with a CDN URL |
 | 2 | Secondary HTTP — `<secondary_url>/<relative>` | Community fallback CDN (set in `App::init`) |
 | 3 | `sdmc:/switch/ferris-ao/base/<relative>` | SD card base folder present |
@@ -669,6 +691,17 @@ server that only hosts its custom characters on its own CDN still resolves the
 classic base pack. The local base folder (tier 3) is entirely **optional**. A
 tier that 404s falls through to the next; network failures are cached per-URL so
 a dead host is never hammered.
+
+**On-disk HTTP cache (HTTPS/Cloudflare persistence).** Both HTTP tiers are
+wrapped by a persistent disk cache at `sdmc:/switch/ferris-ao/cache`, keyed by a
+64-bit FNV-1a hash of the **full URL** (so two servers' identically-named assets
+never collide). `try_http_mount` checks the cache file first (a hit skips the
+network entirely) and writes the bytes after a successful download (capped at
+8 MB/file, best-effort). It runs only on the HTTP tiers — i.e. on the
+`AssetStream` worker threads (and the one-shot MC music load) — never on the
+render loop, so it speeds repeat fetches up and can't stall the courtroom. Cache
+files are immutable AO assets; delete the folder to reclaim space. Disabled on
+non-Switch builds.
 
 **URL composition (AO-SDL `MountHttp` semantics):** relative paths are
 **lowercased** before being sent to either HTTP tier (AO2 CDNs host
@@ -718,11 +751,11 @@ static const char* romfs_base();  // "romfs:" (or "romfs" on desktop)
 **`open_rwops` returns a custom owning `SDL_RWops`** (`SDL_AllocRW()` + custom function pointers). Closing it (by SDL_image, SDL_mixer, or manually) frees the underlying buffer automatically — no separate bookkeeping.
 
 **`fetch_bytes` consumption order:** prefetch cache (consumed, single-use) →
-primary HTTP → secondary HTTP → `sdmc:` → `romfs:`. `has_prefetch()` is the
-non-consuming peek the courtroom/char-select use to decide what to decode this
-frame.
+primary HTTP (disk-cache-checked) → secondary HTTP (disk-cache-checked) →
+`sdmc:` → `romfs:`. `has_prefetch()` is the non-consuming peek the
+courtroom/char-select use to decide what to decode this frame.
 
-**Prefetch cache:** fixed `PrefetchEntry` array guarded by an `SDL_mutex`; FIFO
+**Prefetch cache:** `PREFETCH_SLOTS = 768` `PrefetchEntry` array guarded by an `SDL_mutex`; FIFO
 eviction when full. `store_prefetch` is called by `AssetStream`; `fetch_bytes`
 removes the entry (single-use), while `has_prefetch` only checks.
 
@@ -796,7 +829,7 @@ calling `mbedtls_net_connect` directly.
 
 **Class:** `ao::AssetStream`
 
-Background SDL thread that pre-warms the `AssetManager` prefetch cache. Prevents hitches when assets are first needed by downloading them before the render loop requests them.
+`N_WORKERS = 8` background SDL threads that pre-warm the `AssetManager` prefetch cache. Prevents hitches when assets are first needed by downloading them before the render loop requests them.
 
 ```cpp
 void start();
@@ -804,14 +837,28 @@ void stop();
 
 // Queue a relative path for background prefetch.
 // Returns false if request queue is full (retry next frame).
-// Silently deduplicates requests already in the queue.
+// Silently deduplicates requests already in the queue (linear scan under lock).
 bool prefetch(const char* relative);
+
+// Drop every still-queued request (in-flight downloads finish). The courtroom
+// calls this on entry so IC sprite prefetches aren't stuck behind a flood of
+// character-select icon prefetches on big servers.
+void clear_pending();
 
 // Drain completed prefetches (for logging/debugging — optional).
 bool poll_done(char* out_path, int out_cap);
 ```
 
-**`STREAM_QUEUE_SIZE = 64`** — max concurrent pending requests.
+**`STREAM_QUEUE_SIZE = 2048`** — request ring capacity.
+
+**Keeping the queue shallow (big-server IC latency).** Character icons are
+**not** bulk-queued at lobby-enter; `CharSelectScreen` prefetches only its
+visible + lookahead window, and re-queues a window only when the scroll moves
+(so the per-frame queue-lock churn that would slow the workers never happens).
+On a 600-character server this stops the icon flood from starving the courtroom,
+and `CourtroomScreen::on_enter` calls `clear_pending()` to drop any leftovers
+before queueing the scene. Combined with the on-disk cache, the second view of
+any asset skips the network entirely.
 
 **Worker loop:**
 1. Block on `SDL_CondWait` until `prefetch()` signals work
@@ -932,6 +979,8 @@ void reset();                          // back to first frame
 **HTTP streaming:** `load(r, path)` takes a relative path and resolves it via `AssetManager::open_rwops()` — prefetch → primary CDN → secondary CDN → sdmc → romfs. No caller path-resolution needed.
 
 **Resource management:** `unload()` destroys all `SDL_Texture*` and zeros arrays. Called automatically in `load()` before loading a new animation.
+
+**Path cache (no reload):** `load()` records the loaded relative path and returns immediately if asked to load the **same** path again — keeping the decoded frames. This is what makes a character talking line-after-line cheap: the courtroom re-requests the same `(a)`/`(b)` sprite each message, and without this every line paid a full re-decode (and a re-fetch if the prefetch entry had been evicted). `CourtroomScreen::begin_message` also skips re-prefetching the speaker sprite when the char+emote is unchanged, so a repeated line does no asset work at all and skips the Loading gate.
 
 ---
 
@@ -1113,7 +1162,13 @@ waiting_for_keyboard_ = false;
 
 ### `src/ui/screens/connect_screen.hpp` / `connect_screen.cpp`
 
-First screen the user sees. Two-tab UI: **Servers** (tab 0) and **Direct Connect** (tab 1).
+First screen the user sees. Three-tab UI: **Servers** (tab 0), **Direct Connect**
+(tab 1), and **Credits** (tab 2). L cycles tabs (`tab_ = (tab_+1)%3`); tapping a
+tab in the tab bar selects it directly. The Credits tab shows the project name,
+that it was created by **SyntaxNyah**, and the repo URL
+`https://github.com/SyntaxNyah/ferris-ao-switch`. Touch: tap a server row to
+select (tap the selected row to connect); tap a direct-connect field to edit it
+/ connect.
 
 **Server browser (tab 0):**
 - Background SDL thread (`fetch_thread_fn`) calls `http_get(ms_url_)` on entry; `SDL_AtomicSet` tracks fetch state (0=idle, 1=fetching, 2=done, 3=error)
@@ -1161,13 +1216,16 @@ char         ms_url_[256];         // master server URL (configurable)
 8×4 grid of character slots (32 per page). Infinite pages (scroll wraps at `gs.char_count`).
 
 - D-pad → navigate grid
-- L/R (TabL/TabR) → prev/next page
-- A → select character if not taken → sends `CC` packet → `app.push_screen(new AreaSelectScreen(...))`
-- B → back to ConnectScreen (sends disconnect)
-- Taken slots rendered dimmed; available slots rendered with character name and colored square placeholder
-- Character names read from `gs.chars[i].name`
+- A → `pick_char(selected_)`: claim it if not taken → sends `CC` → `push_screen(new CourtroomScreen(...))` (the dedicated AreaSelectScreen is currently bypassed; rooms are switched from inside the courtroom)
+- Touch → tap a cell to highlight, tap the highlighted cell to pick (shares `pick_char`)
+- Taken slots rendered dimmed; available slots show the icon (or a colored placeholder) + name
+- Character names read from `gs.characters[i].name`
 
-**Does not load textures.** Character portrait loading is deferred to CourtroomScreen for memory reasons.
+**On-demand icon streaming.** `update()` decodes prefetched icons for the
+visible + lookahead window into the `TextureCache` (budgeted per frame), and
+queues icons for download **once per scroll position** (`pf_scroll_`) so the
+`AssetStream` queue stays shallow. Grid geometry (`CELL_W/H`, `START_X/Y`,
+`CELL_GAP`) lives in the header so `render()` and the touch hit-test agree.
 
 ---
 
@@ -1187,12 +1245,28 @@ Scrollable list showing up to 10 areas at a time. Reads `gs.areas[]` for player 
 
 Main gameplay screen. Renders the AO2 courtroom in real time — streamed
 backgrounds, desks, character idle/talk sprites, pre-animations, shout bubbles,
-the typewriter chatbox, music/SFX/blips — and composes outgoing IC/OOC/MC.
-The animation state machine, typewriter, and panels are all inlined here
-(there are **no** separate `chatbox.cpp` / `ic_input.cpp` files; an earlier
-revision split them out but the current screen is monolithic).
+the typewriter chatbox, an always-on IC log, music/SFX/blips — and composes
+outgoing IC/OOC/MC. The animation state machine, typewriter, and panels are all
+inlined here (there are **no** separate `chatbox.cpp` / `ic_input.cpp` files; an
+earlier revision split them out but the current screen is monolithic).
 
-**`CourtroomPanel` enum:** `{ None, OOC, Music, Evidence, ICInput }`
+**Always-on IC log (`render_ic_log`).** A translucent column down the left of
+the stage (`Layout::IC_LOG`) draws the tail of `gs.ic_log` (showname tint +
+message in its AO colour), newest at the bottom, clipped so long lines never
+spill onto the stage. Every line is a stable string, so after its first frame
+each draw is a `TextRenderer` cache hit (a blit, no rasterisation) — there is no
+per-frame wrapping or allocation.
+
+**Touch (`handle_tap` / `handle_panel_tap`).** Taps (Switch touchscreen or a
+Ryujinx mouse, via `ui/touch.hpp::tap_point`) are hit-tested against the HUD
+buttons (open the matching panel), the chat bar (skip the typewriter, or — when
+idle — open the keyboard and fire a line immediately with the current
+emote/colour/pos), and the open panel (music/area rows select+act, the emote
+grid picks an emote, the OOC panel opens the keyboard). A tap outside an open
+panel closes it. Controller/keyboard, and touch all funnel through the shared
+`join_area` / `play_music` / `compose_ooc` / `compose_and_send` helpers.
+
+**`CourtroomPanel` enum:** `{ None, OOC, Music, Evidence, Area, ICInput }`
 
 **Animation players (all `APNGPlayer`, all stream via `AssetManager`):**
 `bg_player_`, `desk_player_`, `idle_player_` (a), `talk_player_` (b),
@@ -1579,8 +1653,12 @@ Background: `background/<bg>/<posfile>.<ext>` where `<posfile>` maps the side
 (`bg_filename()`): `def→defenseempty`, `pro→prosecutorempty`, `wit→witnessempty`,
 `jud→judgestand`, `hld→helperstand`, `hlp→prohelperstand`, `jur→jurystand`,
 `sea→seancestand`. Desk overlay: `background/<bg>/<deskfile>.<ext>`
-(`def→defensedesk`, `pro→prosecutiondesk`, `wit→stand`, …). Both fall back to
-`background/default/...`.
+(`def→defensedesk`, `pro→prosecutiondesk`, `wit→stand`, …). The courtroom
+streams the **server's** background only — it does **not** fall back to
+`background/default/...` (that bundled courtroom was showing up while the real
+background was still downloading). The viewport stays black until the server's
+background streams in. An empty MS `pos` keeps the current position rather than
+snapping to `wit`, so a no-pos line can't flip the background to a courtroom.
 
 ### 11. `SDLNet_TCP_Send` is not frame-safe on partial sends
 

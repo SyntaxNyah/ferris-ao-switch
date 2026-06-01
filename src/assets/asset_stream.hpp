@@ -38,6 +38,11 @@ public:
     // Silently ignores duplicate requests already in the queue.
     bool prefetch(const char* relative);
 
+    // Drop every still-queued request (in-flight downloads finish normally).
+    // The courtroom calls this on entry so IC sprite prefetches are not stuck
+    // behind a flood of character-select icon prefetches on big servers.
+    void clear_pending();
+
     // Multi-extension prefetch helpers — queue every variant that the server
     // might ship for a given asset kind. Mirrors AO-SDL's AssetLibrary::probe()
     // behaviour where all candidate extensions are fetched concurrently and

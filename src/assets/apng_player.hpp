@@ -42,6 +42,7 @@ public:
     void reset();
 
 private:
+    char         path_[256] = {};   // currently-loaded asset; load() of the same path is a no-op
     SDL_Texture* frames_[APNG_MAX_FRAMES] = {};
     int          delays_[APNG_MAX_FRAMES] = {};  // ms per frame
     int          frame_count_ = 0;

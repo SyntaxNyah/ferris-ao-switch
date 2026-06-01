@@ -62,7 +62,11 @@ private:
     TTF_Font*     font_     = nullptr;
     int           line_h_   = 0;
 
-    static constexpr int CACHE_SIZE = 32;
+    // Sized to hold every simultaneously-visible string without thrashing: the
+    // always-on IC log (~14 lines × 2) plus the HUD, a typewriter line, and an
+    // open panel's rows. Stable strings then stay cached frame-to-frame, so the
+    // log and UI never re-rasterise — only genuinely new text allocates.
+    static constexpr int CACHE_SIZE = 96;
     static constexpr int MAX_TEXT   = 255;
 
     struct Entry {

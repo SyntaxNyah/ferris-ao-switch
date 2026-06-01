@@ -211,34 +211,10 @@ void App::update(uint32_t dt_ms) {
         }
         ExtensionsConfig::fetch_and_apply();
 
-        // Bulk-prefetch every character icon so the char select grid lights up
-        // as the user scrolls instead of per-page. AssetStream workers share a
-        // keep-alive HttpClient each, so queueing hundreds of paths costs one
-        // TLS handshake per worker, not per icon.
-        //
-        // Names are lowercased here so the prefetch-cache key matches what
-        // CharSelectScreen looks up (it also lowercases via lower_copy). The
-        // HTTP URL itself would be lowercased again inside fetch_bytes, but
-        // the in-memory cache key is the raw relative path — case matters.
-        if (game_state_->char_count > 0) {
-            int queued = 0;
-            for (int i = 0; i < game_state_->char_count; ++i) {
-                const char* name = game_state_->characters[i].name;
-                if (!name[0]) continue;
-                char lname[64];
-                int j = 0;
-                for (; name[j] && j < (int)sizeof(lname) - 1; ++j)
-                    lname[j] = (char)std::tolower((unsigned char)name[j]);
-                lname[j] = '\0';
-                char base[256];
-                std::snprintf(base, sizeof(base),
-                    "characters/%s/char_icon", lname);
-                queued += asset_stream_.prefetch_charicon(base);
-            }
-            std::fprintf(stderr,
-                "[app] queued %d char icon prefetches for %d characters\n",
-                queued, game_state_->char_count);
-        }
+        // NB: char-icon prefetching is on-demand in CharSelectScreen (visible +
+        // lookahead window), NOT bulk-queued here. Flooding the AssetStream
+        // queue with every icon on a 600+ character server starved the courtroom
+        // sprite prefetches that come later, which made the first IC lines crawl.
 
         push_screen(new CharSelectScreen(*this));
     }
