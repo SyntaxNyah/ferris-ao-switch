@@ -25,6 +25,7 @@ struct ThemeLayout {
     SDL_Rect music_name;     // Currently playing music name strip
 
     // ── Button strip ───────────────────────────────────────────────────────────
+    SDL_Rect btn_ic;
     SDL_Rect btn_ooc;
     SDL_Rect btn_music;
     SDL_Rect btn_evidence;

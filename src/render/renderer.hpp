@@ -37,41 +37,56 @@ private:
 };
 
 // ── Layout constants ───────────────────────────────────────────────────────────
+// Authentic AO2 composition for a 1280×720 screen: the courtroom stage
+// (background + character sprites) fills the *entire* framebuffer, exactly like
+// the desktop client, and a chat bar is overlaid across the bottom. HP bars and
+// the now-playing strip sit in the top corners; the action-button row lives at
+// the right edge of the chat bar. The old layout boxed the stage into a small
+// 853×480 corner beside a huge side panel — that is what looked squashed.
 namespace Layout {
-    // Full screen
     inline constexpr int W = 1280;
     inline constexpr int H = 720;
 
-    // Viewport: 4:3 sprite area occupying the left portion
-    inline constexpr SDL_Rect VIEWPORT      = {0,   0,   853, 480};
+    // Full-screen stage. Sprites/background fill the screen; the chat bar and
+    // HUD draw on top (the chat bar covers the lower body of the sprite, as in
+    // every AO client).
+    inline constexpr SDL_Rect VIEWPORT      = {0, 0, W, H};
 
-    // Chat area at the bottom
-    inline constexpr SDL_Rect CHAT_AREA     = {0,   480, 1280, 240};
-    inline constexpr SDL_Rect CHATBOX       = {10,  492, 1260, 200};
-    inline constexpr SDL_Rect NAMEPLATE     = {16,  478, 260,  32 };
+    // Bottom chat bar (overlay).
+    inline constexpr int CHAT_H = 176;
+    inline constexpr int CHAT_Y = H - CHAT_H;                      // 544
+    inline constexpr SDL_Rect CHAT_AREA     = {0, CHAT_Y, W, CHAT_H};
+    inline constexpr SDL_Rect NAMEPLATE     = {28, CHAT_Y + 10, 380, 40};
+    inline constexpr SDL_Rect CHATBOX       = {36, CHAT_Y + 60, 852, 104}; // IC text box
 
-    // Side panel (right of viewport)
-    inline constexpr SDL_Rect SIDE_PANEL    = {853, 0,   427, 480};
+    // HP bars over the top corners (each gets an inline label chip when drawn).
+    inline constexpr SDL_Rect HP_DEF        = {28, 46, 330, 26};
+    inline constexpr SDL_Rect HP_PROS       = {W - 28 - 330, 46, 330, 26};
 
-    // HP bars (inside side panel)
-    inline constexpr SDL_Rect HP_DEF        = {870, 10,  390, 24 };
-    inline constexpr SDL_Rect HP_PROS       = {870, 44,  390, 24 };
+    // Now-playing music strip, centred along the top.
+    inline constexpr SDL_Rect MUSIC_NAME    = {400, 44, W - 800, 30};
 
-    // Bottom-right action buttons
-    inline constexpr SDL_Rect BTN_OOC       = {1040, 622, 70, 38};
-    inline constexpr SDL_Rect BTN_MUSIC     = {1120, 622, 70, 38};
-    inline constexpr SDL_Rect BTN_EVIDENCE  = {1200, 622, 72, 38};
+    // Action buttons: a row anchored to the right edge of the chat bar. Tall
+    // enough for a two-line label (function + control-key hint) at 20pt.
+    inline constexpr int BTN_W = 84, BTN_H = 64;
+    inline constexpr int BTN_Y = CHAT_Y + 50;
+    inline constexpr int BTN_X0 = W - 20 - (BTN_W * 4 + 8 * 3);   // 900
+    inline constexpr SDL_Rect BTN_IC        = {BTN_X0,                  BTN_Y, BTN_W, BTN_H};
+    inline constexpr SDL_Rect BTN_OOC       = {BTN_X0 + (BTN_W + 8) * 1, BTN_Y, BTN_W, BTN_H};
+    inline constexpr SDL_Rect BTN_MUSIC     = {BTN_X0 + (BTN_W + 8) * 2, BTN_Y, BTN_W, BTN_H};
+    inline constexpr SDL_Rect BTN_EVIDENCE  = {BTN_X0 + (BTN_W + 8) * 3, BTN_Y, BTN_W, BTN_H};
 
-    // Overlay panels (slide in from the right)
-    inline constexpr SDL_Rect PANEL_OOC     = {640, 0, 640, 720};
-    inline constexpr SDL_Rect PANEL_MUSIC   = {640, 0, 640, 720};
-    inline constexpr SDL_Rect PANEL_EVIDENCE= {640, 0, 640, 720};
+    // Side/log area — retained so theme-file panel derivation has a sane base;
+    // it is no longer painted as an opaque block.
+    inline constexpr SDL_Rect SIDE_PANEL    = {W - 520, 0, 520, H};
 
-    // IC input overlay (full-screen modal)
-    inline constexpr SDL_Rect IC_INPUT_BG   = {0,   0,   W,   H  };
-    inline constexpr SDL_Rect IC_EMOTE_GRID = {20,  20,  840, 520};
-    inline constexpr SDL_Rect IC_OPTIONS    = {20,  550, 840, 100};
-    inline constexpr SDL_Rect IC_TEXT_BOX   = {880, 20,  380, 80 };
+    // Overlay panels (OOC / Music / Evidence) — right 40%, full height.
+    inline constexpr SDL_Rect PANEL_OOC      = {W - 520, 0, 520, H};
+    inline constexpr SDL_Rect PANEL_MUSIC    = {W - 520, 0, 520, H};
+    inline constexpr SDL_Rect PANEL_EVIDENCE = {W - 520, 0, 520, H};
+
+    // IC composer modal (centred).
+    inline constexpr SDL_Rect IC_COMPOSER    = {240, 168, 800, 384};
 }
 
 } // namespace ao

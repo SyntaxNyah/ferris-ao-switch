@@ -60,7 +60,7 @@ ferris-ao-switch implements the full AO2 client protocol so Switch players can j
 - **APNG + GIF animations** — character idle, talk, and pre-animations via `IMG_LoadAnimation_RW()`
 - **LRU texture cache** — 64-slot cache; all lookups use relative paths as keys, regardless of source
 - **Background pre-fetcher** — `AssetStream` thread pre-loads upcoming assets into memory before the render loop needs them
-- **1280×720 layout** — matches Switch native resolution in both docked and handheld modes; 4:3 sprite viewport, side panel, chat area
+- **1280×720 layout** — matches Switch native resolution in both docked and handheld modes; full-screen courtroom stage with an overlaid chat bar, corner HP bars, and a now-playing strip (authentic AO composition, themeable via `courtroom_design.ini`)
 
 ### Input
 - **Joy-Con + Pro Controller** — full D-pad/stick/button mapping
@@ -258,9 +258,9 @@ If the server has no CDN, or for offline use, assets can be installed locally. f
 | 1 | Server CDN — `<server asset_url>/<relative>` (HTTP or **HTTPS**) | Server sent `ASS` packet with a URL |
 | 2 | Community CDN — `https://attorneyoffline.de/base/<relative>` | Classic base-pack fallback (built in) |
 | 3 | `sdmc:/switch/ferris-ao/base/<relative>` | Local base pack on SD card (optional) |
-| 4 | `romfs:/<relative>` | Bundled fallback (minimal — font, UI chrome) |
+| 4 | `romfs:/<relative>` | Bundled fallback (just the UI font today) |
 
-If the server has no CDN and you have no local base, the client still works using the bundled romfs fallbacks — you'll see placeholder sprites for characters not in romfs.
+If the server has no CDN and you have no local base, the client still runs and connects — you can read/send IC and OOC text, browse the music and area lists, and watch HP bars — but character sprites and backgrounds won't appear (nothing to load them from), so the stage stays black behind the chat bar. The courtroom draws its own chat bar, nameplate, HP bars and buttons as primitives, so the UI is fully usable without any art. Point the client at a server with a CDN (most public servers) or drop a base pack on the SD card to get the visuals.
 
 The expected folder structure under `base/` mirrors the standard AO2 base pack:
 
@@ -446,28 +446,35 @@ If the server places you in an area automatically (single-area servers), the Are
 
 ### Courtroom
 
-| Button | Action |
-|---|---|
-| **X** | Open IC input (compose a message) |
-| **Y** | Toggle evidence panel |
-| **ZL** | Toggle OOC chat panel |
-| **ZR** | Toggle music panel |
-| **A** | Skip typewriter (show full message instantly) |
-| **Right stick** | Scroll active panel |
-| **L / R** | Cycle panels |
-| **+** | Disconnect |
-
-### IC Input (overlay)
+The stage fills the whole screen; a chat bar is overlaid across the bottom with
+the showname plate, the IC text, and a row of status buttons (IC / OOC / Music /
+Evi) whose key hints are printed on each button. HP bars sit in the top corners
+and the now-playing track runs along the top. When nobody is talking, the chat
+bar shows the control hints so the screen is never blank.
 
 | Button | Action |
 |---|---|
-| **A** | Open system keyboard (type message) |
-| **D-pad Left/Right** | Select emote |
-| **D-pad Up/Down** | Adjust options (desk mod, text color, objection) |
-| **Y** | Toggle flip |
-| **ZL** | Cycle text color |
-| **ZR** | Send message |
-| **B** | Cancel |
+| **X** | Toggle the IC composer |
+| **ZL** | Toggle the OOC chat panel |
+| **ZR** | Toggle the music panel |
+| **Y** | Toggle the evidence panel |
+| **A** | Skip the typewriter, or confirm inside the open panel |
+| **D-pad Up/Down** | Navigate / scroll the open panel |
+| **B** | Close the open panel |
+| **+** | Leave the courtroom (disconnect) |
+
+### IC Input (composer overlay)
+
+Opened with **X**. Shows the selected emote, the text colour (with a live
+swatch), the position, and a preview of your message. It closes itself after a
+line is sent so you can watch it play.
+
+| Button | Action |
+|---|---|
+| **D-pad Left/Right** | Cycle your emote (from your `char.ini`) |
+| **D-pad Up/Down** | Cycle the text colour |
+| **A** | Open the system keyboard, then type and send the line |
+| **B** / **X** | Close the composer |
 
 ---
 
@@ -477,52 +484,52 @@ If the server places you in an area automatically (single-area servers), the Are
 ferris-ao-switch/
 ├── Makefile                        # devkitPro NX + SDL2 portlibs build system
 ├── icon.jpg                        # 256×256 NRO icon
-├── romfs/                          # Bundled fallback assets (romfsInit → romfs:/)
-│   ├── fonts/
-│   │   └── noto_sans.ttf           # UI font
-│   ├── ui/                         # Chatbox, nameplate, HP bar, objection sprites
-│   ├── characters/phoenix/         # Minimal fallback character
-│   ├── sounds/sfx-blink.ogg        # Typewriter blink SFX
-│   └── music/silence.ogg           # Silence track (stop-music fallback)
+├── romfs/                          # Bundled assets (romfsInit → romfs:/)
+│   └── fonts/noto_sans.ttf         # UI font — the ONLY bundled asset; all art,
+│                                   # characters, sounds and music stream over
+│                                   # HTTP or come from the optional sdmc: base
+│                                   # pack. The courtroom draws primitives when
+│                                   # an image is missing, so none need bundling.
 └── src/
     ├── main.cpp                    # Entry point — init App, push ConnectScreen, run
     ├── app.hpp / app.cpp           # App class: game loop, screen stack, SDL init
     ├── net/
     │   ├── packet_queue.hpp        # Lock-free SPSC ring buffer (template, N must be power-of-2)
-    │   ├── socket.hpp / socket.cpp # SDL_net TCP wrapper (planned; currently inline in network_thread)
+    │   ├── http_fetch.hpp/cpp      # Synchronous HTTP/1.1 GET (HTTPS via TlsConn)
+    │   ├── tls_conn.hpp/cpp        # mbedtls TLS client (WSS + HTTPS), #ifdef AO_TLS
+    │   ├── connect_pool.hpp/cpp    # Single-thread TCP connect pool (libnx thread-table safe)
     │   ├── ws_handshake.hpp/cpp    # HTTP/1.1 WS upgrade, inline SHA-1 + Base64
-    │   ├── ws_frame.hpp/cpp        # RFC 6455 frame encode (masked) / decode
+    │   ├── ws_frame.hpp/cpp        # RFC 6455 frame encode (masked text) / decode
     │   └── network_thread.hpp/cpp  # Background thread: recv loop, packet extraction, send
     ├── protocol/
-    │   ├── packet.hpp              # Packet struct, parse_packet(), escape/unescape
+    │   ├── packet.hpp              # Packet struct, parse(), escape/unescape
     │   ├── ao_client.hpp/cpp       # Handshake state machine + all in-lobby packet handlers
     │   └── commands.hpp            # Outgoing packet builder free functions (stack buffers)
     ├── state/
-    │   ├── game_state.hpp          # All mutable game state (main-thread only)
-    │   ├── character.hpp           # CharacterInfo, EmotionEntry
-    │   ├── evidence.hpp            # EvidenceEntry
-    │   ├── area.hpp                # AreaInfo (ARUP data)
-    │   └── chat_log.hpp            # Fixed ring buffer (128 entries), no heap
+    │   └── game_state.hpp          # All mutable game state, main-thread only
+    │                               # (CharacterInfo, AreaInfo, EvidenceEntry,
+    │                               #  ChatLog ring buffer, ICAnimState — all here)
     ├── assets/
-    │   ├── asset_manager.hpp/cpp   # Path resolution: sdmc base → romfs fallback
+    │   ├── asset_manager.hpp/cpp   # 4-tier resolution: prefetch → CDN×2 → sdmc: → romfs:
+    │   ├── asset_stream.hpp/cpp    # Background worker threads that pre-warm the cache
+    │   ├── extensions_config.hpp/cpp # extensions.json (per-category file-ext probe order)
     │   ├── char_ini_parser.hpp/cpp # Windows INI parser for char.ini
-    │   ├── texture_cache.hpp/cpp   # LRU SDL_Texture* cache (64 slots)
-    │   └── apng_player.hpp/cpp     # APNG/GIF animation via IMG_LoadAnimation()
+    │   ├── theme_manager.hpp/cpp   # AO2 courtroom_design.ini → scaled ThemeLayout
+    │   ├── texture_cache.hpp/cpp   # LRU SDL_Texture* cache (256 slots)
+    │   └── apng_player.hpp/cpp     # APNG/GIF/animated-WebP via IMG_LoadAnimation_RW()
     ├── audio/
-    │   ├── audio_manager.hpp/cpp   # SFX: Mix_Chunk LRU cache, 8 channels
+    │   ├── audio_manager.hpp/cpp   # SFX: Mix_Chunk LRU cache
     │   └── music_player.hpp/cpp    # BGM: Mix_Music with crossfade
     ├── render/
-    │   ├── renderer.hpp/cpp        # SDL_Renderer wrapper, 1280×720 logical size
-    │   ├── text_renderer.hpp/cpp   # SDL_ttf wrapper, 32-slot LRU texture cache
-    │   └── layout.hpp              # Fallback courtroom coordinate constants (constexpr SDL_Rect)
+    │   ├── renderer.hpp/cpp        # SDL_Renderer wrapper + Layout:: constants, 1280×720
+    │   └── text_renderer.hpp/cpp   # SDL_ttf wrapper, 32-slot LRU texture cache
     ├── ui/
-    │   ├── screen.hpp              # Abstract Screen base class
-    │   ├── screens/
-    │   │   ├── connect_screen.hpp/cpp       # Host/port/username fields + connect
-    │   │   ├── char_select_screen.hpp/cpp   # 8×4 character grid
-    │   │   ├── area_select_screen.hpp/cpp   # Scrollable area list with ARUP data
-    │   │   └── courtroom_screen.hpp/cpp     # Main courtroom: viewport, chat, panels
-    │   └── courtroom/                       # (future widget split-out)
+    │   ├── screen.hpp              # Abstract Screen base class (opaque() compositing)
+    │   └── screens/
+    │       ├── connect_screen.hpp/cpp       # Server browser + Direct Connect tabs
+    │       ├── char_select_screen.hpp/cpp   # 8×4 character grid
+    │       ├── area_select_screen.hpp/cpp   # Scrollable area list with ARUP data
+    │       └── courtroom_screen.hpp/cpp     # Main courtroom: stage, chat bar, HUD, panels
     └── input/
         ├── input_manager.hpp/cpp    # SDL_GameController → Action enum, keyboard fallback
         └── virtual_keyboard.hpp/cpp # libnx swkbdShow() wrapper (stdin fallback on desktop)
@@ -673,9 +680,10 @@ Pull requests are welcome. Before contributing:
 
 ### Known limitations / TODO
 
-- IC input overlay does not yet send the MS packet — wired to the UI but the `cmd::ms()` call needs to be connected to the `OutQueue` via the App
-- Character sprite loading is not yet wired into `CourtroomScreen` — `APNGPlayer` and `TextureCache` exist but the courtroom currently renders placeholder rectangles for sprites
 - No settings persistence — host/port/username reset on each launch; a `sdmc:/switch/ferris-ao/config.ini` save/load pass is planned
+- No touch input — the on-screen courtroom buttons are status indicators only; use the mapped buttons (handheld touch is a possible future addition)
+- Evidence can be viewed but not yet attached to an outgoing IC message from the UI
+- Character Select enters the courtroom directly; the dedicated Area Select screen is not in the active flow yet
 
 ---
 

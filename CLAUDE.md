@@ -64,12 +64,14 @@ GitHub Release on `v*` tags.
 ferris-ao-switch/
 ├── Makefile
 ├── icon.jpg                    # 256×256 NRO icon (shown in hbmenu)
-├── romfs/                      # Bundled read-only assets
-│   ├── fonts/noto_sans.ttf
-│   ├── ui/                     # Chatbox, nameplate, HP bar, objection sprites
-│   ├── characters/phoenix/     # Minimal fallback character
-│   ├── sounds/sfx-blink.ogg
-│   └── music/silence.ogg
+├── romfs/                      # Bundled read-only assets (romfsInit → romfs:/)
+│   └── fonts/noto_sans.ttf     # UI font — the ONLY bundled asset today
+│                               # (chatbox/HP/objection art, characters, sounds
+│                               #  and music all stream over HTTP or come from
+│                               #  the optional sdmc: base pack — see §Asset
+│                               #  Streaming. The courtroom falls back to drawn
+│                               #  primitives when an image is absent, so no
+│                               #  art needs to be bundled.)
 └── src/
     ├── main.cpp                # Entry point
     ├── app.hpp / app.cpp       # Game loop, screen stack
@@ -138,22 +140,25 @@ Thin wrapper around `SDL_Renderer*`. Provides:
 
 **`ao::Layout` namespace** — all coordinate constants as `constexpr SDL_Rect` / `constexpr int`:
 
+The default composition is a full-screen stage with the chat bar and HUD
+overlaid on top (see `docs/RENDERING.md` §4 for the diagram):
+
 | Constant | Value | Purpose |
 |----------|-------|---------|
-| `VIEWPORT` | 853×480 | Logical courtroom render target (letterboxed to 1280×720) |
-| `CHAT_AREA` | bottom strip | Chatbox region |
-| `SIDE_PANEL` | right strip | HP bars / button strip |
-| `HP_DEF` | top of side panel | Defense HP bar |
-| `HP_PRO` | below HP_DEF | Prosecution HP bar |
-| `BTN_OOC` | — | OOC toggle button |
-| `BTN_MUSIC` | — | Music toggle button |
-| `BTN_EVIDENCE` | — | Evidence toggle button |
-| `PANEL_OOC` | overlay | OOC chat panel area |
-| `PANEL_MUSIC` | overlay | Music list panel area |
-| `PANEL_EVIDENCE` | overlay | Evidence panel area |
-| `PANEL_ICINPUT` | overlay | IC input composer area |
+| `VIEWPORT` | 1280×720 | Full-screen courtroom stage (background + sprites) |
+| `CHAT_AREA` | bottom 176 px bar | Chat bar overlay |
+| `NAMEPLATE` | inside chat bar | Showname plate |
+| `CHATBOX` | inside chat bar | IC message text box |
+| `HP_DEF` / `HP_PROS` | top corners | Defense / prosecution HP bars (with label chips) |
+| `MUSIC_NAME` | top centre | Now-playing strip |
+| `BTN_IC` / `BTN_OOC` / `BTN_MUSIC` / `BTN_EVIDENCE` | chat-bar right edge | Panel toggle buttons (show key hints) |
+| `SIDE_PANEL` | right strip | Base rect for theme-file panel derivation (not painted) |
+| `PANEL_OOC` / `PANEL_MUSIC` / `PANEL_EVIDENCE` | right 40% overlay | OOC / music / evidence panels |
+| `IC_COMPOSER` | centred modal | IC composer overlay |
 
 **Do not hard-code pixel values anywhere else.** Add new layout constants here.
+These are the built-in defaults; a server-supplied `courtroom_design.ini` theme
+overrides them at runtime (`ThemeManager`).
 
 ---
 
@@ -166,7 +171,7 @@ SDL_ttf wrapper with a 32-slot LRU texture cache. Owned by `App` as `text_render
 **Init:**
 ```cpp
 bool init(SDL_Renderer* r, const char* font_rel, int pt_size);
-// font_rel resolved via AssetManager (HTTP → sdmc: → romfs:)
+// font_rel resolved via AssetManager (prefetch → primary/secondary CDN → sdmc: → romfs:)
 // Loaded via TTF_OpenFontRW(rw, freesrc=1, pt_size)
 // App calls: text_renderer_.init(renderer_->raw(), "fonts/noto_sans.ttf", 18)
 // Non-fatal on failure — every draw/measure returns 0 silently.
@@ -211,7 +216,7 @@ bool ready() const;
 | OOC entry body | `draw_wrapped()` | `ce.message` |
 | Music track name | `draw()` | `gs.music_list[i]` |
 | Evidence name | `draw()` | `gs.evidence[i].name` |
-| Current music (side panel) | `draw()` | `gs.current_music` |
+| Current music (now-playing strip) | `draw()` | `gs.current_music` |
 | Button labels (OOC/Music/Evi) | `draw()` centered | literal strings |
 | HP bar labels (DEF/PRO) | `draw()` | literal strings |
 
@@ -223,14 +228,21 @@ bool ready() const;
 
 All screens implement:
 ```cpp
-virtual void on_enter() {}   // Called when pushed onto stack
-virtual void on_exit()  {}   // Called when popped or another screen pushed above
+virtual void on_enter() {}        // Called when pushed onto stack
+virtual void on_exit()  {}        // Called when popped or another screen pushed above
+virtual bool opaque() const { return true; } // true = fully covers the framebuffer
 virtual void handle_event(const InputState&) = 0;
 virtual void update(uint32_t dt_ms) = 0;
 virtual void render() = 0;
 ```
 
 Screens receive a reference to `App` (or relevant subsystems) via constructor. They must not own network state — that lives in `App`.
+
+`App::render()` draws **only from the topmost `opaque()` screen upward**, so a
+full-screen screen hides everything beneath it (the courtroom never shows the
+character grid behind it). Transparent overlay screens override `opaque()` to
+return `false`; all current screens are opaque and the courtroom panels are
+inline, not separate screens.
 
 ---
 
@@ -627,52 +639,80 @@ std::function<void()> on_disconnect;    // Connection lost → pop to ConnectScr
 
 **Static class:** `ao::AssetManager`
 
-Three-tier asset resolution with HTTP streaming support.
+Four-tier asset resolution with HTTP streaming support (mirrors AO-SDL's
+`MountManager`).
 
 **Priority order:**
 
 | Tier | Source | When active |
 |------|--------|-------------|
-| 1 | HTTP — `<asset_url>/<relative>` | Server sent an `ASS` packet with a CDN URL |
-| 2 | `sdmc:/switch/ferris-ao/base/<relative>` | SD card base folder present |
-| 3 | `romfs:/<relative>` | Always (bundled fallback) |
+| 1 | Primary HTTP — `<asset_url>/<relative>` | Server sent an `ASS` packet with a CDN URL |
+| 2 | Secondary HTTP — `<secondary_url>/<relative>` | Community fallback CDN (set in `App::init`) |
+| 3 | `sdmc:/switch/ferris-ao/base/<relative>` | SD card base folder present |
+| 4 | `romfs:/<relative>` | Always (bundled fallback — currently just the font) |
 
-Tier 1 is activated by `set_asset_url(url)` (called from `AOClient::on_ass`). The local base folder (tier 2) is entirely **optional** — servers without a CDN fall through to romfs for bundled fallbacks, and servers with a CDN stream everything on demand without requiring any SD card content.
+Tier 1 is activated by `set_asset_url(url)` (called from `AOClient::on_ass`).
+Tier 2 is set once in `App::init()` to `https://attorneyoffline.de/base/`, so a
+server that only hosts its custom characters on its own CDN still resolves the
+classic base pack. The local base folder (tier 3) is entirely **optional**. A
+tier that 404s falls through to the next; network failures are cached per-URL so
+a dead host is never hammered.
+
+**URL composition (AO-SDL `MountHttp` semantics):** relative paths are
+**lowercased** before being sent to either HTTP tier (AO2 CDNs host
+lowercase-only trees), and each path segment is percent-encoded per RFC 3986
+**preserving `()`** so emote filenames like `(a)normal.png` round-trip. Local
+tiers (`sdmc:`/`romfs:`) preserve case.
 
 **API:**
 
 ```cpp
-// URL management — call from main thread only
-static void set_asset_url(const char* url);  // set from ASS packet
-static void clear_asset_url();               // called on disconnect
+// URL management — main thread only
+static void set_asset_url(const char* url);       // primary, from ASS packet
+static void clear_asset_url();
 static bool        has_asset_url();
-static const char* asset_url();              // "" if unset
+static const char* asset_url();                   // "" if unset
+static void set_secondary_url(const char* url);   // community fallback CDN
+static void clear_secondary_url();
+static bool        has_secondary_url();
+static const char* secondary_url();
 
-// Local path resolution (no HTTP) — fast existence check
+// Local-only resolution (sdmc: then romfs:) — fast existence check, no HTTP.
 static bool resolve(const char* relative, char* out_path, int out_cap);
 
-// Full three-tier data fetch — may block (network I/O or disk read)
-// Returns SDL_malloc'd buffer; caller must SDL_free() it.
+// Full four-tier fetch — may block. Returns SDL_malloc'd buffer (SDL_free it).
 static uint8_t* fetch_bytes(const char* relative, int* out_size);
+// Variants that reuse caller-owned keep-alive HttpClient(s) so AssetStream
+// workers avoid a TLS handshake per request. Clients must not be shared
+// between threads. The two-client form keeps a separate connection per mount
+// (primary vs secondary) so alternating hosts don't thrash one socket.
+static uint8_t* fetch_bytes_with_client (const char* rel, int* sz, HttpClient&);
+static uint8_t* fetch_bytes_with_clients(const char* rel, int* sz,
+                                         HttpClient& primary, HttpClient& secondary);
 
-// Full three-tier SDL_RWops — owns its buffer; SDL_RWclose() frees it.
-// Pass to IMG_Load_RW, IMG_LoadAnimation_RW, Mix_LoadMUS_RW, etc. with freesrc=1.
+// Four-tier SDL_RWops — owns its buffer; SDL_RWclose() frees it. Pass to
+// IMG_Load_RW / IMG_LoadAnimation_RW / Mix_LoadMUS_RW / Mix_LoadWAV_RW (freesrc=1).
 static SDL_RWops* open_rwops(const char* relative);
 
-// Called by AssetStream to pre-populate the prefetch cache.
-// AssetManager takes ownership of `data` (SDL_malloc'd).
-static void store_prefetch(const char* relative, uint8_t* data, int size);
+// Prefetch cache (filled by AssetStream).
+static void store_prefetch(const char* relative, uint8_t* data, int size); // takes ownership
+static bool has_prefetch(const char* relative);   // non-consuming peek
+
+// Convenience
+static const char* user_base();   // "sdmc:/switch/ferris-ao/base" (or "base" on desktop)
+static const char* romfs_base();  // "romfs:" (or "romfs" on desktop)
 ```
 
-**`open_rwops` returns a custom owning `SDL_RWops`** (`SDL_AllocRW()` + custom function pointers). When the returned ops is closed (by SDL_image, SDL_mixer, or manually), the underlying buffer is freed automatically. There is no need to track the buffer separately.
+**`open_rwops` returns a custom owning `SDL_RWops`** (`SDL_AllocRW()` + custom function pointers). Closing it (by SDL_image, SDL_mixer, or manually) frees the underlying buffer automatically — no separate bookkeeping.
 
-**`fetch_bytes` consumption order:**
-1. Check `AssetStream`'s prefetch cache — if found, remove and return immediately (no I/O)
-2. HTTP GET from `<asset_url>/<relative>`
-3. Read from `sdmc:/switch/ferris-ao/base/<relative>`
-4. Read from `romfs:/<relative>`
+**`fetch_bytes` consumption order:** prefetch cache (consumed, single-use) →
+primary HTTP → secondary HTTP → `sdmc:` → `romfs:`. `has_prefetch()` is the
+non-consuming peek the courtroom/char-select use to decide what to decode this
+frame.
 
-**Prefetch cache:** Fixed array of 32 `PrefetchEntry` slots guarded by an `SDL_mutex`. FIFO eviction when full. `store_prefetch` is called by `AssetStream`; `fetch_bytes` calls `consume_prefetch` (removes the entry, single-use).
+**Prefetch cache:** fixed `PrefetchEntry` array guarded by an `SDL_mutex`; FIFO
+eviction when full. `store_prefetch` is called by `AssetStream`; `fetch_bytes`
+removes the entry (single-use), while `has_prefetch` only checks.
 
 **All callers use relative paths** — never resolved absolute paths. The relative path is also the cache key in `TextureCache`.
 
@@ -713,6 +753,33 @@ struct HttpResult {
 
 ---
 
+### `src/net/connect_pool.hpp` / `src/net/connect_pool.cpp`
+
+**Class:** `ao::ConnectPool` (guarded by `#ifdef AO_TLS`)
+
+```cpp
+static int connect(const char* host, uint16_t port,
+                   mbedtls_net_context* out_net, int timeout_ms);
+// 0 = success (caller owns out_net, must mbedtls_net_free it),
+// negative mbedtls code = connect failure, -1 = timeout / enqueue failure.
+```
+
+**Why it exists:** libnx has a small global thread table. The old code spawned a
+fresh `SDL_Thread` per blocking `mbedtls_net_connect()` so a hung DNS/connect
+couldn't stall callers — but under `AssetStream` load (8 workers × two mounts ×
+hundreds of prefetches × keep-alive churn) those slots piled up until
+`CreateThread() = LimitReached`, and every later connect failed. That was the
+"char icons stop loading mid-way" bug.
+
+**Design:** a **single** persistent `SDL_Thread` drains a queue of connect jobs.
+Callers block on a per-job semaphore with the same 10-second timeout as before.
+On timeout the job is flagged *detached* and the worker frees it when the OS
+`connect()` finally returns. Thread-table usage is O(1) regardless of how many
+callers hit it concurrently. `TlsConn::connect` routes through this instead of
+calling `mbedtls_net_connect` directly.
+
+---
+
 ### `src/assets/asset_stream.hpp` / `src/assets/asset_stream.cpp`
 
 **Class:** `ao::AssetStream`
@@ -737,7 +804,7 @@ bool poll_done(char* out_path, int out_cap);
 **Worker loop:**
 1. Block on `SDL_CondWait` until `prefetch()` signals work
 2. Pop relative path from request queue
-3. Call `AssetManager::fetch_bytes(rel, &size)` (HTTP → sdmc: → romfs:)
+3. Call `AssetManager::fetch_bytes(rel, &size)` (prefetch → primary/secondary CDN → sdmc: → romfs:)
 4. Call `AssetManager::store_prefetch(rel, data, size)`
 5. Push path to done queue; repeat
 
@@ -749,19 +816,64 @@ bool poll_done(char* out_path, int out_cap);
 
 ---
 
+### `src/assets/extensions_config.hpp` / `src/assets/extensions_config.cpp`
+
+**Struct:** `ao::ExtensionsConfig` (process-global singleton)
+
+Parsed from `<asset_url>/extensions.json` (webAO format) — the ordered list of
+file extensions to probe for each asset category, because an AO2 asset path has
+no extension on the wire (`characters/phoenix/(b)normal` could be `.webp`,
+`.apng`, `.gif`, or `.png`). Falls back to AO2 classic defaults when the file is
+absent or unparseable.
+
+```cpp
+static constexpr int MAX_EXTS = 6;
+static constexpr int EXT_LEN  = 20;            // ".webp.static" etc.
+char charicon[MAX_EXTS][EXT_LEN];   int charicon_count;    // char_icon
+char emote   [MAX_EXTS][EXT_LEN];   int emote_count;       // (a)/(b) sprites, pre-anims
+char emotions[MAX_EXTS][EXT_LEN];   int emotions_count;    // still frames
+char background[MAX_EXTS][EXT_LEN]; int background_count;
+
+static void fetch_and_apply();   // blocking; main thread, one-shot at lobby-enter
+static void reset();             // restore defaults (call on disconnect)
+static const ExtensionsConfig& get();
+```
+
+**Usage:**
+```cpp
+const ExtensionsConfig& ec = ExtensionsConfig::get();
+for (int i = 0; i < ec.emote_count; ++i)
+    try path "characters/<c>/(b)<emote>" + ec.emote[i];   // first that resolves wins
+```
+
+`App::update()` calls `fetch_and_apply()` once when `in_lobby` first becomes true
+(after the asset URL is known). `CourtroomScreen` and `CharSelectScreen` read
+`get()` to build candidate paths in the exact order the server advertises, so
+prefetch and decode use identical keys. `AOClient::on_disconnected` →
+`ExtensionsConfig::reset()`.
+
+---
+
 ### `src/assets/texture_cache.hpp` / `src/assets/texture_cache.cpp`
 
 **Class:** `ao::TextureCache`
 
-LRU cache for `SDL_Texture*`. 64 slots. Evicts least-recently-used on overflow.
+LRU cache for `SDL_Texture*`. `TEX_CACHE_SLOTS = 256` (enlarged from 64 to hold
+most of a full 100–600 char roster's icons at once). Evicts least-recently-used
+on overflow.
 
 ```cpp
-SDL_Texture* get(SDL_Renderer* r, const char* rel_path);
+SDL_Texture* get(SDL_Renderer* r, const char* rel_path); // load-or-return-cached
+SDL_Texture* peek(const char* rel_path) const;           // cache-only, never loads
 void release(const char* rel_path);
 void clear();
 ```
 
 - `get()` checks cache first (strcmp on relative path); on miss, calls `AssetManager::open_rwops(rel)` → `IMG_LoadTexture_RW(r, rw, 1)`
+- `peek()` is the **non-loading** lookup `CharSelectScreen` runs every frame for
+  every visible icon — it returns the texture if already decoded, else `nullptr`,
+  so the render path never triggers a blocking decode. `update()` is where new
+  icons are decoded into the cache (budgeted per frame).
 - The cache key and stored path are **relative paths** — never resolved absolute paths
 - On HTTP streaming: first request for an uncached path fetches from server; subsequent calls return cached texture instantly
 - Sets `last_used = SDL_GetTicks()` on every access (hit or miss)
@@ -772,7 +884,7 @@ void clear();
 struct TexEntry {
     char         path[256];
     SDL_Texture* tex;
-    uint32_t     last_used;
+    uint32_t     last_used;   // SDL_GetTicks() value
 };
 ```
 
@@ -785,24 +897,27 @@ struct TexEntry {
 Plays APNG/GIF/animated-WebP animations frame-by-frame using SDL2_image ≥ 2.6's `IMG_LoadAnimation_RW()`.
 
 ```cpp
-bool load(const char* path, SDL_Renderer* r);
-void update(uint32_t dt_ms);           // Advance frame timer
-SDL_Texture* current_frame() const;   // Currently visible frame texture
-bool finished() const;                 // True if non-looping and last frame done
-void set_loop(bool loop);
-void reset();
-void free_frames();
+bool load(SDL_Renderer* r, const char* path); // note: renderer FIRST, then path
+void unload();                         // destroy frame textures, reset state
+void update(uint32_t dt_ms);           // advance frame timer
+SDL_Texture* current() const;          // currently visible frame texture
+SDL_Rect     current_rect() const;     // {0,0,w,h} of the current frame
+bool loaded()   const;                 // frame_count_ > 0
+bool animated() const;                 // frame_count_ > 1 (false for a static PNG)
+bool finished() const;                 // !loop_ && reached the last frame
+void set_loop(bool loop);              // false (default) = loop; true = play once
+void reset();                          // back to first frame
 ```
 
 **Internals:**
 - `IMG_LoadAnimation_RW()` → `IMG_Animation*` (array of `SDL_Surface*` + delays in ms); handles GIF, APNG, animated WebP
-- Converts each surface to `SDL_Texture*` (up to `MAX_FRAMES = 128`)
-- `update(dt_ms)` accumulates `elapsed_ms_`; when ≥ frame delay, advances `frame_idx_`
-- If non-looping: stays on last frame, sets `finished_ = true`
+- Converts each surface to `SDL_Texture*` (up to `APNG_MAX_FRAMES = 128`)
+- `update(dt_ms)` accumulates `accum_ms_`; when ≥ the current frame delay, advances `current_frame_`
+- If non-looping: stays on the last frame, `finished()` returns true
 
-**Fallback:** If `IMG_LoadAnimation_RW()` returns null (static image), opens a second `AssetManager::open_rwops()` call and uses `IMG_Load_RW()` as a single-frame "animation".
+**Fallback:** If `IMG_LoadAnimation_RW()` returns null (static image), opens a second `AssetManager::open_rwops()` call and uses `IMG_Load_RW()` as a single-frame "animation". For such an image `animated()` is false — the courtroom treats a static pre-anim as instantly finished so the Preanim phase can't hang.
 
-**HTTP streaming:** `load(path)` takes a relative path and resolves it via `AssetManager::open_rwops()` — HTTP CDN first, then local base, then romfs. No caller path-resolution needed.
+**HTTP streaming:** `load(r, path)` takes a relative path and resolves it via `AssetManager::open_rwops()` — prefetch → primary CDN → secondary CDN → sdmc → romfs. No caller path-resolution needed.
 
 **Resource management:** `unload()` destroys all `SDL_Texture*` and zeros arrays. Called automatically in `load()` before loading a new animation.
 
@@ -881,7 +996,7 @@ const char* current() const;      // Path of currently playing track
 
 **`play()` behavior:**
 - If `path == "~~"` → `stop()` (AO2 stop-music sentinel)
-- Calls `AssetManager::open_rwops(path)`, then tries `music/<path>` prefix fallback (HTTP → sdmc: → romfs:)
+- Calls `AssetManager::open_rwops(path)`, then tries `music/<path>` prefix fallback (prefetch → primary/secondary CDN → sdmc: → romfs:)
 - If music already playing: `Mix_HaltMusic()` + `Mix_FreeMusic()` + `SDL_RWclose(music_rw_)`
 - `Mix_LoadMUS_RW(rw, 0)` with `freesrc=0` — we keep `rw` alive in `music_rw_` because SDL_mixer streams from it
 - `Mix_FadeInMusic(music_, -1, fade_ms)` (loop forever)
@@ -1523,7 +1638,7 @@ CourtroomScreen::update()
 
 | Resource | Count | Size each | Total |
 |----------|-------|-----------|-------|
-| Texture cache slots | 64 | ~128 KB avg | ~8 MB |
+| Texture cache slots | 256 | ~64 KB avg (128×128 icon) | ~16 MB |
 | SFX chunks | 16 | ~64 KB avg | ~1 MB |
 | APNG frames | 128 | ~32 KB avg | ~4 MB |
 | GameState (stack) | 1 | ~1.5 MB | ~1.5 MB |

@@ -24,8 +24,8 @@ void ThemeManager::reset_to_defaults() {
     layout_.hp_def          = Layout::HP_DEF;
     layout_.hp_pro          = Layout::HP_PROS;
     layout_.log             = Layout::SIDE_PANEL;
-    layout_.music_name      = {Layout::SIDE_PANEL.x, Layout::SIDE_PANEL.y + 60,
-                                Layout::SIDE_PANEL.w, 24};
+    layout_.music_name      = Layout::MUSIC_NAME;
+    layout_.btn_ic          = Layout::BTN_IC;
     layout_.btn_ooc         = Layout::BTN_OOC;
     layout_.btn_music       = Layout::BTN_MUSIC;
     layout_.btn_evidence    = Layout::BTN_EVIDENCE;
@@ -239,10 +239,11 @@ void ThemeManager::scale_layout(float sx, float sy) {
 
     // Buttons: stacked at the bottom-right of the log panel
     int bx = layout_.log.x + layout_.log.w - 80;
-    int by = layout_.log.y + layout_.log.h - 130;
-    layout_.btn_ooc      = {bx, by,      76, 36};
-    layout_.btn_music    = {bx, by + 44, 76, 36};
-    layout_.btn_evidence = {bx, by + 88, 76, 36};
+    int by = layout_.log.y + layout_.log.h - 176;
+    layout_.btn_ic       = {bx, by,       76, 36};
+    layout_.btn_ooc      = {bx, by + 44,  76, 36};
+    layout_.btn_music    = {bx, by + 88,  76, 36};
+    layout_.btn_evidence = {bx, by + 132, 76, 36};
 }
 
 // ── load ──────────────────────────────────────────────────────────────────────

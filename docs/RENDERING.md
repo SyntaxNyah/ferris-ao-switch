@@ -181,7 +181,49 @@ Backgrounds and desks reload only when `pos` or `gs.background` changes
 
 ---
 
-## 4. Theme support (AO2 `courtroom_design.ini`)
+## 4. Screen layout & theme support
+
+### Screen compositing (opaque culling)
+
+`App::render()` clears once, then draws **only from the topmost opaque screen
+upward**. Every full-screen screen (`Screen::opaque()` defaults to `true`)
+hides whatever is beneath it, so picking a character no longer leaves the
+character grid showing through the courtroom. A transparent overlay screen would
+override `opaque()` to return `false` and let the screen below render first; all
+current screens are opaque, and the courtroom's own OOC/Music/Evidence/IC panels
+are drawn inline (not as separate screens), so they layer correctly on top.
+
+### Default layout (no theme file)
+
+`romfs` ships only the font, so unless a server CDN serves
+`misc/default/courtroom_design.ini` the built-in `Layout::` constants
+(`render/renderer.hpp`) are what you see. They describe an **authentic
+full-screen AO composition**, not the old boxed-in look:
+
+```
+┌───────────────────────────────────────────────────────────┐
+│ [DEF ▓▓▓▓░░]        Music: <track>          [PRO ▓▓░░░░]   │  ← HUD over the stage
+│                                                             │
+│            full-screen stage: background + sprites          │
+│                  (sprites fill the whole viewport,          │
+│                   their lower body behind the bar)          │
+│                                                             │
+├─────────────────────────────────────────────────────────── │
+│ [ Showname ]                                                │  ← chat bar (overlay)
+│ IC message text, word-wrapped …      [IC][OOC][Music][Evi]  │
+└───────────────────────────────────────────────────────────┘
+```
+
+- `VIEWPORT` is the entire 1280×720 framebuffer — the stage is no longer a small
+  853×480 box beside a giant side panel.
+- `CHAT_AREA` is a 176 px bar overlaid across the bottom; `NAMEPLATE` and the
+  `CHATBOX` (IC text) sit inside it, the button row hugs its right edge.
+- HP bars get inline dark **label chips** (`DEF`/`PRO`) and the now-playing
+  strip its own dark backing, so the HUD stays legible over any background.
+- Each action button prints its control-key hint (`X`/`ZL`/`ZR`/`Y`) and
+  highlights when its panel is open.
+
+### Theme files
 
 `ThemeManager::load("default")` fetches `misc/<theme>/courtroom_design.ini`
 (or `themes/<theme>/...`) through `AssetManager`, parses the rects, and scales
@@ -189,14 +231,16 @@ them from the theme's authored resolution (default 960×540) to 1280×720. The
 courtroom reads `app.theme().layout()` every frame, so any standard AO2
 base-pack theme drives the viewport, chatbox, nameplate, HP bars, and panels.
 `courtroom_sounds.ini` supplies the shout/realization SFX names. The chatbox
-image (`<theme>/chatbox`) is drawn behind the IC text when present.
+image (`<theme>/chatbox`) is drawn over the chat bar when present.
 
 ---
 
 ## 5. Sending messages
 
-The ICInput panel reads the local player's `char.ini` (`load_char_ini`) to list
-their emotes. ←/→ cycle emote, ↑/↓ cycle text colour, **A** opens the system
-keyboard and on confirm builds the 26-field client `MS` packet via `cmd::ms`
-(`emote_mod=1` when the chosen emote has a pre-anim). The Music panel sends `MC`
-for the highlighted track; the OOC panel sends `CT`.
+The IC composer (`CourtroomPanel::ICInput`, opened with **X**) is a centred
+modal that reads the local player's `char.ini` (`load_char_ini`) to list their
+emotes. ←/→ cycle emote, ↑/↓ cycle text colour (shown live as a swatch), and a
+preview of the typed line is displayed. **A** opens the system keyboard and on
+confirm builds the 26-field client `MS` packet via `cmd::ms` (`emote_mod=1` when
+the chosen emote has a pre-anim), then closes the composer so the line can play.
+The Music panel sends `MC` for the highlighted track; the OOC panel sends `CT`.

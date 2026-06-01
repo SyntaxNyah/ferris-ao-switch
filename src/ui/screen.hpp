@@ -16,6 +16,12 @@ public:
     // Called when it's about to be popped
     virtual void on_exit() {}
 
+    // True if this screen fully covers the framebuffer. App::render() draws
+    // only from the topmost opaque screen upward, so an opaque screen hides
+    // everything beneath it (e.g. the courtroom never shows the character
+    // grid behind it). Transparent overlays should override to return false.
+    virtual bool opaque() const { return true; }
+
     // SDL event (keyboard, gamepad, etc.)
     virtual void handle_event(const SDL_Event& e) { (void)e; }
 

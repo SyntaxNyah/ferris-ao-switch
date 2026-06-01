@@ -545,7 +545,9 @@ void CourtroomScreen::render_chat_area() {
     const ThemeLayout& tl = app_.theme().layout();
     TextRenderer& txt = app_.text();
 
-    // Theme chatbox image if available; otherwise a translucent panel.
+    // Chat bar: themed chatbox image if the server provides one, otherwise a
+    // clean dark bar with a bright top edge. (romfs ships no chatbox image, so
+    // the fallback is the usual path unless a CDN serves misc/default/chatbox.)
     if (!chatbox_tried_) {
         chatbox_tried_ = true;
         char p[256];
@@ -555,19 +557,18 @@ void CourtroomScreen::render_chat_area() {
     if (chatbox_tex_) {
         r.draw(chatbox_tex_, nullptr, &tl.chatbox);
     } else {
-        SDL_Rect chat_bg = {0, tl.chatbox.y, Renderer::WIDTH, Renderer::HEIGHT - tl.chatbox.y};
-        r.fill_rect(chat_bg,    {10, 10, 20, 230});
-        r.fill_rect(tl.chatbox, {15, 15, 30, 220});
-        r.draw_rect(tl.chatbox, {60, 80, 120, 255});
+        r.fill_rect(tl.chatbox, {8, 10, 18, 232});
+        r.fill_rect({tl.chatbox.x, tl.chatbox.y, tl.chatbox.w, 2}, {70, 100, 165, 255});
     }
 
-    // Showname / nameplate.
+    // Showname plate.
     const ICAnimState& ic = gs.ic_anim;
     const char* display_name = (ic.showname[0] != '\0') ? ic.showname : ic.char_name;
     if (display_name[0] != '\0') {
-        r.fill_rect(tl.nameplate, {40, 60, 120, 200});
+        r.fill_rect(tl.nameplate, {40, 70, 140, 235});
+        r.draw_rect(tl.nameplate, {120, 160, 230, 255});
         int ty = tl.nameplate.y + (tl.nameplate.h - txt.line_h()) / 2;
-        txt.draw(display_name, tl.nameplate.x + 6, ty, {255, 255, 255, 255});
+        txt.draw(display_name, tl.nameplate.x + 10, ty, {255, 255, 255, 255});
     }
 
     // IC text, typewriter-clipped, word-wrapped inside the ic_text box.
@@ -578,46 +579,70 @@ void CourtroomScreen::render_chat_area() {
         msg_buf[len] = '\0';
         SDL_Color col = TEXT_COLORS[(m_color_ >= 0 && m_color_ < 10) ? m_color_ : 0];
         txt.draw_wrapped(msg_buf, tl.ic_text.x, tl.ic_text.y, tl.ic_text.w, col);
+    } else if (active_panel_ == CourtroomPanel::None) {
+        // Idle: show the controls so the screen is never blank or confusing.
+        txt.draw("X: type IC     ZL: OOC     ZR: Music     Y: Evidence     +: leave",
+                 tl.ic_text.x, tl.ic_text.y, {120, 132, 158, 255});
     }
 }
 
+// Top/bottom HUD overlaid on the full-screen stage: HP bars in the top
+// corners, the now-playing strip top-centre, and the action-button row at the
+// chat bar's right edge. Everything sits on its own dark backing so it stays
+// readable over any background — there is no longer a big opaque side panel.
 void CourtroomScreen::render_side_panel() {
     Renderer& r = app_.renderer();
     GameState& gs = app_.state();
     const ThemeLayout& tl = app_.theme().layout();
     TextRenderer& txt = app_.text();
+    const int lh = txt.line_h() > 0 ? txt.line_h() : 20;
 
-    r.fill_rect(tl.log, {18, 18, 35, 255});
+    // ── HP bars, each with an inline label chip. ──────────────────────────────
+    auto draw_hp = [&](const SDL_Rect& bar, int val, SDL_Color fill,
+                       const char* label) {
+        const int lw = 52;
+        SDL_Rect chip  = {bar.x, bar.y, lw, bar.h};
+        SDL_Rect gauge = {bar.x + lw + 3, bar.y, bar.w - lw - 3, bar.h};
+        r.fill_rect(chip, {0, 0, 0, 205});
+        txt.draw(label, chip.x + 7, chip.y + (chip.h - lh) / 2, {235, 238, 248, 255});
+        r.fill_rect(gauge, {0, 0, 0, 205});
+        if (val > 0) {
+            int v = val > 10 ? 10 : val;
+            r.fill_rect({gauge.x, gauge.y, gauge.w * v / 10, gauge.h}, fill);
+        }
+        r.draw_rect(gauge, {90, 95, 125, 255});
+    };
+    draw_hp(tl.hp_def, gs.hp_defense,     {60, 140, 220, 255}, "DEF");
+    draw_hp(tl.hp_pro, gs.hp_prosecution, {220, 60,  60, 255}, "PRO");
 
+    // ── Now-playing strip. ────────────────────────────────────────────────────
     if (gs.current_music[0] != '\0') {
-        r.fill_rect(tl.music_name, {22, 22, 45, 220});
-        int ty = tl.music_name.y + (tl.music_name.h - txt.line_h()) / 2;
-        txt.draw(gs.current_music, tl.music_name.x + 4, ty, {160, 190, 255, 255});
+        r.fill_rect(tl.music_name, {0, 0, 0, 185});
+        char np[180];
+        std::snprintf(np, sizeof(np), "Music: %s", gs.current_music);
+        int ty = tl.music_name.y + (tl.music_name.h - lh) / 2;
+        txt.draw(np, tl.music_name.x + 10, ty, {170, 200, 255, 255});
     }
 
-    auto draw_hp = [&](SDL_Rect bar, int val, SDL_Color fill,
-                       const char* label, SDL_Color label_col) {
-        r.fill_rect(bar, {20, 20, 20, 255});
-        if (val > 0) {
-            SDL_Rect filled = {bar.x, bar.y, bar.w * val / 10, bar.h};
-            r.fill_rect(filled, fill);
-        }
-        r.draw_rect(bar, {60, 60, 80, 255});
-        txt.draw(label, bar.x, bar.y - txt.line_h(), label_col);
-    };
-    draw_hp(tl.hp_def, gs.hp_defense,     {60, 140, 220, 255}, "DEF", {140, 180, 255, 255});
-    draw_hp(tl.hp_pro, gs.hp_prosecution, {220, 60,  60, 255}, "PRO", {255, 120, 120, 255});
-
-    auto draw_btn = [&](const SDL_Rect& rect, bool on, const char* label) {
-        r.fill_rect(rect, on ? SDL_Color{80,120,200,255} : SDL_Color{30,30,60,255});
-        r.draw_rect(rect, {100, 120, 180, 255});
+    // ── Action buttons with control-key hints. ────────────────────────────────
+    auto draw_btn = [&](const SDL_Rect& rect, bool on, const char* label,
+                        const char* key) {
+        r.fill_rect(rect, on ? SDL_Color{70, 120, 200, 255}
+                             : SDL_Color{22, 26, 44, 235});
+        r.draw_rect(rect, on ? SDL_Color{150, 190, 255, 255}
+                             : SDL_Color{80, 95, 140, 255});
+        // Center the two-line block (function label over control-key hint).
+        int pad = (rect.h - 2 * lh) / 2;
+        if (pad < 2) pad = 2;
         int tx = rect.x + (rect.w - txt.measure_w(label)) / 2;
-        int ty = rect.y + (rect.h - txt.line_h()) / 2;
-        txt.draw(label, tx, ty, {220, 230, 255, 255});
+        txt.draw(label, tx, rect.y + pad, {225, 232, 255, 255});
+        int kx = rect.x + (rect.w - txt.measure_w(key)) / 2;
+        txt.draw(key, kx, rect.y + pad + lh, {150, 168, 205, 255});
     };
-    draw_btn(tl.btn_ooc,      active_panel_ == CourtroomPanel::OOC,      "OOC");
-    draw_btn(tl.btn_music,    active_panel_ == CourtroomPanel::Music,    "Music");
-    draw_btn(tl.btn_evidence, active_panel_ == CourtroomPanel::Evidence, "Evi");
+    draw_btn(tl.btn_ic,       active_panel_ == CourtroomPanel::ICInput,  "IC",    "X");
+    draw_btn(tl.btn_ooc,      active_panel_ == CourtroomPanel::OOC,      "OOC",   "ZL");
+    draw_btn(tl.btn_music,    active_panel_ == CourtroomPanel::Music,    "Music", "ZR");
+    draw_btn(tl.btn_evidence, active_panel_ == CourtroomPanel::Evidence, "Evi",   "Y");
 }
 
 void CourtroomScreen::render_active_panel() {
@@ -682,23 +707,46 @@ void CourtroomScreen::render_active_panel() {
         }
 
     } else if (active_panel_ == CourtroomPanel::ICInput) {
-        SDL_Rect box = {tl.viewport.x + 40, tl.viewport.y + 40,
-                        tl.viewport.w - 80, 150};
-        r.fill_rect(box, {12, 12, 24, 240});
-        r.draw_rect(box, {80, 120, 200, 255});
-        int x = box.x + 12, y = box.y + 10;
-        txt.draw("IC Message", x, y, {200, 220, 255, 255}); y += lh + 4;
+        const SDL_Rect box = Layout::IC_COMPOSER;
+        r.fill_rect(box, {12, 14, 26, 245});
+        r.draw_rect(box, {90, 130, 210, 255});
+        r.fill_rect({box.x, box.y, box.w, lh + 16}, {30, 45, 90, 255});
+        txt.draw("Compose IC Message", box.x + 16, box.y + 8, {225, 235, 255, 255});
 
-        const char* emote_name = "(none — pick a char)";
+        const int x    = box.x + 24;
+        const int step = lh + 16;
+        int y = box.y + lh + 30;
+
+        const char* emote_name = "normal (default)";
         if (own_loaded_ && own_char_.emotion_count > 0 &&
             ic_emote_sel_ >= 0 && ic_emote_sel_ < own_char_.emotion_count)
             emote_name = own_char_.emotions[ic_emote_sel_].name;
-        char line[128];
-        std::snprintf(line, sizeof(line), "Emote (<- ->): %s", emote_name);
-        txt.draw(line, x, y, {220, 220, 220, 255}); y += lh + 2;
-        std::snprintf(line, sizeof(line), "Pos: %s   Color (up/dn): %d", ic_pos_, ic_color_);
-        txt.draw(line, x, y, {200, 200, 210, 255}); y += lh + 2;
-        txt.draw("A: type + send    B: close", x, y, {150, 160, 180, 255});
+        char line[200];
+        std::snprintf(line, sizeof(line), "Emote   ( < > ):  %s", emote_name);
+        txt.draw(line, x, y, {220, 224, 235, 255}); y += step;
+
+        std::snprintf(line, sizeof(line), "Colour  (up/dn):  %d", ic_color_);
+        int cw = txt.draw(line, x, y, {220, 224, 235, 255});
+        SDL_Rect swatch = {x + cw + 18, y + 2, 30, lh - 4};
+        r.fill_rect(swatch, TEXT_COLORS[(ic_color_ >= 0 && ic_color_ < 10) ? ic_color_ : 0]);
+        r.draw_rect(swatch, {200, 200, 210, 255});
+        y += step;
+
+        std::snprintf(line, sizeof(line), "Position:  %s", ic_pos_);
+        txt.draw(line, x, y, {200, 205, 220, 255}); y += step + 4;
+
+        // Typed-message preview box.
+        SDL_Rect prev = {x, y, box.w - 48, lh * 2 + 12};
+        r.fill_rect(prev, {6, 8, 16, 255});
+        r.draw_rect(prev, {60, 70, 110, 255});
+        bool has = ic_text_[0] != '\0';
+        txt.draw_wrapped(has ? ic_text_ : "(press A to type your message)",
+                         prev.x + 8, prev.y + 6, prev.w - 16,
+                         has ? SDL_Color{235, 235, 245, 255}
+                             : SDL_Color{120, 128, 150, 255});
+
+        txt.draw("A: type message & send          B: cancel",
+                 x, box.y + box.h - lh - 14, {160, 175, 205, 255});
     }
 }
 
@@ -740,7 +788,12 @@ void CourtroomScreen::compose_and_send() {
 
     char buf[2048];
     int n = cmd::ms(buf, sizeof(buf), p);
-    if (n > 0) app_.send_packet(buf, n);
+    if (n > 0) {
+        app_.send_packet(buf, n);
+        // Close the composer so the courtroom (and the line we just sent) is
+        // visible; reopen with X to send another.
+        active_panel_ = CourtroomPanel::None;
+    }
 }
 
 void CourtroomScreen::handle_event(const SDL_Event& e) {

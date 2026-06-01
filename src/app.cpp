@@ -115,7 +115,9 @@ bool App::init() {
     theme_manager_.load("default");
 
     // Init text renderer — non-fatal if font is missing (text renders as nothing).
-    text_renderer_.init(renderer_->raw(), "fonts/noto_sans.ttf", 18);
+    // 20pt reads cleanly at TV distance and in handheld without overflowing the
+    // character-grid labels.
+    text_renderer_.init(renderer_->raw(), "fonts/noto_sans.ttf", 20);
 
     // Install the community fallback CDN. AO-SDL ships with this URL as a
     // low-priority mount that activates whenever the server's own CDN 404s on
@@ -278,8 +280,16 @@ void App::update(uint32_t dt_ms) {
 void App::render() {
     renderer_->clear({15, 15, 20, 255});
 
-    // Render all screens bottom-up (lower screens may show through overlays)
-    for (int i = 0; i < screen_count_; ++i)
+    // Render only from the topmost opaque screen upward. A full-screen screen
+    // (char select, courtroom, …) hides everything beneath it, so picking a
+    // character no longer leaves the grid showing through the courtroom. Any
+    // transparent overlay screen (opaque() == false) still lets the screen
+    // below it render first.
+    int start = 0;
+    for (int i = screen_count_ - 1; i >= 0; --i) {
+        if (screen_stack_[i]->opaque()) { start = i; break; }
+    }
+    for (int i = start; i < screen_count_; ++i)
         screen_stack_[i]->render();
 
     renderer_->present();
