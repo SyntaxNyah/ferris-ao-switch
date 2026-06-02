@@ -265,6 +265,14 @@ void App::update(uint32_t dt_ms) {
         }
     }
 
+    // Courtroom requested "Change character": pop it so the CharSelectScreen
+    // still on the stack underneath becomes active again. Deferred to here (end
+    // of update) so we never delete the courtroom while it's mid event/update.
+    if (want_char_select_) {
+        want_char_select_ = false;
+        if (screen_count_ > 1) pop_screen();   // courtroom → reveal char select
+    }
+
     if (screen_count_ > 0)
         screen_stack_[screen_count_ - 1]->update(dt_ms);
 }

@@ -2,6 +2,27 @@
 #include "../assets/asset_manager.hpp"
 #include <cstring>
 #include <cstdio>
+#include <strings.h>   // strcasecmp
+
+namespace {
+// SDL_mixer's Mix_LoadMUS_RW auto-detection frequently misreads .opus (it shares
+// the "OggS" container with Vorbis, and peeking far enough to find "OpusHead"
+// fails on a streamed RWops) — which is exactly the AO case, where ~all server
+// music is Opus. Force the right decoder from the filename extension instead.
+Mix_MusicType music_type_for(const char* path) {
+    const char* dot = std::strrchr(path, '.');
+    if (!dot) return MUS_NONE;
+    if (!strcasecmp(dot, ".opus")) return MUS_OPUS;
+    if (!strcasecmp(dot, ".ogg"))  return MUS_OGG;
+    if (!strcasecmp(dot, ".mp3"))  return MUS_MP3;
+    if (!strcasecmp(dot, ".flac")) return MUS_FLAC;
+    if (!strcasecmp(dot, ".wav"))  return MUS_WAV;
+    if (!strcasecmp(dot, ".mid") || !strcasecmp(dot, ".midi")) return MUS_MID;
+    if (!strcasecmp(dot, ".mod") || !strcasecmp(dot, ".xm") ||
+        !strcasecmp(dot, ".it")  || !strcasecmp(dot, ".s3m")) return MUS_MOD;
+    return MUS_NONE;
+}
+} // namespace
 
 namespace ao {
 
@@ -38,7 +59,9 @@ void MusicPlayer::play(const char* path, int fade_ms) {
     // freesrc=0: we keep rw alive ourselves so SDL_mixer can stream from it.
     // music_rw_ is closed and freed by the next play()/stop() call.
     music_rw_ = rw;
-    music_    = Mix_LoadMUS_RW(rw, 0);
+    Mix_MusicType mt = music_type_for(path);
+    music_ = (mt != MUS_NONE) ? Mix_LoadMUSType_RW(rw, mt, 0)   // forced (e.g. Opus)
+                              : Mix_LoadMUS_RW(rw, 0);          // unknown ext → detect
     if (!music_) {
         std::fprintf(stderr, "MusicPlayer: Mix_LoadMUS_RW failed for '%s': %s\n",
             path, Mix_GetError());

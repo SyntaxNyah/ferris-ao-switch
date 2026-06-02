@@ -1,6 +1,7 @@
 #include "asset_stream.hpp"
 #include "asset_manager.hpp"
 #include "extensions_config.hpp"
+#include "surface_util.hpp"
 #include "../net/http_fetch.hpp"
 #include <SDL2/SDL_image.h>
 #include <cstring>
@@ -13,25 +14,8 @@ namespace ao {
 static constexpr int KIND_RAW    = -1;   // fetch bytes only
 static constexpr int KIND_DECODE = -2;   // fetch the exact path + decode off-thread
 
-// Convert any decoded surface (palette+colorkey GIF, RGB, or RGBA) to a single
-// ARGB8888 surface with REAL alpha. A plain SDL_ConvertSurfaceFormat does NOT
-// turn a GIF's transparent-color index into alpha, so old-style GIF sprites —
-// some of which ship in the wild with a misleading `.webp` extension (e.g.
-// Skrapegropen's Polly) — would render as a solid chroma-key block (the "giant
-// pink screen"). Blitting onto a zero-filled (transparent) ARGB surface with the
-// source in BLENDMODE_NONE honors the source colorkey AND per-pixel alpha for
-// every case: colorkeyed pixels are skipped (stay alpha 0) and real pixels copy
-// verbatim.
-static SDL_Surface* to_argb8888(SDL_Surface* src) {
-    if (!src) return nullptr;
-    SDL_Surface* out = SDL_CreateRGBSurfaceWithFormat(0, src->w, src->h, 32,
-                                                      SDL_PIXELFORMAT_ARGB8888);
-    if (!out) return nullptr;
-    SDL_FillRect(out, nullptr, 0);                      // fully transparent
-    SDL_SetSurfaceBlendMode(src, SDL_BLENDMODE_NONE);   // raw copy; colorkey still honored
-    if (SDL_BlitSurface(src, nullptr, out, nullptr) != 0) { SDL_FreeSurface(out); return nullptr; }
-    return out;
-}
+// to_argb8888() (palette+colorkey GIF / RGB / RGBA → ARGB8888 with real alpha)
+// now lives in surface_util.hpp so the main-thread loader shares it verbatim.
 
 // Decode fetched image bytes into ARGB8888 frames on the worker and stage them
 // for the main thread to upload (AssetManager::store_frames). Converting to a

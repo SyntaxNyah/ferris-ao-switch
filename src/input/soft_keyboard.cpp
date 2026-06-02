@@ -211,8 +211,11 @@ SoftKeyboard::Result SoftKeyboard::handle_event(const SDL_Event& e, SDL_Renderer
     if (sel_ >= kn) sel_ = kn - 1;
     if (sel_ < 0)   sel_ = 0;
 
-    // Physical keyboard (desktop / a real USB keyboard): type directly from key
-    // events (we don't use SDL_TEXTINPUT — see open()), plus arrow-key cursor.
+    // Physical keyboard (DESKTOP ONLY): type directly from key events (we don't
+    // use SDL_TEXTINPUT — see open()), plus arrow-key cursor. On the Switch (incl.
+    // Ryujinx) the HID poll() is the physical-keyboard source; if we ALSO handled
+    // SDL_KEYDOWN here, Ryujinx delivers both and every key types twice.
+#ifndef __SWITCH__
     if (e.type == SDL_KEYDOWN) {
         SDL_Keycode sym = e.key.keysym.sym;
         switch (sym) {
@@ -232,6 +235,7 @@ SoftKeyboard::Result SoftKeyboard::handle_event(const SDL_Event& e, SDL_Renderer
                 break;
         }
     }
+#endif
 
     // Controller — the only way to type DOCKED (no touchscreen). Cursor + A/B.
     if (e.type == SDL_CONTROLLERBUTTONDOWN) {

@@ -1,5 +1,6 @@
 #include "apng_player.hpp"
 #include "asset_manager.hpp"
+#include "surface_util.hpp"
 #include <cstdio>
 #include <cstring>
 #include <cstdint>
@@ -178,7 +179,11 @@ bool APNGPlayer::load(SDL_Renderer* r, const char* path) {
     if (anim && anim->count > 0) {
         int n = anim->count < APNG_MAX_FRAMES ? anim->count : APNG_MAX_FRAMES;
         for (int i = 0; i < n; ++i) {
-            frames_[i] = SDL_CreateTextureFromSurface(r, anim->frames[i]);
+            // Normalise to ARGB8888 first so a colorkey GIF (incl. GIFs shipped
+            // as .webp, e.g. Tyrell Badd) gets real alpha instead of a chroma block.
+            SDL_Surface* cv = to_argb8888(anim->frames[i]);
+            frames_[i] = cv ? SDL_CreateTextureFromSurface(r, cv) : nullptr;
+            if (cv) SDL_FreeSurface(cv);
             if (frames_[i]) SDL_SetTextureBlendMode(frames_[i], SDL_BLENDMODE_BLEND);
             else
                 std::fprintf(stderr, "APNGPlayer: frame %d texture fail: %s\n",
@@ -209,7 +214,9 @@ bool APNGPlayer::load(SDL_Renderer* r, const char* path) {
             path, IMG_GetError());
         return false;
     }
-    frames_[0] = SDL_CreateTextureFromSurface(r, surf);
+    SDL_Surface* cv = to_argb8888(surf);   // colorkey GIF → real alpha (see above)
+    frames_[0] = cv ? SDL_CreateTextureFromSurface(r, cv) : nullptr;
+    if (cv) SDL_FreeSurface(cv);
     if (frames_[0]) SDL_SetTextureBlendMode(frames_[0], SDL_BLENDMODE_BLEND);
     delays_[0] = 100;
     width_     = surf->w;

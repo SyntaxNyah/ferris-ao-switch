@@ -38,6 +38,10 @@ public:
     void push_screen(Screen* s);
     void pop_screen();
 
+    // Courtroom "Change character" request: deferred pop back to the
+    // CharSelectScreen that remains on the stack underneath the courtroom.
+    void request_char_select() { want_char_select_ = true; }
+
     // Access shared systems
     Renderer&     renderer()     { return *renderer_; }
     GameState&    state()        { return *game_state_; }
@@ -93,6 +97,7 @@ private:
     AOClient*      ao_client_     = nullptr;
     char           username_[64]  = "Switch";
     bool           was_in_lobby_  = false;  // edge detection for CharSelectScreen push
+    bool           want_char_select_ = false; // courtroom asked to change character
     char           pending_error_[256] = {};
     // Fallback asset URL applied only if server never sends an ASS packet.
     // Set at connect() time, consumed once in_lobby becomes true.

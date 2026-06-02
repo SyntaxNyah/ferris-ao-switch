@@ -56,6 +56,7 @@ private:
     void handle_tap(int x, int y);        // route a tap to a button / chatbox / panel
     void handle_panel_tap(int x, int y);  // tap inside the open panel
     void ic_toggle_rects(SDL_Rect out[4]) const;  // composer shout/flip/realize/shake buttons
+    SDL_Rect change_char_rect() const;            // "Char" HUD button (back to char select)
     void scroll_focused(int rows);        // scroll the focused panel / IC log (wheel + drag)
     int  focused_row_px() const;          // row height of the focused list (drag px → rows)
 

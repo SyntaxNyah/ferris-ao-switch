@@ -1032,6 +1032,14 @@ void CourtroomScreen::render_side_panel() {
     draw_btn(tl.btn_music,    active_panel_ == CourtroomPanel::Music,    "Music", "R");
     draw_btn(tl.btn_evidence, active_panel_ == CourtroomPanel::Evidence, "Evi",   "Y");
     draw_btn(tl.btn_area,     active_panel_ == CourtroomPanel::Area,     "Rooms", "-");
+    draw_btn(change_char_rect(), false, "Char", "swap");   // back to char select
+}
+
+// Small "Char" button stacked just above the IC button — tapping it returns to
+// the character-select screen still on the stack underneath the courtroom.
+SDL_Rect CourtroomScreen::change_char_rect() const {
+    const SDL_Rect& b = app_.theme().layout().btn_ic;
+    return {b.x, b.y - b.h - 6, b.w, b.h};
 }
 
 // The four sendable-modifier toggle buttons in the IC composer's right column,
@@ -1470,6 +1478,9 @@ void CourtroomScreen::handle_tap(int x, int y) {
 
     // While a panel is open it covers the HUD buttons, so route taps to it.
     if (active_panel_ != CourtroomPanel::None) { handle_panel_tap(x, y); return; }
+
+    // "Char" button: leave the courtroom and go back to character select.
+    if (pt_in(x, y, change_char_rect())) { app_.request_char_select(); return; }
 
     // HUD buttons open their panel.
     if (pt_in(x, y, tl.btn_ic)) { active_panel_ = CourtroomPanel::ICInput; ic_buttons_dirty_ = true; return; }
