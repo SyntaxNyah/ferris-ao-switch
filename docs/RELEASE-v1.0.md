@@ -6,6 +6,16 @@ Runs as a single `.nro` on real modded hardware (Atmosphère) and on the Ryujinx
 
 ---
 
+## 🔧 Hotfix
+
+> The v1.00 download has been **updated** with three fixes:
+>
+> - 🔊 **Audio works now.** The mixer was opening at 44.1 kHz, but the Switch runs audio at **48 kHz** natively — the resample was coming out silent (worst on Ryujinx). It now opens at 48 kHz, so blips / shout SFX / music actually play.
+> - ⌨️ **USB / host keyboard types.** A physical keyboard (incl. Ryujinx's, with keyboard input enabled) now types straight into the IC/OOC composer — read directly from the Switch HID keyboard. The on-screen keyboard still handles touch / mouse / controller.
+> - 🎯 **Composer layout.** The message box no longer overlaps the **Flip / Realization / Screenshake** toggles.
+
+---
+
 ## 🎉 What's new since v0.5
 
 - ⌨️ **In-app keyboard that doesn't freeze the game.** Typing used to open the blocking system keyboard, which froze the whole client — incoming messages piled up and only appeared after you sent one. The IC/OOC keyboard is now an **on-screen keyboard the app draws itself**, so chat keeps flowing live while you type. Works with **touch** (handheld), **mouse** (Ryujinx), **controller** (D-pad cursor + A/B — so it works **docked**), and a **USB keyboard**.

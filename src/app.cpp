@@ -86,13 +86,23 @@ bool App::init() {
         return false;
     }
 
-    if (Mix_OpenAudio(44100, MIX_DEFAULT_FORMAT, 2, 2048) != 0) {
+    // Init codecs BEFORE opening the device, and open at the Switch's NATIVE
+    // 48 kHz so the audio backend doesn't have to resample (opening at 44.1 kHz
+    // produced silence on Ryujinx). MIX_DEFAULT_FORMAT, stereo.
+    Mix_Init(MIX_INIT_OGG | MIX_INIT_OPUS | MIX_INIT_MP3 | MIX_INIT_MOD);
+    if (Mix_OpenAudio(48000, MIX_DEFAULT_FORMAT, 2, 2048) != 0) {
         std::fprintf(stderr, "Mix_OpenAudio: %s\n", Mix_GetError());
         return false;
     }
-    Mix_Init(MIX_INIT_OGG | MIX_INIT_OPUS | MIX_INIT_MP3 | MIX_INIT_MOD);
     Mix_AllocateChannels(16);
     audio_manager_.init();
+
+#ifdef __SWITCH__
+    // Enable the HID keyboard so a USB/host keyboard (incl. Ryujinx's, with
+    // keyboard input enabled) reaches the in-app keyboard. Cheap; no swkbd, so it
+    // never touches the network/connections.
+    hidInitializeKeyboard();
+#endif
 
     window_ = SDL_CreateWindow(
         "Ferris-AO",

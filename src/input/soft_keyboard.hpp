@@ -36,6 +36,12 @@ public:
     const char* text() const { return buf_; }
 
     Result handle_event(const SDL_Event& e, SDL_Renderer* r);
+    // Poll the Switch HID keyboard directly (libnx). SDL on the Switch does NOT
+    // surface a USB/host physical keyboard as SDL_KEYDOWN, so the on-screen path
+    // is the only one that worked. This reads hidGetKeyboardStates each frame and
+    // edge-detects new key presses. No-op (returns NONE) off-Switch. Call every
+    // frame while active(); it's a couple of memory reads — zero connection cost.
+    Result poll();
     void   render(Renderer& r, TextRenderer& txt);
 
 private:
@@ -54,6 +60,7 @@ private:
     int  len_  = 0;
     int  max_  = 255;
     char hint_[64] = {};
+    unsigned long long prev_keys_[4] = {};  // HID key bitmap last frame (edge detect)
 };
 
 } // namespace ao

@@ -632,6 +632,11 @@ void CourtroomScreen::update_music() {
 void CourtroomScreen::update(uint32_t dt_ms) {
     GameState& gs = app_.state();
 
+    // Physical (HID) keyboard: SDL doesn't surface a host/USB keyboard on the
+    // Switch, so poll libnx directly while the composer is open. Typed text lands
+    // in the same buffer as taps; Enter sends, Esc cancels.
+    if (kb_.active()) dispatch_kb_result(kb_.poll());
+
     // Async own-character load (no join freeze). Parse our char.ini once it's in
     // the prefetch cache (or after a short fallback), then pre-warm our sprite
     // and emote thumbnails so our first line isn't slow.
@@ -1294,6 +1299,19 @@ void CourtroomScreen::render_active_panel() {
 
 // ── Input ───────────────────────────────────────────────────────────────────────
 
+// Route a keyboard result (from taps, mouse, SDL physical key, or the HID poll)
+// to the composer that opened it. Shared by handle_event and update().
+void CourtroomScreen::dispatch_kb_result(SoftKeyboard::Result rs) {
+    if (rs == SoftKeyboard::SUBMIT) {
+        ComposeMode m = compose_mode_;
+        compose_mode_ = CM_NONE;
+        if (m == CM_IC)       send_ic(kb_.text());
+        else if (m == CM_OOC) send_ooc(kb_.text());
+    } else if (rs == SoftKeyboard::CANCEL) {
+        compose_mode_ = CM_NONE;
+    }
+}
+
 // Open the non-blocking on-screen keyboard for an IC line. The actual MS is
 // built + sent in send_ic() when the user taps "send" — meanwhile the main loop
 // keeps running, so incoming chat animates live instead of freezing.
@@ -1551,15 +1569,7 @@ void CourtroomScreen::handle_event(const SDL_Event& e) {
     // the loop keeps running, so chat animates live behind it). On "send" the
     // typed text is dispatched to the right composer.
     if (kb_.active()) {
-        SoftKeyboard::Result rs = kb_.handle_event(e, app_.renderer().raw());
-        if (rs == SoftKeyboard::SUBMIT) {
-            ComposeMode m = compose_mode_;
-            compose_mode_ = CM_NONE;
-            if (m == CM_IC)       send_ic(kb_.text());
-            else if (m == CM_OOC) send_ooc(kb_.text());
-        } else if (rs == SoftKeyboard::CANCEL) {
-            compose_mode_ = CM_NONE;
-        }
+        dispatch_kb_result(kb_.handle_event(e, app_.renderer().raw()));
         return;
     }
     GameState& gs = app_.state();

@@ -26,6 +26,7 @@ void SoftKeyboard::open(const char* hint, const char* initial, int max_len) {
     std::strncpy(buf_, initial ? initial : "", sizeof(buf_) - 1); buf_[sizeof(buf_) - 1] = '\0';
     len_ = (int)std::strlen(buf_);
     if (len_ > max_) { len_ = max_; buf_[len_] = '\0'; }
+    prev_keys_[0] = prev_keys_[1] = prev_keys_[2] = prev_keys_[3] = 0;  // fresh edge state
     // NOTE: deliberately do NOT call SDL_StartTextInput() — the devkitPro Switch
     // SDL2 port routes text input through the system swkbd, which would pop the
     // blocking keyboard right on top of this one (eating clicks / freezing). We
@@ -60,6 +61,64 @@ void SoftKeyboard::insert(char c) {
 void SoftKeyboard::backspace() {
     if (len_ > 0) buf_[--len_] = '\0';
 }
+
+// ── Physical (HID) keyboard ─────────────────────────────────────────────────
+// USB HID usage IDs (libnx HidKeyboardKey). Map a key to its character.
+static char hid_key_to_char(int key, bool shift) {
+    if (key >= 4 && key <= 29) {                // A..Z
+        char c = (char)('a' + (key - 4));
+        return shift ? (char)(c - 32) : c;
+    }
+    if (key >= 30 && key <= 38) {               // 1..9
+        char c = (char)('1' + (key - 30));
+        return shift ? shift_char(c) : c;
+    }
+    switch (key) {
+        case 39: return shift ? ')' : '0';      // 0
+        case 44: return ' ';                    // Space
+        case 45: return shift ? '_' : '-';      // - _
+        case 46: return shift ? '+' : '=';      // = +
+        case 47: return shift ? '{' : '[';      // [ {
+        case 48: return shift ? '}' : ']';      // ] }
+        case 49: return shift ? '|' : '\\';     // \ |
+        case 51: return shift ? ':' : ';';      // ; :
+        case 52: return shift ? '"' : '\'';     // ' "
+        case 53: return shift ? '~' : '`';      // ` ~
+        case 54: return shift ? '<' : ',';      // , <
+        case 55: return shift ? '>' : '.';      // . >
+        case 56: return shift ? '?' : '/';      // / ?
+        default: return 0;
+    }
+}
+
+#ifdef __SWITCH__
+#include <switch.h>
+SoftKeyboard::Result SoftKeyboard::poll() {
+    if (!active_) return NONE;
+    HidKeyboardState kbd;
+    if (hidGetKeyboardStates(&kbd, 1) < 1) return NONE;
+    bool shift = (kbd.modifiers &
+                  (HidKeyboardModifier_Shift | HidKeyboardModifier_CapsLock)) != 0;
+    for (int w = 0; w < 4; ++w) {
+        unsigned long long now  = kbd.keys[w];
+        unsigned long long fresh = now & ~prev_keys_[w];   // newly pressed this frame
+        prev_keys_[w] = now;
+        while (fresh) {
+            int bit = __builtin_ctzll(fresh);
+            fresh &= fresh - 1;
+            int key = w * 64 + bit;
+            if (key == 40 || key == 88) { close(); return SUBMIT; }  // Return / KP Enter
+            if (key == 41) { close(); return CANCEL; }               // Escape
+            if (key == 42) { backspace(); continue; }                // Backspace
+            char c = hid_key_to_char(key, shift);
+            if (c) insert(c);
+        }
+    }
+    return NONE;
+}
+#else
+SoftKeyboard::Result SoftKeyboard::poll() { return NONE; }
+#endif
 
 // Build the fixed QWERTY layout. Rows: numbers, qwerty x3 (last with shift +
 // backspace), and a function row (cancel / punctuation / wide space / send).

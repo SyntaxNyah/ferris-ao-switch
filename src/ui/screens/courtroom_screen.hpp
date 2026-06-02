@@ -65,6 +65,7 @@ private:
     void compose_ooc();        // open the on-screen keyboard for an OOC (CT) line
     void send_ic(const char* text);   // build + send an MS from the typed text
     void send_ooc(const char* text);  // build + send a CT from the typed text
+    void dispatch_kb_result(SoftKeyboard::Result rs);  // route SUBMIT/CANCEL to composer
     void cycle_emote(int dir);  // change the selected emote by ±1 (main view + composer)
 
     // ── IC composer ───────────────────────────────────────────────────────
