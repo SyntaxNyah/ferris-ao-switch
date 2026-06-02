@@ -817,13 +817,20 @@ HttpResult HttpClient::get(const char* url) {
         else        res = perform_keepalive_request(&impl_->tcp_,
                                                     pu.host, pu.path, &keep_alive);
 
-        if (!keep_alive) close();
+        // A framed non-200 (a 404, say) is a COMPLETE response, not a transport
+        // failure — the socket is still healthy, so return it and KEEP the
+        // connection for the next request. Extension probing 404s constantly; the
+        // old code close()+reconnect()+retried on every one, so the keep-alive
+        // connection never stayed warm and each sprite paid a fresh DNS+TCP+TLS
+        // round-trip (visible as the socket open/close storm in the Ryujinx log).
+        // Only `keep_alive == false` (stale/closed socket, send error, unframed
+        // body, or a `Connection: close` reply) is worth dropping + retrying.
+        if (res.ok || keep_alive) {
+            if (!keep_alive) close();   // 200 but the server asked us to close
+            return res;
+        }
 
-        if (res.ok) return res;
-
-        // Failed. If this was the first try and we had been reusing a stale
-        // connection, reconnect and try once more.
-        if (attempt == 0) close();
+        close();   // transport-level failure — reconnect and try once more
     }
     return res;
 }
