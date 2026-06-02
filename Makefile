@@ -43,8 +43,8 @@ INCLUDES := include src
 ROMFS    := romfs
 
 APP_TITLE   := Ferris-AO
-APP_AUTHOR  := Ferris-AO Team
-APP_VERSION := 0.1.0
+APP_AUTHOR  := SyntaxNyah
+APP_VERSION := 1.0.0
 APP_ICON    := icon.jpg
 
 #---------------------------------------------------------------------------------

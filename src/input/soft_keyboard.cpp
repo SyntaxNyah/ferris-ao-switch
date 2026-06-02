@@ -26,12 +26,29 @@ void SoftKeyboard::open(const char* hint, const char* initial, int max_len) {
     std::strncpy(buf_, initial ? initial : "", sizeof(buf_) - 1); buf_[sizeof(buf_) - 1] = '\0';
     len_ = (int)std::strlen(buf_);
     if (len_ > max_) { len_ = max_; buf_[len_] = '\0'; }
-    SDL_StartTextInput();   // physical keyboard, where available
+    // NOTE: deliberately do NOT call SDL_StartTextInput() — the devkitPro Switch
+    // SDL2 port routes text input through the system swkbd, which would pop the
+    // blocking keyboard right on top of this one (eating clicks / freezing). We
+    // read the physical keyboard straight from SDL_KEYDOWN instead (see below).
 }
 
 void SoftKeyboard::close() {
     active_ = false;
-    SDL_StopTextInput();
+}
+
+// US-layout shift mapping for the physical keyboard.
+static char shift_char(char c) {
+    if (c >= 'a' && c <= 'z') return (char)(c - 32);
+    switch (c) {
+        case '1': return '!'; case '2': return '@'; case '3': return '#';
+        case '4': return '$'; case '5': return '%'; case '6': return '^';
+        case '7': return '&'; case '8': return '*'; case '9': return '(';
+        case '0': return ')'; case '-': return '_'; case '=': return '+';
+        case ',': return '<'; case '.': return '>'; case '/': return '?';
+        case ';': return ':'; case '\'':return '"'; case '[': return '{';
+        case ']': return '}'; case '\\':return '|'; case '`': return '~';
+        default:  return c;
+    }
 }
 
 void SoftKeyboard::insert(char c) {
@@ -135,23 +152,26 @@ SoftKeyboard::Result SoftKeyboard::handle_event(const SDL_Event& e, SDL_Renderer
     if (sel_ >= kn) sel_ = kn - 1;
     if (sel_ < 0)   sel_ = 0;
 
-    // Physical keyboard (desktop / dev): type directly + arrow-key cursor.
+    // Physical keyboard (desktop / a real USB keyboard): type directly from key
+    // events (we don't use SDL_TEXTINPUT — see open()), plus arrow-key cursor.
     if (e.type == SDL_KEYDOWN) {
-        switch (e.key.keysym.sym) {
+        SDL_Keycode sym = e.key.keysym.sym;
+        switch (sym) {
             case SDLK_RETURN: case SDLK_KP_ENTER: close(); return SUBMIT;
-            case SDLK_ESCAPE: close(); return CANCEL;
+            case SDLK_ESCAPE:    close(); return CANCEL;
             case SDLK_BACKSPACE: backspace(); return NONE;
             case SDLK_LEFT:  if (sel_ > 0)      --sel_; return NONE;
             case SDLK_RIGHT: if (sel_ < kn - 1) ++sel_; return NONE;
             case SDLK_UP:    sel_ = nav_vert(-1); return NONE;
             case SDLK_DOWN:  sel_ = nav_vert(+1); return NONE;
-            default: break;
+            default:
+                if (sym >= 32 && sym < 127) {     // printable ASCII keysym
+                    bool shift = (e.key.keysym.mod & KMOD_SHIFT) != 0;
+                    insert(shift ? shift_char((char)sym) : (char)sym);
+                    return NONE;
+                }
+                break;
         }
-    }
-    if (e.type == SDL_TEXTINPUT) {
-        for (const char* p = e.text.text; *p; ++p)
-            if ((unsigned char)*p >= 32) insert(*p);
-        return NONE;
     }
 
     // Controller — the only way to type DOCKED (no touchscreen). Cursor + A/B.

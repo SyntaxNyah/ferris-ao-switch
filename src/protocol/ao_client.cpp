@@ -220,7 +220,7 @@ void AOClient::on_id(const Packet& p) {
     // AO2 client with all features enabled. Match that format verbatim (keep the
     // 2.999.999 protocol field; only the software name carries our version).
     char buf[128];
-    send(buf, cmd::id(buf, sizeof(buf), "ferris-ao-switchv0.5", "2.999.999"));
+    send(buf, cmd::id(buf, sizeof(buf), "ferris-ao-switch-v1", "2.999.999"));
     std::fprintf(stderr, "[ao_client] ID received — sent client ID\n");
 }
 

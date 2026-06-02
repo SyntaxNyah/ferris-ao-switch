@@ -1029,6 +1029,19 @@ void CourtroomScreen::render_side_panel() {
     draw_btn(tl.btn_area,     active_panel_ == CourtroomPanel::Area,     "Rooms", "-");
 }
 
+// The four sendable-modifier toggle buttons in the IC composer's right column,
+// below the Position line. Computed identically here for render and hit-test.
+void CourtroomScreen::ic_toggle_rects(SDL_Rect out[4]) const {
+    const SDL_Rect box = Layout::IC_COMPOSER;
+    const int lh = app_.text().line_h() > 0 ? app_.text().line_h() : 20;
+    const int cols = 4, cell_w = 144, gap = 6;
+    int rx     = box.x + 20 + cols * (cell_w + gap) + 14;
+    int prev_w = box.x + box.w - rx - 20;
+    int oy     = box.y + lh + 28 + 200 + 12 + 3 * (lh + 6) + 8;  // below preview + 3 info lines
+    int bh     = lh + 10;
+    for (int i = 0; i < 4; ++i) out[i] = {rx, oy + i * (bh + 6), prev_w, bh};
+}
+
 void CourtroomScreen::render_active_panel() {
     Renderer& r = app_.renderer();
     GameState& gs = app_.state();
@@ -1041,33 +1054,46 @@ void CourtroomScreen::render_active_panel() {
     if (active_panel_ == CourtroomPanel::OOC) {
         r.fill_rect(tl.panel_ooc, {10, 10, 20, 235});
         r.draw_rect(tl.panel_ooc, {60, 80, 140, 255});
-        const int row_h   = lh * 2 + 6;
-        const int visible = (tl.panel_ooc.h - 8) / row_h;
-        int start = gs.ooc_log.count > visible ? gs.ooc_log.count - visible : 0;
-        start -= ooc_scroll_;
-        if (start < 0) start = 0;
+
+        // Variable-height entries stacked from the BOTTOM (newest last), each its
+        // real wrapped height — a fixed row height made long lines overlap. A clip
+        // rect trims the top-most partial entry; a footer line is reserved below.
+        const int footer = lh + 8;
+        SDL_Rect clip = {tl.panel_ooc.x + 8, tl.panel_ooc.y + 6,
+                         tl.panel_ooc.w - 16, tl.panel_ooc.h - 12 - footer};
+        SDL_RenderSetClipRect(r.raw(), &clip);
+
+        if (ooc_scroll_ < 0) ooc_scroll_ = 0;
+        if (gs.ooc_log.count > 0 && ooc_scroll_ > gs.ooc_log.count - 1)
+            ooc_scroll_ = gs.ooc_log.count - 1;
+
         const char* me = app_.username();
-        for (int i = 0; i < visible && (start + i) < gs.ooc_log.count; ++i) {
-            const ChatEntry& ce = gs.ooc_log.at(start + i);
-            int ry = tl.panel_ooc.y + 4 + i * row_h;
+        const int gap = 8;
+        int newest = gs.ooc_log.count - 1 - ooc_scroll_;
+        int y = clip.y + clip.h;
+        for (int i = newest; i >= 0 && y > clip.y; --i) {
+            const ChatEntry& ce = gs.ooc_log.at(i);
+            int mh = txt.wrapped_height(ce.message, clip.w);
+            if (mh < lh) mh = lh;
+            int eh  = lh + mh;          // name line + wrapped message
+            int top = y - eh;
             bool mine = !ce.server && me[0] && std::strcmp(ce.name, me) == 0;
-            if (mine) {
-                // Highlight + left accent so your own lines are easy to spot.
-                r.fill_rect({tl.panel_ooc.x + 2, ry - 2, tl.panel_ooc.w - 4, row_h},
-                            {30, 46, 74, 190});
-                r.fill_rect({tl.panel_ooc.x + 2, ry - 2, 3, row_h}, {120, 200, 255, 255});
+            if (mine) {                 // highlight + left accent for your own lines
+                r.fill_rect({clip.x, top - 2, clip.w, eh + 4}, {30, 46, 74, 150});
+                r.fill_rect({clip.x, top - 2, 3, eh + 4}, {120, 200, 255, 255});
             }
             char header[96];
-            std::snprintf(header, sizeof(header), "[%s]", ce.name);
+            std::snprintf(header, sizeof(header), "%s:", ce.name);
             SDL_Color name_col = ce.server ? SDL_Color{255, 200, 120, 255}
                                : mine      ? SDL_Color{130, 210, 255, 255}
-                                           : SDL_Color{140, 200, 140, 255};
-            txt.draw(header, tl.panel_ooc.x + 8, ry, name_col);
-            txt.draw_wrapped(ce.message, tl.panel_ooc.x + 8, ry + lh,
-                             tl.panel_ooc.w - 16,
+                                           : SDL_Color{150, 210, 150, 255};
+            txt.draw(header, clip.x + 4, top, name_col);
+            txt.draw_wrapped(ce.message, clip.x + 4, top + lh, clip.w - 6,
                              mine ? SDL_Color{255, 255, 255, 255}
                                   : SDL_Color{215, 215, 222, 255});
+            y = top - gap;
         }
+        SDL_RenderSetClipRect(r.raw(), nullptr);
         txt.draw("A: OOC msg   B: close", tl.panel_ooc.x + 8,
                  tl.panel_ooc.y + tl.panel_ooc.h - lh - 4, {150, 150, 170, 255});
 
@@ -1233,6 +1259,22 @@ void CourtroomScreen::render_active_panel() {
         std::snprintf(line, sizeof(line), "Position: %s", ic_pos_);
         txt.draw(line, rx, oy, {200, 205, 220, 255});
 
+        // ── Sendable modifier toggles (tap) ────────────────────────────────────
+        SDL_Rect tg[4]; ic_toggle_rects(tg);
+        auto toggle = [&](const SDL_Rect& b, bool on, const char* label) {
+            r.fill_rect(b, on ? SDL_Color{70, 120, 200, 235} : SDL_Color{26, 30, 50, 230});
+            r.draw_rect(b, on ? SDL_Color{150, 190, 255, 255} : SDL_Color{70, 82, 120, 255});
+            txt.draw(label, b.x + 8, b.y + (b.h - lh) / 2,
+                     on ? SDL_Color{255, 255, 255, 255} : SDL_Color{200, 206, 226, 255});
+        };
+        static const char* SHOUTS[5] = {"none", "Hold It!", "Objection!", "Take That!", "Custom"};
+        char st[40];
+        std::snprintf(st, sizeof(st), "Shout: %s", SHOUTS[(ic_shout_ >= 0 && ic_shout_ < 5) ? ic_shout_ : 0]);
+        toggle(tg[0], ic_shout_ > 0, st);
+        toggle(tg[1], ic_flip_,    "Flip");
+        toggle(tg[2], ic_realize_, "Realization");
+        toggle(tg[3], ic_shake_,   "Screenshake");
+
         // ── Message preview + controls (bottom) ────────────────────────────────
         int by2 = grid_y + rows_vis * (cell_h + gap) + 14;
         SDL_Rect mp = {box.x + 20, by2, box.w - 40, lh * 2 + 12};
@@ -1290,11 +1332,17 @@ void CourtroomScreen::send_ic(const char* text) {
     std::strncpy(p.showname, sn,      sizeof(p.showname) - 1);
     p.char_id    = cid;
     p.text_color = ic_color_;
+    p.objection   = ic_shout_;                   // 0 none … 4 custom
+    p.flip        = ic_flip_    ? 1 : 0;
+    p.realization = ic_realize_ ? 1 : 0;
+    p.screenshake = ic_shake_   ? 1 : 0;
 
     char buf[2048];
     int n = cmd::ms(buf, sizeof(buf), p);
     if (n > 0) {
         app_.send_packet(buf, n);
+        // One-shot effects clear after sending (AO style); flip stays sticky.
+        ic_shout_ = 0; ic_realize_ = false; ic_shake_ = false;
         // Close the composer so the courtroom (and the line we just sent) is
         // visible; reopen with X to send another.
         active_panel_ = CourtroomPanel::None;
@@ -1482,6 +1530,13 @@ void CourtroomScreen::handle_panel_tap(int x, int y) {
                                  grid_y + vr * (cell_h + gap), cell_w, cell_h};
                 if (pt_in(x, y, cell)) { ic_emote_sel_ = idx; ic_buttons_dirty_ = true; return; }
             }
+        // Sendable-modifier toggles (right column).
+        SDL_Rect tg[4]; ic_toggle_rects(tg);
+        if (pt_in(x, y, tg[0])) { ic_shout_   = (ic_shout_ + 1) % 5; return; }  // none→…→custom→none
+        if (pt_in(x, y, tg[1])) { ic_flip_    = !ic_flip_;    return; }
+        if (pt_in(x, y, tg[2])) { ic_realize_ = !ic_realize_; return; }
+        if (pt_in(x, y, tg[3])) { ic_shake_   = !ic_shake_;   return; }
+
         SDL_Rect mp = {box.x + 20, grid_y + rows_vis * (cell_h + gap) + 14,
                        box.w - 40, lh * 2 + 12};
         if (pt_in(x, y, mp)) compose_and_send();

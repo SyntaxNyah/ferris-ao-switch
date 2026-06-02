@@ -55,6 +55,7 @@ private:
     // ── Touch ───────────────────────────────────────────────────────────────
     void handle_tap(int x, int y);        // route a tap to a button / chatbox / panel
     void handle_panel_tap(int x, int y);  // tap inside the open panel
+    void ic_toggle_rects(SDL_Rect out[4]) const;  // composer shout/flip/realize/shake buttons
     void scroll_focused(int rows);        // scroll the focused panel / IC log (wheel + drag)
     int  focused_row_px() const;          // row height of the focused list (drag px → rows)
 
@@ -169,6 +170,12 @@ private:
     bool    ic_buttons_dirty_ = true; // re-queue emote-button prefetch on open/move
     int     ic_color_    = 0;
     char    ic_pos_[16]  = "wit";
+    // Sendable IC modifiers (the client already renders these when received; the
+    // composer now lets you SEND them). Wired into MSParams in send_ic().
+    int     ic_shout_    = 0;     // 0 none, 1 hold it, 2 objection, 3 take that, 4 custom
+    bool    ic_flip_     = false; // mirror the sprite horizontally
+    bool    ic_realize_  = false; // realization flash
+    bool    ic_shake_    = false; // screenshake
     char    ic_text_[256]= {};
 
     // In-app on-screen keyboard (non-blocking) for IC/OOC text — replaces the

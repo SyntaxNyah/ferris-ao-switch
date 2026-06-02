@@ -1352,9 +1352,14 @@ void   render(Renderer& r, TextRenderer& txt);             // draw last, on top
 
 - **Input (three ways, so it works everywhere):** key **taps/clicks** (Switch
   touchscreen handheld; Ryujinx maps the mouse to touch); a **physical keyboard**
-  (`SDL_TEXTINPUT` for chars, Enter/Esc/Backspace); and **controller** — a D-pad
-  cursor (`sel_`, highlighted), `A` presses, `B` cancels. The controller path is
-  what makes it usable **docked** (no touchscreen).
+  (read straight from `SDL_KEYDOWN` keysyms + a US shift map — Enter/Esc/Backspace
+  too); and **controller** — a D-pad cursor (`sel_`, highlighted), `A` presses,
+  `B` cancels. The controller path is what makes it usable **docked** (no touch).
+- ⚠️ **Do NOT call `SDL_StartTextInput()`.** The devkitPro Switch SDL2 port
+  implements text input by launching the **system swkbd** — so `StartTextInput`
+  pops the blocking keyboard right on top of this one (eating clicks / freezing),
+  which is the exact thing we're replacing. That's why chars are read from
+  `SDL_KEYDOWN` directly and `SDL_TEXTINPUT` is unused.
 - **Layout** is fixed (`build_keys` fills a `Key[]` each call — numbers, three
   QWERTY rows with Shift+Backspace, then a function row of `' , ! ? .`, a wide
   Space, and **send**). Owner pattern: `open()`, route each event through
@@ -1630,14 +1635,20 @@ treats a music-change whose name matches an area as an area-join and follows up
 with `BN`/`HP`/charscheck. `gs.my_area_idx` is updated optimistically.
 
 **IC composer (ICInput panel):** a centred modal showing a **grid of the
-player's emotes** (names + `emotions/button<N>_{on,off}.png` thumbnails, warmed
-via prefetch + `peek()` like the char-select grid — never blocks) and a larger
-**sprite preview** of the selected emote. D-pad ←/→ move through the emote grid
-(read from `char.ini` via `load_char_ini`), ↑/↓ cycle text colour (shown as a
-live swatch), A opens the system keyboard and on confirm builds + sends the
-26-field `MS` packet via `cmd::ms`, then closes the composer. **Music panel:**
-A sends `MC` for the highlighted track. **OOC panel:** A opens the keyboard and
-sends `CT`.
+player's emotes** (names + `emotions/button<N>` thumbnails, warmed via prefetch +
+`peek()` like the char-select grid — never blocks) and a larger **sprite preview**
+of the selected emote. D-pad ←/→ move through the emote grid (read from `char.ini`
+via `load_char_ini`), ↑/↓ cycle text colour (shown as a live swatch), A opens the
+**on-screen keyboard** (`kb_`) and on send (`send_ic`) builds + sends the `MS`
+packet via `cmd::ms`, then closes the composer. **Sendable-modifier toggles** in
+the right column (tap — rects from `ic_toggle_rects`): **Shout** (cycles none →
+Hold It! → Objection! → Take That! → Custom), **Flip**, **Realization**,
+**Screenshake** → `MSParams.objection`/`flip`/`realization`/`screenshake`. The
+one-shots (shout/realization/screenshake) clear after a send; flip stays sticky.
+**Music panel:** A sends `MC` for the highlighted track. **OOC panel:** A opens
+the keyboard and sends `CT`; the OOC log stacks **variable-height** entries from
+the bottom (real wrapped height + clip rect, like the IC log) so long lines no
+longer overlap.
 
 **Text colours (`TEXT_COLORS[10]`, AO2 canonical 0–9):** white, green, red,
 orange, blue, yellow, pink, cyan, grey, rainbow (rainbow renders as white).
