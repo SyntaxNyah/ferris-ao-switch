@@ -214,6 +214,7 @@ void App::update(uint32_t dt_ms) {
     // Process incoming network packets on the main thread
     if (ao_client_) {
         ao_client_->process(in_queue_);
+        ao_client_->tick(dt_ms);   // proactive CH keep-alive while in the lobby
     }
 
     // Detect transition to in_lobby (DONE packet received) → push CharSelectScreen

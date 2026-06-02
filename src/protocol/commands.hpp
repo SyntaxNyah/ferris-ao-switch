@@ -43,9 +43,11 @@ inline int rd(char* buf, int cap) {
     return std::snprintf(buf, cap, "RD#%%");
 }
 
-// CH#%  (keepalive ping)
-inline int ch(char* buf, int cap) {
-    return std::snprintf(buf, cap, "CH#%%");
+// CH#<char_id>#%  (keepalive ping — official AO2 format). The char_id arg is
+// ignored by tsuserver/akashi (they just reset the client's inactivity timer)
+// but sending it matches the reference client for maximum server compatibility.
+inline int ch(char* buf, int cap, int char_id = 0) {
+    return std::snprintf(buf, cap, "CH#%d#%%", char_id);
 }
 
 // CC#<uid>#<char_id>#<hdid>#%

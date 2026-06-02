@@ -39,6 +39,11 @@ public:
     // Call once per frame from the main thread.
     void process(InQueue& in);
 
+    // Advance timers. Call once per frame with the frame delta. Drives the
+    // proactive keep-alive: once in the lobby we send CH on a steady interval so
+    // servers that DON'T ping us (no CHECK) don't time us out during idle.
+    void tick(uint32_t dt_ms);
+
     HandshakeState handshake_state() const { return hs_state_; }
 
 private:
@@ -100,6 +105,10 @@ private:
 
     // Handshake timeout — if we don't reach InLobby within 60s, disconnect.
     uint32_t hs_start_ms_ = 0;
+
+    // Proactive keep-alive: time accumulated since the last CH we sent. Reset
+    // whenever we're not InLobby so the first ping fires a full interval in.
+    uint32_t keepalive_acc_ = 0;
 };
 
 } // namespace ao

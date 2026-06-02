@@ -714,6 +714,16 @@ enum class HandshakeState {
 | `ARUP` | `on_arup` | Update `gs.areas[i].players/status/cm/lock` by type 0–3 |
 | `AUTH` | `on_auth` | Update `gs.authenticated` + username |
 | `BD` | `on_bd` | Push disconnect with reason |
+| `CHECK` | `on_check` | Server ping → reply `CH#<charid>#%` (reactive keep-alive) |
+
+**Keep-alive (anti-disconnect):** AO2 servers drop a socket that's been silent
+past their inactivity timeout. The client stays alive two ways:
+- **Reactive** — `on_check` replies `CH` whenever the server sends `CHECK`.
+- **Proactive** — `AOClient::tick(dt_ms)` (called each frame from `App::update`,
+  right after `process()`) sends `CH#<charid>#%` every `KEEPALIVE_MS` (15s) while
+  `hs_state_ == InLobby`. This is what keeps us connected on servers that *never*
+  send `CHECK` — reactive-only was the cause of the "random" idle disconnects.
+  The accumulator resets whenever we leave the lobby.
 
 **Callbacks (set by `App` before connecting):**
 ```cpp

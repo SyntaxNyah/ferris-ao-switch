@@ -7,6 +7,12 @@
 
 namespace ao {
 
+// Proactive keep-alive cadence. Comfortably under typical AO server inactivity
+// timeouts (often 60–250s) yet trivially cheap, so we send it unconditionally
+// rather than guessing each server's interval. This is the fix for "random"
+// disconnects on servers that never send their own CHECK ping.
+static constexpr uint32_t KEEPALIVE_MS = 15000;
+
 AOClient::AOClient(OutQueue& out, GameState& state, const char* username)
     : out_(out), state_(state) {
     std::strncpy(username_, username, sizeof(username_) - 1);
@@ -549,9 +555,24 @@ void AOClient::on_zz(const Packet& p) {
 }
 
 void AOClient::on_check(const Packet& /*p*/) {
-    // Server is pinging us — respond so we aren't disconnected for inactivity
-    char buf[16];
-    send(buf, cmd::ch(buf, sizeof(buf)));
+    // Server is pinging us — respond so we aren't disconnected for inactivity.
+    char buf[24];
+    int cid = state_.my_char_id < 0 ? 0 : state_.my_char_id;
+    send(buf, cmd::ch(buf, sizeof(buf), cid));
+}
+
+// Proactive keep-alive. process() handles the REACTIVE case (reply to the
+// server's CHECK), but plenty of servers never send CHECK — they just silently
+// disconnect a socket that's been quiet too long. So once we're fully in the
+// lobby we also send CH on our own steady timer, independent of the server.
+void AOClient::tick(uint32_t dt_ms) {
+    if (hs_state_ != HandshakeState::InLobby) { keepalive_acc_ = 0; return; }
+    keepalive_acc_ += dt_ms;
+    if (keepalive_acc_ < KEEPALIVE_MS) return;
+    keepalive_acc_ = 0;
+    char buf[24];
+    int cid = state_.my_char_id < 0 ? 0 : state_.my_char_id;
+    send(buf, cmd::ch(buf, sizeof(buf), cid));
 }
 
 // ── Akashi-specific handlers ───────────────────────────────────────────────────
