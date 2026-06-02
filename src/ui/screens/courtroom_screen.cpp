@@ -1276,8 +1276,10 @@ void CourtroomScreen::render_active_panel() {
         toggle(tg[3], ic_shake_,   "Screenshake");
 
         // ── Message preview + controls (bottom) ────────────────────────────────
+        // Width = the emote-grid width so it sits UNDER the grid and clears the
+        // right column (where the modifier toggles live) — they used to overlap.
         int by2 = grid_y + rows_vis * (cell_h + gap) + 14;
-        SDL_Rect mp = {box.x + 20, by2, box.w - 40, lh * 2 + 12};
+        SDL_Rect mp = {box.x + 20, by2, cols * (cell_w + gap) - gap, lh * 2 + 12};
         r.fill_rect(mp, {6, 8, 16, 255});
         r.draw_rect(mp, {60, 70, 110, 255});
         bool has = ic_text_[0] != '\0';
@@ -1538,7 +1540,7 @@ void CourtroomScreen::handle_panel_tap(int x, int y) {
         if (pt_in(x, y, tg[3])) { ic_shake_   = !ic_shake_;   return; }
 
         SDL_Rect mp = {box.x + 20, grid_y + rows_vis * (cell_h + gap) + 14,
-                       box.w - 40, lh * 2 + 12};
+                       cols * (cell_w + gap) - gap, lh * 2 + 12};
         if (pt_in(x, y, mp)) compose_and_send();
         return;
     }
