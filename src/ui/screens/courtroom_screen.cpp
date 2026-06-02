@@ -797,6 +797,7 @@ void CourtroomScreen::render() {
     render_chat_area();
     render_side_panel();
     render_active_panel();
+    kb_.render(app_.renderer(), app_.text());   // on-screen keyboard, on top
 }
 
 // Always-on IC log. Each entry is a showname line plus its word-wrapped message
@@ -1249,17 +1250,22 @@ void CourtroomScreen::render_active_panel() {
 
 // ── Input ───────────────────────────────────────────────────────────────────────
 
+// Open the non-blocking on-screen keyboard for an IC line. The actual MS is
+// built + sent in send_ic() when the user taps "send" — meanwhile the main loop
+// keeps running, so incoming chat animates live instead of freezing.
 void CourtroomScreen::compose_and_send() {
     GameState& gs = app_.state();
     int cid = gs.my_char_id;
     if (cid < 0 || cid >= gs.char_count) return;
     if (!own_loaded_) load_own_character();
+    compose_mode_ = CM_IC;
+    kb_.open("IC message", "", 255);   // fresh field each time
+}
 
-    char text[256] = {};
-    kb_active_ = true;
-    bool ok = show_keyboard("IC message", "", text, sizeof(text));  // fresh field each time
-    kb_active_ = false;
-    if (!ok || !text[0]) return;
+void CourtroomScreen::send_ic(const char* text) {
+    GameState& gs = app_.state();
+    int cid = gs.my_char_id;
+    if (cid < 0 || cid >= gs.char_count || !text || !text[0]) return;
     std::strncpy(ic_text_, text, sizeof(ic_text_) - 1);
     ic_text_[sizeof(ic_text_) - 1] = '\0';
 
@@ -1322,17 +1328,17 @@ void CourtroomScreen::join_area(int idx) {
 }
 
 void CourtroomScreen::compose_ooc() {
-    char text[256] = {};
-    kb_active_ = true;
-    bool ok = show_keyboard("OOC message", "", text, sizeof(text));
-    kb_active_ = false;
-    if (ok && text[0]) {
-        const char* sn = app_.settings().showname[0] ? app_.settings().showname
-                                                      : app_.username();
-        char buf[512];
-        int n = cmd::ct(buf, sizeof(buf), sn, text);
-        if (n > 0) app_.send_packet(buf, n);
-    }
+    compose_mode_ = CM_OOC;
+    kb_.open("OOC message", "", 255);
+}
+
+void CourtroomScreen::send_ooc(const char* text) {
+    if (!text || !text[0]) return;
+    const char* sn = app_.settings().showname[0] ? app_.settings().showname
+                                                  : app_.username();
+    char buf[512];
+    int n = cmd::ct(buf, sizeof(buf), sn, text);
+    if (n > 0) app_.send_packet(buf, n);
 }
 
 void CourtroomScreen::cycle_emote(int dir) {
@@ -1484,7 +1490,21 @@ void CourtroomScreen::handle_panel_tap(int x, int y) {
 }
 
 void CourtroomScreen::handle_event(const SDL_Event& e) {
-    if (kb_active_) return;
+    // While the on-screen keyboard is open it captures all input (non-blocking —
+    // the loop keeps running, so chat animates live behind it). On "send" the
+    // typed text is dispatched to the right composer.
+    if (kb_.active()) {
+        SoftKeyboard::Result rs = kb_.handle_event(e, app_.renderer().raw());
+        if (rs == SoftKeyboard::SUBMIT) {
+            ComposeMode m = compose_mode_;
+            compose_mode_ = CM_NONE;
+            if (m == CM_IC)       send_ic(kb_.text());
+            else if (m == CM_OOC) send_ooc(kb_.text());
+        } else if (rs == SoftKeyboard::CANCEL) {
+            compose_mode_ = CM_NONE;
+        }
+        return;
+    }
     GameState& gs = app_.state();
 
     // Touch / mouse: a tap (press-release, no drag) routes to the HUD buttons,

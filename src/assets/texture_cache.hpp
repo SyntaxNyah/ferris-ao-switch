@@ -19,6 +19,7 @@ static constexpr int TEX_CACHE_SLOTS = 768;
 
 struct TexEntry {
     char          path[256] = {};
+    uint64_t      hash      = 0;  // FNV-1a of path — cheap reject before strcmp
     SDL_Texture*  tex       = nullptr;
     uint32_t      last_used = 0;  // SDL_GetTicks() value
 };

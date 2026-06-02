@@ -15,9 +15,20 @@ void TextureCache::clear() {
     }
 }
 
+// FNV-1a; a 64-bit hash compare rejects non-matching slots before the (much
+// costlier) strcmp. peek() runs this for every visible icon every frame — on a
+// 768-slot cache at a dense zoom that's hundreds of thousands of compares, so
+// the hash gate is a real per-frame win.
+static uint64_t tex_hash(const char* s) {
+    uint64_t h = 1469598103934665603ULL;
+    for (; *s; ++s) { h ^= (unsigned char)*s; h *= 1099511628211ULL; }
+    return h;
+}
+
 int TextureCache::find_slot(const char* path) const {
+    uint64_t h = tex_hash(path);
     for (int i = 0; i < TEX_CACHE_SLOTS; ++i)
-        if (slots_[i].tex && std::strcmp(slots_[i].path, path) == 0)
+        if (slots_[i].tex && slots_[i].hash == h && std::strcmp(slots_[i].path, path) == 0)
             return i;
     return -1;
 }
@@ -75,6 +86,7 @@ SDL_Texture* TextureCache::get(SDL_Renderer* r, const char* path) {
     slots_[idx].tex = tex;
     std::strncpy(slots_[idx].path, path, sizeof(slots_[idx].path) - 1);
     slots_[idx].path[sizeof(slots_[idx].path) - 1] = '\0';
+    slots_[idx].hash = tex_hash(path);
     slots_[idx].last_used = SDL_GetTicks();
     return tex;
 }

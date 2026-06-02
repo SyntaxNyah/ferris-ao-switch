@@ -1063,6 +1063,10 @@ LRU cache for `SDL_Texture*`. `TEX_CACHE_SLOTS = 768` (sized to hold a full
 of VRAM). Evicts least-recently-used on overflow. `get()` first tries
 `AssetManager::take_frames` (a worker may have decoded the icon off-thread — then
 it's just a GPU upload) before falling back to decoding the bytes itself.
+`find_slot`/`peek` carry a parallel **FNV-1a hash** per slot and reject
+non-matches with a 64-bit compare before `strcmp` — `peek()` runs for every
+visible icon every frame, so at a dense zoom (220 cells) that's hundreds of
+thousands of compares a frame; the hash gate keeps it cheap.
 
 ```cpp
 SDL_Texture* get(SDL_Renderer* r, const char* rel_path); // load-or-return-cached
@@ -1326,6 +1330,40 @@ waiting_for_keyboard_ = false;
 
 ---
 
+### `src/input/soft_keyboard.hpp` / `src/input/soft_keyboard.cpp`
+
+**Class:** `ao::SoftKeyboard` — an **in-app, non-blocking** on-screen keyboard.
+
+Unlike `show_keyboard` (the blocking swkbd, see Gotcha #3), the app renders this
+QWERTY itself across the bottom of the screen, so the **main loop keeps running**
+while the user types — incoming chat animates live instead of freezing and
+"catching up." Used by the courtroom for IC/OOC; `show_keyboard` is kept for rare
+one-shot fields.
+
+```cpp
+enum Result { NONE, SUBMIT, CANCEL };
+void   open(const char* hint, const char* initial, int max_len);
+void   close();
+bool   active() const;
+const char* text() const;
+Result handle_event(const SDL_Event& e, SDL_Renderer* r);  // feed every event
+void   render(Renderer& r, TextRenderer& txt);             // draw last, on top
+```
+
+- **Input (three ways, so it works everywhere):** key **taps/clicks** (Switch
+  touchscreen handheld; Ryujinx maps the mouse to touch); a **physical keyboard**
+  (`SDL_TEXTINPUT` for chars, Enter/Esc/Backspace); and **controller** — a D-pad
+  cursor (`sel_`, highlighted), `A` presses, `B` cancels. The controller path is
+  what makes it usable **docked** (no touchscreen).
+- **Layout** is fixed (`build_keys` fills a `Key[]` each call — numbers, three
+  QWERTY rows with Shift+Backspace, then a function row of `' , ! ? .`, a wide
+  Space, and **send**). Owner pattern: `open()`, route each event through
+  `handle_event` (act on `SUBMIT`/`CANCEL`), and `render()` last so it draws over
+  the screen. `CourtroomScreen` owns one as `kb_`; `compose_mode_` records whether
+  a SUBMIT should `send_ic()` or `send_ooc()`.
+
+---
+
 ### `src/ui/screens/connect_screen.hpp` / `connect_screen.cpp`
 
 First screen the user sees. Four-tab UI: **Servers** (0), **Direct Connect** (1),
@@ -1392,9 +1430,23 @@ char         ms_url_[256];         // master server URL (configurable)
 
 ### `src/ui/screens/char_select_screen.hpp` / `char_select_screen.cpp`
 
-8×4 grid (32 per page) over a **filtered** view of the roster.
+A **zoomable** grid over a **filtered** view of the roster — sized for rosters in
+the thousands.
 
-- D-pad → navigate; **mouse wheel or touch drag** → scroll a row at a time, both via `scroll_by()` (`scroll_` is kept row-aligned = a multiple of `COLS`, so the grid never half-shifts). The screen owns a `TouchDrag drag_`; a press-release taps a cell, a drag scrolls.
+- **Dynamic geometry / zoom.** `cols_`/`rows_`/`cell_w_`/`cell_h_` are recomputed
+  by `apply_zoom()` from a `zoom_` level (`ZOOM_COUNT = 5` presets: 8×4 … 20×11 =
+  **32 → 220 cells per page**), with cell size derived to fill the grid area.
+  `set_zoom()` clamps and re-centres. At dense zoom the per-cell name labels are
+  dropped and the selected character's name is shown in the header instead.
+- **Navigation that works on Ryujinx** (which maps the mouse to the touchscreen
+  and does NOT forward host Ctrl/Shift to homebrew, so modifier+wheel combos are
+  useless): on-screen **`[−] [+]` zoom buttons**, a **right-edge scrollbar** you
+  click/drag to jump anywhere (`scrollbar_track()`/`scrollbar_jump()`, fed by a
+  `pointer_of()` helper that unifies touch + mouse), and the plain **mouse wheel**
+  (3 rows/notch) + **touch drag** for fine scroll. Controller: D-pad navigates,
+  **L/R** zoom, **ZL/ZR** (trigger axes, edge-detected) page; keyboard `−/=` zoom,
+  PageUp/Down page. All scrolling funnels through `scroll_by()` (selection-driven;
+  `update()` row-aligns `scroll_`).
 - A → `pick_char(real_index(selected_))`: claim if not taken → `CC` → `push_screen(new CourtroomScreen(...))` (the dedicated AreaSelectScreen is bypassed; rooms switch from inside the courtroom)
 - **Y / F / tap the search bar** → `open_search()`: system keyboard sets a name filter; **B / Esc** clears it
 - Touch → tap a cell to highlight, tap the highlighted cell to pick (shares `pick_char`)
@@ -1841,7 +1893,30 @@ struct: keep it on the heap or in static storage, never a stack local/temporary.
 
 ### 3. `ws_upgrade` and `show_keyboard` block
 
-Both functions are **synchronous blocking calls**. They must not be called from `App::run()`'s frame loop directly. `ws_upgrade` is called inside `NetworkThread::connect()` (on the network thread). `show_keyboard` is called from screen event handlers — it blocks the entire main thread (and game loop) until the user dismisses the keyboard, which is acceptable on Switch.
+Both functions are **synchronous blocking calls**. They must not be called from `App::run()`'s frame loop directly. `ws_upgrade` is called inside `NetworkThread::connect()` (on the network thread). `show_keyboard` is called from screen event handlers — it blocks the entire main thread (and game loop) until the user dismisses the keyboard.
+
+> ⚠️ **Known issue — "messages catch up when I send" / typing freeze.** Because
+> `show_keyboard` (libnx `swkbdShow`) blocks the whole main loop while open, the
+> render/update/`AOClient::process` cycle is paused for the entire time you're
+> typing. The **network thread keeps receiving** (separate thread, two SPSC
+> queues), so incoming IC/OOC packets are not lost — they queue in `InQueue`
+> (256-deep) and only drain when the keyboard closes, which is why messages
+> appear to "stall and then catch up two or three at once when you send." It's
+> especially obvious on **Ryujinx**, whose swkbd applet freezes the app harder
+> than real hardware.
+>
+> **Fixed for IC/OOC** by `src/input/soft_keyboard.hpp` — an **in-app on-screen
+> keyboard** (`SoftKeyboard`) the app renders itself, so it never blocks the loop:
+> the courtroom keeps updating/rendering and draining the network queue while you
+> type, and chat animates live behind it. `CourtroomScreen::compose_and_send` /
+> `compose_ooc` now `kb_.open(...)` instead of `show_keyboard`; the typed text is
+> dispatched to `send_ic` / `send_ooc` on the keyboard's SUBMIT (routed by
+> `compose_mode_`). Input works three ways so it's usable everywhere: **taps**
+> (Switch touch + Ryujinx mouse-as-touch), a **physical keyboard** (SDL_TEXTINPUT),
+> and **controller** (D-pad moves a key cursor, A presses, B cancels) — the
+> controller path is what makes it work **docked** (no touchscreen). The blocking
+> `show_keyboard` (swkbd) is still used for rare one-shot fields (server address,
+> char-select search) where a brief freeze is harmless.
 
 ### 4. `__DISCONNECT` sentinel
 

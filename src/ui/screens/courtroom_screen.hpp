@@ -3,6 +3,7 @@
 #include "../touch.hpp"
 #include "../../assets/apng_player.hpp"
 #include "../../assets/char_ini_parser.hpp"
+#include "../../input/soft_keyboard.hpp"
 #include <cstdint>
 
 namespace ao {
@@ -60,7 +61,9 @@ private:
     // ── Actions (shared by controller, keyboard and touch) ──────────────────
     void join_area(int idx);   // send AO2 area-join (MC) for areas[idx]
     void play_music(int idx);  // send MC for music_list[idx]
-    void compose_ooc();        // open keyboard, send a CT (OOC) line
+    void compose_ooc();        // open the on-screen keyboard for an OOC (CT) line
+    void send_ic(const char* text);   // build + send an MS from the typed text
+    void send_ooc(const char* text);  // build + send a CT from the typed text
     void cycle_emote(int dir);  // change the selected emote by ±1 (main view + composer)
 
     // ── IC composer ───────────────────────────────────────────────────────
@@ -167,7 +170,13 @@ private:
     int     ic_color_    = 0;
     char    ic_pos_[16]  = "wit";
     char    ic_text_[256]= {};
-    bool    kb_active_   = false;
+
+    // In-app on-screen keyboard (non-blocking) for IC/OOC text — replaces the
+    // blocking swkbd so chat keeps flowing while you type. compose_mode_ records
+    // what the open keyboard is composing so SUBMIT routes to the right sender.
+    SoftKeyboard kb_;
+    enum ComposeMode { CM_NONE, CM_IC, CM_OOC };
+    ComposeMode compose_mode_ = CM_NONE;
 
     // IC composer emote preview: warm the selected emote's button thumbnail into
     // the texture cache without blocking the render loop (prefetch + peek, like
