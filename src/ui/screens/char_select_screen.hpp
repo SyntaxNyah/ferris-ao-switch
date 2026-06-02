@@ -20,6 +20,8 @@ private:
     void prefetch_area_scene();     // warm the room background while you browse
     void prefetch_sel_sprite();     // warm the highlighted char's default sprite
     void scroll_by(int rows);       // move selection by whole rows (wheel / touch drag)
+    void apply_zoom();              // recompute cols_/rows_/cell_w_/cell_h_ from zoom_
+    void set_zoom(int delta);       // change zoom level (clamped), keeps selection on-screen
 
     // The visible/navigable list is the filtered set when searching, else every
     // slot. selected_/scroll_ are positions in THAT list; real_index() maps a
@@ -41,11 +43,18 @@ private:
 
     TouchDrag drag_;         // tap vs finger drag-scroll classifier for the grid
 
-    static constexpr int COLS = 8;
-    static constexpr int ROWS = 4;
-    static constexpr int PAGE = COLS * ROWS;
-    // Grid + search-bar geometry — shared by render() and the touch hit-test.
-    static constexpr int CELL_W = 140, CELL_H = 132, START_X = 40, START_Y = 104, CELL_GAP = 8;
+    // Grid geometry is DYNAMIC so the user can zoom — packing more, smaller icons
+    // on screen is what makes a 1000s-character roster navigable. cols_/rows_ and
+    // the cell size are recomputed from zoom_ by apply_zoom(); the rest are fixed.
+    int  zoom_   = 0;        // 0 = biggest cells / fewest per page … ZOOM_COUNT-1 = densest
+    int  cols_   = 8, rows_ = 4;    // visible grid dimensions for the current zoom
+    int  cell_w_ = 140, cell_h_ = 132;
+    bool tl_held_ = false, tr_held_ = false;  // trigger-axis edge detect (page scroll)
+
+    static constexpr int ZOOM_COUNT = 5;
+    // Fixed margins; cell_w_/cell_h_ are derived to fill (START_X..W-START_X) ×
+    // (START_Y..GRID_BOTTOM). Shared by render() and the touch hit-test.
+    static constexpr int START_X = 40, START_Y = 104, CELL_GAP = 8, GRID_BOTTOM = 684;
     static constexpr SDL_Rect SEARCH_BAR = {40, 64, 760, 32};
 };
 

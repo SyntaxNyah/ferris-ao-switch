@@ -49,7 +49,7 @@ static void cs_prefetch_emote(AssetStream& s, const char* c, const char* e,
     }
 }
 
-CharSelectScreen::CharSelectScreen(App& app) : Screen(app) {}
+CharSelectScreen::CharSelectScreen(App& app) : Screen(app) { apply_zoom(); }
 
 void CharSelectScreen::on_enter() {
     selected_ = 0;
@@ -150,9 +150,35 @@ void CharSelectScreen::open_search() {
 void CharSelectScreen::scroll_by(int rows) {
     int total = vis_count();
     if (total == 0) return;
-    selected_ -= rows * COLS;
+    selected_ -= rows * cols_;
     if (selected_ < 0) selected_ = 0;
     if (selected_ >= total) selected_ = total - 1;
+}
+
+// Recompute the visible grid for the current zoom level. cols_/rows_ come from a
+// preset table; cell_w_/cell_h_ are derived to fill the grid area, so zooming out
+// packs many small icons on screen — the key to navigating thousands of chars.
+void CharSelectScreen::apply_zoom() {
+    static const int Z[ZOOM_COUNT][2] = { {8,4}, {10,5}, {12,6}, {16,8}, {20,11} };
+    if (zoom_ < 0) zoom_ = 0;
+    if (zoom_ >= ZOOM_COUNT) zoom_ = ZOOM_COUNT - 1;
+    cols_ = Z[zoom_][0];
+    rows_ = Z[zoom_][1];
+    cell_w_ = (Renderer::WIDTH - 2 * START_X - (cols_ - 1) * CELL_GAP) / cols_;
+    cell_h_ = (GRID_BOTTOM - START_Y     - (rows_ - 1) * CELL_GAP) / rows_;
+}
+
+// Change zoom by `delta` (negative = zoom in / bigger). Keeps the current
+// selection on screen and re-queues the icon window for the new density.
+void CharSelectScreen::set_zoom(int delta) {
+    int z = zoom_ + delta;
+    if (z < 0) z = 0;
+    if (z >= ZOOM_COUNT) z = ZOOM_COUNT - 1;
+    if (z == zoom_) return;
+    zoom_ = z;
+    apply_zoom();
+    pf_scroll_ = -1;        // window changed — re-evaluate which icons to prefetch
+    scroll_    = 0;         // update() re-centres on the selection next frame
 }
 
 // Claim a character (CC) and enter the courtroom. Optimistically records
@@ -173,15 +199,15 @@ void CharSelectScreen::handle_event(const SDL_Event& e) {
 
     // Touch / mouse: tap (press-release) or finger drag-scroll.
     int tx, ty, rows;
-    TouchDrag::Kind k = drag_.feed(e, app_.renderer().raw(), CELL_H + CELL_GAP, tx, ty, rows);
+    TouchDrag::Kind k = drag_.feed(e, app_.renderer().raw(), cell_h_ + CELL_GAP, tx, ty, rows);
     if (k == TouchDrag::TAP) {
         if (pt_in(tx, ty, SEARCH_BAR)) { open_search(); return; }
-        for (int row = 0; row < ROWS; ++row)
-            for (int col = 0; col < COLS; ++col) {
-                int pos = scroll_ + row * COLS + col;
+        for (int row = 0; row < rows_; ++row)
+            for (int col = 0; col < cols_; ++col) {
+                int pos = scroll_ + row * cols_ + col;
                 if (pos >= total) continue;
-                SDL_Rect cell = {START_X + col * (CELL_W + CELL_GAP),
-                                 START_Y + row * (CELL_H + CELL_GAP), CELL_W, CELL_H};
+                SDL_Rect cell = {START_X + col * (cell_w_ + CELL_GAP),
+                                 START_Y + row * (cell_h_ + CELL_GAP), cell_w_, cell_h_};
                 if (pt_in(tx, ty, cell)) {
                     if (pos == selected_) pick_char(real_index(pos));
                     else                  selected_ = pos;
@@ -208,9 +234,13 @@ void CharSelectScreen::handle_event(const SDL_Event& e) {
         return;
     }
 
-    // Mouse wheel scrolls a row at a time (update() row-aligns scroll_).
+    // Mouse wheel (Ryujinx/desktop): scroll a row; hold Ctrl to ZOOM; hold Shift
+    // to page (fast-scroll). update() row-aligns scroll_ afterwards.
     if (e.type == SDL_MOUSEWHEEL && e.wheel.y != 0) {
-        scroll_by(e.wheel.y);
+        SDL_Keymod mod = SDL_GetModState();
+        if (mod & KMOD_CTRL)        set_zoom(e.wheel.y > 0 ? -1 : +1);  // wheel-up = zoom in
+        else if (mod & KMOD_SHIFT)  scroll_by(e.wheel.y * rows_);       // a whole page per notch
+        else                        scroll_by(e.wheel.y);               // a row per notch
         return;
     }
 
@@ -218,10 +248,14 @@ void CharSelectScreen::handle_event(const SDL_Event& e) {
         switch (e.key.keysym.sym) {
             case SDLK_RIGHT: selected_ = (selected_ + 1) % total; break;
             case SDLK_LEFT:  selected_ = (selected_ - 1 + total) % total; break;
-            case SDLK_DOWN:  selected_ = (selected_ + COLS) % total; break;
-            case SDLK_UP:    selected_ = (selected_ - COLS + total) % total; break;
+            case SDLK_DOWN:  selected_ = (selected_ + cols_) % total; break;
+            case SDLK_UP:    selected_ = (selected_ - cols_ + total) % total; break;
             case SDLK_RETURN: pick_char(real_index(selected_)); break;
             case SDLK_f: case SDLK_SLASH: open_search(); break;
+            case SDLK_MINUS:  set_zoom(+1); break;                  // zoom out (more, smaller)
+            case SDLK_EQUALS: case SDLK_PLUS: set_zoom(-1); break;  // zoom in (fewer, bigger)
+            case SDLK_PAGEUP:   scroll_by(rows_);  break;           // fast scroll (a page)
+            case SDLK_PAGEDOWN: scroll_by(-rows_); break;
             case SDLK_ESCAPE:
                 if (searching()) { search_[0] = '\0'; selected_ = scroll_ = 0; pf_scroll_ = -1; }
                 break;
@@ -232,14 +266,29 @@ void CharSelectScreen::handle_event(const SDL_Event& e) {
         switch (e.cbutton.button) {
             case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: selected_=(selected_+1)%total; break;
             case SDL_CONTROLLER_BUTTON_DPAD_LEFT:  selected_=(selected_-1+total)%total; break;
-            case SDL_CONTROLLER_BUTTON_DPAD_DOWN:  selected_=(selected_+COLS)%total; break;
-            case SDL_CONTROLLER_BUTTON_DPAD_UP:    selected_=(selected_-COLS+total)%total; break;
+            case SDL_CONTROLLER_BUTTON_DPAD_DOWN:  selected_=(selected_+cols_)%total; break;
+            case SDL_CONTROLLER_BUTTON_DPAD_UP:    selected_=(selected_-cols_+total)%total; break;
             case SDL_CONTROLLER_BUTTON_A:          pick_char(real_index(selected_)); break;
             case SDL_CONTROLLER_BUTTON_Y:          open_search(); break;       // search
+            case SDL_CONTROLLER_BUTTON_LEFTSHOULDER:  set_zoom(+1); break;     // L: zoom out
+            case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER: set_zoom(-1); break;     // R: zoom in
             case SDL_CONTROLLER_BUTTON_B:
                 if (searching()) { search_[0] = '\0'; selected_ = scroll_ = 0; pf_scroll_ = -1; }
                 break;
             default: break;
+        }
+    }
+    // ZL / ZR triggers page the grid (fast scroll). Edge-detect the analog axis.
+    if (e.type == SDL_CONTROLLERAXISMOTION) {
+        const int TH = 16000;
+        if (e.caxis.axis == SDL_CONTROLLER_AXIS_TRIGGERLEFT) {
+            bool down = e.caxis.value > TH;
+            if (down && !tl_held_) scroll_by(rows_);    // ZL → page up
+            tl_held_ = down;
+        } else if (e.caxis.axis == SDL_CONTROLLER_AXIS_TRIGGERRIGHT) {
+            bool down = e.caxis.value > TH;
+            if (down && !tr_held_) scroll_by(-rows_);   // ZR → page down
+            tr_held_ = down;
         }
     }
 }
@@ -259,12 +308,12 @@ void CharSelectScreen::update(uint32_t /*dt*/) {
     if (selected_ < 0) selected_ = 0;
 
     // Row-aligned scroll so the grid never shows a half-shifted row.
-    int sel_row = selected_ / COLS;
-    int top_row = scroll_ / COLS;
+    int sel_row = selected_ / cols_;
+    int top_row = scroll_ / cols_;
     if (sel_row < top_row)            top_row = sel_row;
-    if (sel_row >= top_row + ROWS)    top_row = sel_row - ROWS + 1;
+    if (sel_row >= top_row + rows_)   top_row = sel_row - rows_ + 1;
     if (top_row < 0)                  top_row = 0;
-    scroll_ = top_row * COLS;
+    scroll_ = top_row * cols_;
 
     // Pre-warm the HIGHLIGHTED character's char.ini as you browse (it's tiny).
     // The courtroom needs it parsed before it can fetch emote sprites/buttons, so
@@ -289,12 +338,15 @@ void CharSelectScreen::update(uint32_t /*dt*/) {
     // With off-thread decode the per-frame cost here is just a GPU upload
     // (SDL_CreateTextureFromSurface) of an already-decoded icon, so the grid can
     // fill much faster — a full 32-cell page in ~1.5 frames instead of ~3.
-    constexpr int DECODE_BUDGET   = 24;
-    constexpr int LOOKAHEAD_PAGES = 2;
+    constexpr int DECODE_BUDGET = 24;
     const ExtensionsConfig& ec = ExtensionsConfig::get();
     const bool do_enqueue = (scroll_ != pf_scroll_);
     int decoded = 0;
-    int scan_end = scroll_ + PAGE * LOOKAHEAD_PAGES;
+    // Visible page + one page of look-ahead, but cap the look-ahead so a dense
+    // zoom level (200+ cells/page) doesn't flood the prefetch queue.
+    int page = cols_ * rows_;
+    int lookahead = page > 128 ? 128 : page;
+    int scan_end = scroll_ + page + lookahead;
     if (scan_end > total) scan_end = total;
     for (int pos = scroll_; pos < scan_end; ++pos) {
         int idx = real_index(pos);
@@ -329,6 +381,22 @@ void CharSelectScreen::render() {
     r.fill_rect({0, 0, Renderer::WIDTH, Renderer::HEIGHT}, {10, 10, 25, 255});
     r.fill_rect({0, 0, Renderer::WIDTH, 60}, {25, 40, 80, 255});
     txt.draw("Select Character", 20, 18, {220, 220, 255, 255});
+
+    // The selected character's name — always visible, since dense zoom hides the
+    // per-cell labels. Plus a one-line hint for the zoom / fast-scroll controls.
+    {
+        int total0 = vis_count();
+        if (total0 > 0 && selected_ >= 0 && selected_ < total0) {
+            int ridx = real_index(selected_);
+            if (ridx >= 0 && ridx < gs.char_count && gs.characters[ridx].name[0]) {
+                char hdr[64];
+                std::snprintf(hdr, sizeof(hdr), "\xE2\x80\xBA %.32s", gs.characters[ridx].name);
+                txt.draw(hdr, 270, 18, {255, 235, 150, 255});
+            }
+        }
+    }
+    txt.draw("Ctrl+Wheel: zoom   Shift+Wheel: fast", Renderer::WIDTH - 360, 22,
+             {120, 130, 160, 255});
 
     // Search bar (tap, or Y / F to type).
     r.fill_rect(SEARCH_BAR, {18, 22, 42, 255});
@@ -368,23 +436,30 @@ void CharSelectScreen::render() {
         return;
     }
 
+    // At dense zoom the cells are too small for a name — show icons only and
+    // surface the selected character's name in the header instead.
+    const bool show_labels = cell_w_ >= 96;
+    const int  pad     = cell_w_ >= 96 ? 4 : 2;
+    const int  label_h = show_labels ? 22 : 0;
+
     const ExtensionsConfig& ec = ExtensionsConfig::get();
-    for (int row = 0; row < ROWS; ++row) {
-        for (int col = 0; col < COLS; ++col) {
-            int pos = scroll_ + row * COLS + col;
+    for (int row = 0; row < rows_; ++row) {
+        for (int col = 0; col < cols_; ++col) {
+            int pos = scroll_ + row * cols_ + col;
             if (pos >= total) break;
             int idx = real_index(pos);
 
-            int x = START_X + col * (CELL_W + CELL_GAP);
-            int y = START_Y + row * (CELL_H + CELL_GAP);
-            SDL_Rect cell = {x, y, CELL_W, CELL_H};
+            int x = START_X + col * (cell_w_ + CELL_GAP);
+            int y = START_Y + row * (cell_h_ + CELL_GAP);
+            SDL_Rect cell = {x, y, cell_w_, cell_h_};
 
             SDL_Color bg = gs.char_taken[idx]
                 ? SDL_Color{40, 20, 20, 255}
                 : (pos == selected_ ? SDL_Color{60, 100, 180, 255}
                                     : SDL_Color{30, 30, 55, 255});
             r.fill_rect(cell, bg);
-            r.draw_rect(cell, {80, 80, 120, 255});
+            r.draw_rect(cell, pos == selected_ ? SDL_Color{150, 190, 255, 255}
+                                               : SDL_Color{80, 80, 120, 255});
 
             if (gs.characters[idx].name[0]) {
                 char lname[64]; lower_copy(lname, gs.characters[idx].name, sizeof(lname));
@@ -396,18 +471,21 @@ void CharSelectScreen::render() {
                     icon = app_.tex_cache().peek(icon_path);
                 }
                 if (icon) {
-                    SDL_Rect icon_dst = {x + 4, y + 4, CELL_W - 8, CELL_H - 28};
+                    SDL_Rect icon_dst = {x + pad, y + pad,
+                                         cell_w_ - 2 * pad, cell_h_ - 2 * pad - label_h};
                     r.draw(icon, nullptr, &icon_dst);
                 }
             }
 
-            const char* name = gs.characters[idx].name;
-            char label[32];
-            if (name[0] != '\0') std::snprintf(label, sizeof(label), "%.12s", name);
-            else                 std::snprintf(label, sizeof(label), "%d", idx);
-            SDL_Color tc = gs.char_taken[idx]
-                ? SDL_Color{120, 80, 80, 255} : SDL_Color{200, 200, 220, 255};
-            txt.draw(label, x + 6, y + CELL_H - 22, tc);
+            if (show_labels) {
+                const char* name = gs.characters[idx].name;
+                char label[32];
+                if (name[0] != '\0') std::snprintf(label, sizeof(label), "%.12s", name);
+                else                 std::snprintf(label, sizeof(label), "%d", idx);
+                SDL_Color tc = gs.char_taken[idx]
+                    ? SDL_Color{120, 80, 80, 255} : SDL_Color{200, 200, 220, 255};
+                txt.draw(label, x + 6, y + cell_h_ - 20, tc);
+            }
         }
     }
 }
