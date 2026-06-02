@@ -356,6 +356,7 @@ void App::disconnect() {
     }
     was_in_lobby_ = false;
     fallback_asset_url_[0] = '\0';
+    ExtensionsConfig::persist();   // save this server's learned formats (URL still set)
     AssetManager::clear_asset_url();
     ExtensionsConfig::reset();
     if (game_state_) {

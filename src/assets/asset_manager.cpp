@@ -63,6 +63,7 @@ void AssetManager::set_asset_url(const char* url) {
 void AssetManager::clear_asset_url() {
     s_asset_url[0] = '\0';
     clear_failed_primary();
+    clear_frames();   // staged decodes belong to the server we're leaving
     std::fprintf(stderr, "[assets] primary URL cleared\n");
 }
 
@@ -188,6 +189,9 @@ void AssetManager::store_prefetch(const char* relative, uint8_t* data, int size)
 }
 
 bool AssetManager::has_prefetch(const char* relative) {
+    // An off-thread-decoded image counts as ready too (checked first; separate
+    // mutex, no nested lock).
+    if (has_frames(relative)) return true;
     uint64_t h = rel_hash(relative);
     SDL_LockMutex(get_prefetch_mutex());
     bool found = false;
@@ -199,6 +203,120 @@ bool AssetManager::has_prefetch(const char* relative) {
     }
     SDL_UnlockMutex(get_prefetch_mutex());
     return found;
+}
+
+// ── Decoded-frame staging cache (off-thread decode → main-thread upload) ────────
+// A bounded LRU staging area holding frame-sets that a worker decoded but the
+// main thread has not yet uploaded. It only holds frames in flight, so it stays
+// small. Its own mutex (NOT the prefetch mutex) — decode hand-off must not block
+// the main thread's has_prefetch/peek scans.
+
+static constexpr int      FRAMECACHE_SLOTS  = 48;
+static constexpr uint32_t FRAMECACHE_BUDGET = 64u * 1024 * 1024;  // ~64 MB of surfaces
+
+struct FrameSlot {
+    char         rel[256];
+    uint64_t     hash;
+    SDL_Surface* frames[AssetManager::FRAMES_MAX];
+    int          delays[AssetManager::FRAMES_MAX];
+    int          count, w, h;
+    uint32_t     bytes;
+    uint32_t     last_used;
+    bool         occupied;
+};
+
+static FrameSlot  s_frames[FRAMECACHE_SLOTS] = {};
+static uint32_t   s_frames_total = 0;
+static uint32_t   s_frames_clock = 0;
+static SDL_mutex* s_frames_mutex = nullptr;
+
+static SDL_mutex* get_frames_mutex() {
+    if (!s_frames_mutex) s_frames_mutex = SDL_CreateMutex();
+    return s_frames_mutex;
+}
+
+static void free_frame_slot(FrameSlot& s) {   // mutex held
+    for (int i = 0; i < s.count; ++i)
+        if (s.frames[i]) { SDL_FreeSurface(s.frames[i]); s.frames[i] = nullptr; }
+    if (s_frames_total >= s.bytes) s_frames_total -= s.bytes; else s_frames_total = 0;
+    s.count = 0; s.bytes = 0; s.occupied = false; s.rel[0] = '\0';
+}
+
+void AssetManager::store_frames(const char* relative, SDL_Surface** frames,
+                                const int* delays, int count, int w, int h) {
+    auto discard = [&]() { for (int i = 0; i < count; ++i) if (frames[i]) SDL_FreeSurface(frames[i]); };
+    if (!relative || !relative[0] || count <= 0) { discard(); return; }
+    if (count > FRAMES_MAX) count = FRAMES_MAX;
+    uint32_t bytes = (uint32_t)(w > 0 ? w : 1) * (uint32_t)(h > 0 ? h : 1) * 4u * (uint32_t)count;
+    if (bytes > FRAMECACHE_BUDGET) { discard(); return; }   // too big to stage
+
+    SDL_LockMutex(get_frames_mutex());
+    uint64_t h64 = rel_hash(relative);
+    auto find_free = []() {
+        for (int i = 0; i < FRAMECACHE_SLOTS; ++i) if (!s_frames[i].occupied) return i;
+        return -1;
+    };
+    // Replace any existing entry for the same path (a re-decode).
+    for (int i = 0; i < FRAMECACHE_SLOTS; ++i)
+        if (s_frames[i].occupied && s_frames[i].hash == h64 &&
+            std::strcmp(s_frames[i].rel, relative) == 0) { free_frame_slot(s_frames[i]); break; }
+    // Evict LRU until it fits.
+    while (s_frames_total + bytes > FRAMECACHE_BUDGET || find_free() < 0) {
+        int lru = -1;
+        for (int i = 0; i < FRAMECACHE_SLOTS; ++i)
+            if (s_frames[i].occupied &&
+                (lru < 0 || s_frames[i].last_used < s_frames[lru].last_used)) lru = i;
+        if (lru < 0) break;
+        free_frame_slot(s_frames[lru]);
+    }
+    int slot = find_free();
+    if (slot < 0) { SDL_UnlockMutex(get_frames_mutex()); discard(); return; }
+    FrameSlot& s = s_frames[slot];
+    std::strncpy(s.rel, relative, sizeof(s.rel) - 1); s.rel[sizeof(s.rel) - 1] = '\0';
+    s.hash = h64;
+    for (int i = 0; i < count; ++i) { s.frames[i] = frames[i]; s.delays[i] = delays[i]; }
+    s.count = count; s.w = w; s.h = h; s.bytes = bytes;
+    s.last_used = ++s_frames_clock; s.occupied = true;
+    s_frames_total += bytes;
+    SDL_UnlockMutex(get_frames_mutex());
+}
+
+bool AssetManager::take_frames(const char* relative, DecodedFrames& out) {
+    uint64_t h64 = rel_hash(relative);
+    SDL_LockMutex(get_frames_mutex());
+    for (int i = 0; i < FRAMECACHE_SLOTS; ++i) {
+        FrameSlot& s = s_frames[i];
+        if (!s.occupied || s.hash != h64 || std::strcmp(s.rel, relative) != 0) continue;
+        for (int j = 0; j < s.count; ++j) {
+            out.frames[j] = s.frames[j]; out.delays[j] = s.delays[j]; s.frames[j] = nullptr;
+        }
+        out.count = s.count; out.w = s.w; out.h = s.h;
+        if (s_frames_total >= s.bytes) s_frames_total -= s.bytes; else s_frames_total = 0;
+        s.count = 0; s.bytes = 0; s.occupied = false; s.rel[0] = '\0';
+        SDL_UnlockMutex(get_frames_mutex());
+        return true;
+    }
+    SDL_UnlockMutex(get_frames_mutex());
+    return false;
+}
+
+bool AssetManager::has_frames(const char* relative) {
+    uint64_t h64 = rel_hash(relative);
+    SDL_LockMutex(get_frames_mutex());
+    bool found = false;
+    for (int i = 0; i < FRAMECACHE_SLOTS; ++i)
+        if (s_frames[i].occupied && s_frames[i].hash == h64 &&
+            std::strcmp(s_frames[i].rel, relative) == 0) { found = true; break; }
+    SDL_UnlockMutex(get_frames_mutex());
+    return found;
+}
+
+void AssetManager::clear_frames() {
+    SDL_LockMutex(get_frames_mutex());
+    for (int i = 0; i < FRAMECACHE_SLOTS; ++i)
+        if (s_frames[i].occupied) free_frame_slot(s_frames[i]);
+    s_frames_total = 0;
+    SDL_UnlockMutex(get_frames_mutex());
 }
 
 // Consume a prefetch entry (removes it from cache, transfers ownership to caller).

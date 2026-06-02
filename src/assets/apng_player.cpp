@@ -147,6 +147,27 @@ bool APNGPlayer::load(SDL_Renderer* r, const char* path) {
         return true;
     }
 
+    // A worker may have already DECODED this image off the main thread into
+    // SDL_Surface frames — if so we only do the GPU upload here (no decode, no
+    // disk/network read). This is the off-thread-decode fast path.
+    AssetManager::DecodedFrames df;
+    if (path && AssetManager::take_frames(path, df)) {
+        int n = df.count < APNG_MAX_FRAMES ? df.count : APNG_MAX_FRAMES;
+        for (int i = 0; i < n; ++i) {
+            frames_[i] = df.frames[i] ? SDL_CreateTextureFromSurface(r, df.frames[i]) : nullptr;
+            if (df.frames[i]) SDL_FreeSurface(df.frames[i]);   // ours now; uploaded
+            delays_[i] = df.delays[i] > 0 ? df.delays[i] : 100;
+        }
+        for (int i = n; i < df.count; ++i) if (df.frames[i]) SDL_FreeSurface(df.frames[i]);
+        frame_count_ = n;
+        width_  = df.w;
+        height_ = df.h;
+        std::strncpy(path_, path, sizeof(path_) - 1);
+        path_[sizeof(path_) - 1] = '\0';
+        current_frame_ = 0; accum_ms_ = 0; done_ = false;
+        return frame_count_ > 0;
+    }
+
     SDL_RWops* rw = AssetManager::open_rwops(path);
     if (!rw) return false;
 

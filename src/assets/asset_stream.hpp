@@ -33,10 +33,24 @@ public:
     void start();
     void stop();
 
-    // Queue a relative path for background prefetch.
+    // Queue a relative path for background prefetch (raw bytes only).
     // Returns false if the request queue is full (caller may retry next frame).
     // Silently ignores duplicate requests already in the queue.
     bool prefetch(const char* relative);
+
+    // Like prefetch(), but the worker also DECODES the image off the main thread
+    // into SDL_Surface frames (AssetManager::store_frames), so the render thread
+    // only does the GPU upload. Use for sprites/backgrounds whose exact path is
+    // already known (the courtroom emote/scene prefetch). Non-images fall back to
+    // raw bytes automatically.
+    bool prefetch_decode(const char* relative);
+
+    // Queue a worker-side sequential probe: the worker tries `base`+ext for the
+    // category's extensions (learned format first), STOPS at the first that
+    // exists, decodes it off-thread, and records the winning format. Replaces the
+    // old fire-all-candidates fan-out for char icons / backgrounds — one request,
+    // ~1 fetch on a format-uniform server. `category` is an ExtensionsConfig::Category.
+    bool prefetch_probe(const char* base, int category);
 
     // Drop every still-queued request (in-flight downloads finish normally).
     // The courtroom calls this on entry so IC sprite prefetches are not stuck
@@ -73,10 +87,16 @@ private:
     SDL_Thread* threads_[N_WORKERS] = {};
     bool        running_   = false;
 
-    // Request queue (main → worker)
+    // Enqueue a request with a kind tag (shared by prefetch/prefetch_decode/
+    // prefetch_probe). Dedupes on path AND kind.
+    bool enqueue(const char* relative, int kind);
+
+    // Request queue (main → worker). req_kind_ is parallel to req_buf_:
+    //   -1 = raw bytes, -2 = fetch+decode, 0..N = probe that ExtensionsConfig category.
     SDL_mutex* req_mutex_  = nullptr;
     SDL_cond*  req_cond_   = nullptr;
     char       req_buf_[STREAM_QUEUE_SIZE][256] = {};
+    int        req_kind_[STREAM_QUEUE_SIZE]     = {};
     int        req_head_   = 0;
     int        req_tail_   = 0;  // [head, tail)
 

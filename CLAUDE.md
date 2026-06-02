@@ -823,6 +823,16 @@ and visibly hitch busy/large servers. `store_prefetch` is called by
 `AssetStream`; `fetch_bytes` removes the entry (single-use), while `has_prefetch`
 only checks.
 
+**Decoded-frame cache (off-thread decode).** Separate from the byte cache (its
+own `FRAMECACHE_SLOTS = 48`, ~64 MB budget, its own mutex). `store_frames` (worker
+side) parks ARGB8888 `SDL_Surface` frame-sets a worker decoded; `take_frames`
+(main thread) hands them to the consumer, which uploads and frees them; ownership
+is single-holder throughout. `has_prefetch()` returns true if **either** bytes
+**or** frames are staged, so the courtroom's readiness checks see off-thread-
+decoded sprites as ready. `clear_frames()` runs on disconnect. The
+`DecodedFrames` struct (`frames[FRAMES_MAX=128]`, `delays`, `count`, `w`, `h`)
+carries up to a full animation.
+
 **All callers use relative paths** — never resolved absolute paths. The relative path is also the cache key in `TextureCache`.
 
 **`resolve()` is local-only** (for quick existence checks, char.ini parsing, etc.). For any actual data loading, use `fetch_bytes` or `open_rwops`.
@@ -899,21 +909,36 @@ calling `mbedtls_net_connect` directly.
 void start();
 void stop();
 
-// Queue a relative path for background prefetch.
-// Returns false if request queue is full (retry next frame).
-// Silently deduplicates requests already in the queue (linear scan under lock).
+// Queue a relative path for background prefetch (raw bytes only).
 bool prefetch(const char* relative);
 
-// Drop every still-queued request (in-flight downloads finish). The courtroom
-// calls this on entry so IC sprite prefetches aren't stuck behind a flood of
-// character-select icon prefetches on big servers.
-void clear_pending();
+// Like prefetch(), but the worker also DECODES the image off the main thread into
+// SDL_Surface frames (AssetManager::store_frames) — the render thread then only
+// does the GPU upload. Use for sprites/backgrounds with a known exact path.
+bool prefetch_decode(const char* relative);
 
-// Drain completed prefetches (for logging/debugging — optional).
-bool poll_done(char* out_path, int out_cap);
+// Worker-side sequential probe: try base+ext for a category's extensions
+// (learned format first), STOP at the first that exists, decode it off-thread,
+// and record the winner. Replaces the fire-all-candidates fan-out for char icons
+// / backgrounds. `category` is an ExtensionsConfig::Category.
+bool prefetch_probe(const char* base, int category);
+
+void clear_pending();                       // drop everything still queued
+bool poll_done(char* out_path, int out_cap); // optional debug drain
 ```
 
-**`STREAM_QUEUE_SIZE = 2048`** — request ring capacity.
+**`STREAM_QUEUE_SIZE = 2048`** — request ring capacity. A parallel `req_kind_[]`
+tags each request: `-1` raw, `-2` fetch+decode, `≥0` probe-this-category. Dedup is
+on path **and** kind.
+
+**Off-thread decode (no main-thread image decode).** PNG/WebP/APNG decode is
+heavier than the GPU upload, and it used to run on the render thread (the cost the
+courtroom load-gate waited on). Now the workers decode `prefetch_decode`/probe
+images into ARGB8888 `SDL_Surface` frames and stage them via
+`AssetManager::store_frames`; `APNGPlayer::load` and `TextureCache::get` take the
+frames and only call `SDL_CreateTextureFromSurface` (the GPU upload, which *must*
+be on the render thread). If a worker can't decode (not an image, or the stage is
+full) it keeps the raw bytes and the consumer decodes the old way — always safe.
 
 **Keeping the queue shallow (big-server IC latency).** Character icons are
 **not** bulk-queued at lobby-enter; `CharSelectScreen` prefetches only its
@@ -925,11 +950,17 @@ before queueing the scene. Combined with the on-disk cache, the second view of
 any asset skips the network entirely.
 
 **Worker loop:**
-1. Block on `SDL_CondWait` until `prefetch()` signals work
-2. Pop relative path from request queue
-3. Call `AssetManager::fetch_bytes(rel, &size)` (prefetch → primary/secondary CDN → sdmc: → romfs:)
-4. Call `AssetManager::store_prefetch(rel, data, size)`
-5. Push path to done queue; repeat
+1. Block on `SDL_CondWait` until a request is enqueued
+2. Pop the path + kind from the request queue
+3. **kind ≥ 0 (probe):** walk the category's extensions in `probe_order`
+   (learned first), `fetch_bytes_with_clients(base+ext)` each, stop at the first
+   hit, `decode_and_store` it, and `ExtensionsConfig::note` the winner. A 404
+   falls through (and `try_http_mount` remembers it, so sibling probes skip the
+   dead candidate's network).
+4. **kind = -2 (decode):** fetch the exact path, `decode_and_store` (raw-byte
+   fallback if it isn't an image).
+5. **kind = -1 (raw):** fetch, `store_prefetch` the bytes (audio/INI/music).
+6. Push path to done queue; repeat
 
 **Integration:** `AssetStream` is owned by `App`. `CourtroomScreen` calls `app_.stream().prefetch(rel)` when it knows an IC message is incoming, pre-loading the character sprites and SFX before they are needed.
 
@@ -982,21 +1013,30 @@ for (int i = 0; i < ec.emote_count; ++i)
 
 **Learned-format probing (the cold-load request cut).** Firing all ~5 emote
 candidates per asset means 4 always 404. Because an AO2 server is format-uniform
-(its whole pack is one image type), the decode path calls `note(cat, ext)` the
+(its whole pack is one image type), the decode path calls `note(cat, idx)` the
 moment a candidate actually decodes, and the courtroom's `prefetch_emote` /
 `prefetch_bgimg` then queue **only** that `learned()` extension for subsequent
-sprites/backgrounds — roughly a 5× cut in cold-load requests. If a learned-only
-prefetch hasn't landed shortly after a message begins (`PROBE_FALLBACK_MS`, well
-under the 400 ms load gate, so it's invisible), `resolve_assets()` re-queues the
-**full** candidate list as a fallback, so an odd/missing asset still loads.
-`learned()`/`note()` are main-thread only (the worker just fetches the exact path
-it's handed), so there is no locking. All learned hints are cleared by `reset()`.
+sprites/backgrounds — while the **worker-side probe** (char icons / backgrounds)
+tries it first and stops there. Roughly a 5× cut in cold-load requests. If a
+learned-only emote prefetch hasn't landed shortly after a message begins
+(`PROBE_FALLBACK_MS`, well under the 400 ms load gate, so it's invisible),
+`resolve_assets()` re-queues the **full** candidate list as a fallback, so an
+odd/missing asset still loads. The learned hint is an **index** stored in an
+`SDL_atomic_t` (workers *and* the main thread read/record it; it only biases probe
+order, never correctness, so relaxed atomicity suffices). `probe_order()` /
+`ext_at()` expose the learned-first ordering to the worker. Cleared by `reset()`.
+
+**Persistence.** `persist()` (App calls it on disconnect, asset URL still set)
+writes the learned formats to `sdmc:/switch/ferris-ao/formats.cfg` keyed by the
+asset URL; `restore()` (end of `fetch_and_apply()`) seeds them on a revisit, so
+the first asset already probes the right format and the disk cache serves it with
+no network. A stale entry only mis-orders one probe, so it's best-effort.
 
 `App::update()` calls `fetch_and_apply()` once when `in_lobby` first becomes true
 (after the asset URL is known). `CourtroomScreen` and `CharSelectScreen` read
 `get()` to build candidate paths in the exact order the server advertises, so
-prefetch and decode use identical keys. `AOClient::on_disconnected` →
-`ExtensionsConfig::reset()`.
+prefetch and decode use identical keys. `App::disconnect()` →
+`ExtensionsConfig::persist()` then `reset()`.
 
 ---
 
@@ -1004,9 +1044,11 @@ prefetch and decode use identical keys. `AOClient::on_disconnected` →
 
 **Class:** `ao::TextureCache`
 
-LRU cache for `SDL_Texture*`. `TEX_CACHE_SLOTS = 256` (enlarged from 64 to hold
-most of a full 100–600 char roster's icons at once). Evicts least-recently-used
-on overflow.
+LRU cache for `SDL_Texture*`. `TEX_CACHE_SLOTS = 768` (sized to hold a full
+100–600+ char roster's icons at once, so scrolling back never re-decodes — ~48 MB
+of VRAM). Evicts least-recently-used on overflow. `get()` first tries
+`AssetManager::take_frames` (a worker may have decoded the icon off-thread — then
+it's just a GPU upload) before falling back to decoding the bytes itself.
 
 ```cpp
 SDL_Texture* get(SDL_Renderer* r, const char* rel_path); // load-or-return-cached
@@ -1948,8 +1990,9 @@ CourtroomScreen::update()
 
 | Resource | Count | Size each | Total |
 |----------|-------|-----------|-------|
-| Texture cache slots | 512 | ~64 KB avg (128×128 icon) | ~32 MB |
+| Texture cache slots | 768 | ~64 KB avg (128×128 icon) | ~48 MB |
 | Decoded-animation LRU (`apng_player`) | 32 slots | budget-capped | ≤ ~96 MB |
+| Decoded-frame staging (`asset_manager`) | 48 slots | budget-capped | ≤ ~64 MB |
 | SFX chunks | 16 | ~64 KB avg | ~1 MB |
 | APNG frames | 128 | ~32 KB avg | ~4 MB |
 | GameState (stack) | 1 | ~1.5 MB | ~1.5 MB |

@@ -88,22 +88,24 @@ static void prefetch_emote(AssetStream& s, const char* char_lc, const char* emot
                            const char* prefix, bool force_all = false) {
     if (!char_lc[0] || !emote_lc[0]) return;
     const ExtensionsConfig& ec = ExtensionsConfig::get();
-    const char* learned = ExtensionsConfig::learned(ExtensionsConfig::CAT_EMOTE);
+    int li = ExtensionsConfig::learned(ExtensionsConfig::CAT_EMOTE);
     char p[256];
-    if (!force_all && learned[0]) {
-        emote_path(p, sizeof(p), char_lc, emote_lc, prefix, learned);
-        if (!AssetManager::has_prefetch(p)) s.prefetch(p);
+    // prefetch_decode → the worker decodes the sprite off the main thread, so the
+    // courtroom only uploads it (no decode in the load gate).
+    if (!force_all && li >= 0 && li < ec.emote_count) {
+        emote_path(p, sizeof(p), char_lc, emote_lc, prefix, ec.emote[li]);
+        if (!AssetManager::has_prefetch(p)) s.prefetch_decode(p);
         return;
     }
     for (int i = 0; i < ec.emote_count; ++i) {
         emote_path(p, sizeof(p), char_lc, emote_lc, prefix, ec.emote[i]);
-        if (!AssetManager::has_prefetch(p)) s.prefetch(p);
+        if (!AssetManager::has_prefetch(p)) s.prefetch_decode(p);
     }
 }
 
-// Decode the first emote candidate already in the prefetch cache. Never touches
-// the network. On success, remember the winning format so the next sprite probes
-// only it. Returns true once a frame is loaded.
+// Decode the first emote candidate already staged in cache. Never touches the
+// network. On success, remember the winning format index so the next sprite
+// probes only it. Returns true once a frame is loaded.
 static bool resolve_emote(APNGPlayer& pl, SDL_Renderer* r, const char* char_lc,
                           const char* emote_lc, const char* prefix) {
     if (!char_lc[0] || !emote_lc[0]) return false;
@@ -114,7 +116,7 @@ static bool resolve_emote(APNGPlayer& pl, SDL_Renderer* r, const char* char_lc,
         if (AssetManager::has_prefetch(p)) {
             pl.set_loop(true);
             if (!pl.load(r, p)) return false;
-            ExtensionsConfig::note(ExtensionsConfig::CAT_EMOTE, ec.emote[i]);
+            ExtensionsConfig::note(ExtensionsConfig::CAT_EMOTE, i);
             return true;
         }
     }
@@ -125,16 +127,16 @@ static void prefetch_bgimg(AssetStream& s, const char* bg_lc, const char* file,
                            bool force_all = false) {
     if (!bg_lc[0]) return;
     const ExtensionsConfig& ec = ExtensionsConfig::get();
-    const char* learned = ExtensionsConfig::learned(ExtensionsConfig::CAT_BACKGROUND);
+    int li = ExtensionsConfig::learned(ExtensionsConfig::CAT_BACKGROUND);
     char p[256];
-    if (!force_all && learned[0]) {
-        std::snprintf(p, sizeof(p), "background/%s/%s%s", bg_lc, file, learned);
-        if (!AssetManager::has_prefetch(p)) s.prefetch(p);
+    if (!force_all && li >= 0 && li < ec.background_count) {
+        std::snprintf(p, sizeof(p), "background/%s/%s%s", bg_lc, file, ec.background[li]);
+        if (!AssetManager::has_prefetch(p)) s.prefetch_decode(p);
         return;
     }
     for (int i = 0; i < ec.background_count; ++i) {
         std::snprintf(p, sizeof(p), "background/%s/%s%s", bg_lc, file, ec.background[i]);
-        if (!AssetManager::has_prefetch(p)) s.prefetch(p);
+        if (!AssetManager::has_prefetch(p)) s.prefetch_decode(p);
     }
 }
 
@@ -147,7 +149,7 @@ static bool resolve_bgimg(APNGPlayer& pl, SDL_Renderer* r, const char* bg_lc, co
         if (AssetManager::has_prefetch(p)) {
             pl.set_loop(true);
             if (!pl.load(r, p)) return false;
-            ExtensionsConfig::note(ExtensionsConfig::CAT_BACKGROUND, ec.background[i]);
+            ExtensionsConfig::note(ExtensionsConfig::CAT_BACKGROUND, i);
             return true;
         }
     }

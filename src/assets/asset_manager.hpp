@@ -101,9 +101,39 @@ public:
     // data must be SDL_malloc'd — AssetManager takes ownership.
     static void store_prefetch(const char* relative, uint8_t* data, int size);
 
-    // Non-consuming peek: returns true if the prefetch cache contains this path.
+    // Non-consuming peek: returns true if the prefetch cache contains this path
+    // EITHER as raw bytes OR as off-thread-decoded frames (see below).
     // Does NOT consume the entry — subsequent fetch_bytes will still find it.
     static bool has_prefetch(const char* relative);
+
+    // ── Decoded-frame cache (off-thread image decode) ──────────────────────────
+    // AssetStream workers can decode image bytes into SDL_Surface frames so the
+    // main thread only does the GPU upload (SDL_CreateTextureFromSurface, which
+    // MUST run on the render thread). This moves the heavy PNG/WebP/APNG decode
+    // off the render loop — the cost the courtroom load-gate used to wait on.
+    // Surfaces are owned by exactly one place at a time: decoding worker → this
+    // staging cache → the consuming player (which uploads then frees them).
+    static constexpr int FRAMES_MAX = 128;   // matches APNG_MAX_FRAMES
+    struct DecodedFrames {
+        SDL_Surface* frames[FRAMES_MAX];
+        int          delays[FRAMES_MAX];      // ms per frame (1 entry for a still)
+        int          count;
+        int          w, h;
+    };
+    // Worker side: take ownership of decoded frames. Best-effort — if the staging
+    // cache can't fit them the surfaces are freed and the entry is dropped, so the
+    // consumer simply falls back to the main-thread decode path (always safe).
+    // `frames[i]` must be surfaces the caller no longer owns.
+    static void store_frames(const char* relative, SDL_Surface** frames,
+                             const int* delays, int count, int w, int h);
+    // Main thread: hand staged frames to the caller (ownership transferred). The
+    // caller uploads each frame to a texture, then SDL_FreeSurface()s it. Returns
+    // false if no frames are staged for this path.
+    static bool take_frames(const char* relative, DecodedFrames& out);
+    // Non-consuming: are decoded frames staged for this path?
+    static bool has_frames(const char* relative);
+    // Free all staged frames (call on disconnect — next server differs).
+    static void clear_frames();
 
     // Convenience helpers
     static const char* user_base();   // "sdmc:/switch/ferris-ao/base" (or "base" on desktop)

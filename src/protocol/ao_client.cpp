@@ -217,9 +217,10 @@ void AOClient::on_id(const Packet& p) {
 
     // AO-SDL replies with ID#AO-SDL/<version>#2.999.999#% — the fake
     // "2.999.999" protocol version makes Akashi treat us as a fully modern
-    // AO2 client with all features enabled. Match that format verbatim.
+    // AO2 client with all features enabled. Match that format verbatim (keep the
+    // 2.999.999 protocol field; only the software name carries our version).
     char buf[128];
-    send(buf, cmd::id(buf, sizeof(buf), "ferris-ao-switch/0.1", "2.999.999"));
+    send(buf, cmd::id(buf, sizeof(buf), "ferris-ao-switchv0.5", "2.999.999"));
     std::fprintf(stderr, "[ao_client] ID received — sent client ID\n");
 }
 

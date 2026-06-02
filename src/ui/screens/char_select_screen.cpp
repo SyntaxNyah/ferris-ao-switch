@@ -45,7 +45,7 @@ static void cs_prefetch_emote(AssetStream& s, const char* c, const char* e,
     char p[256];
     for (int i = 0; i < ec.emote_count; ++i) {
         cs_emote_path(p, sizeof(p), c, e, prefix, ec.emote[i]);
-        if (!AssetManager::has_prefetch(p)) s.prefetch(p);
+        if (!AssetManager::has_prefetch(p)) s.prefetch_decode(p);   // decode off-thread
     }
 }
 
@@ -81,7 +81,7 @@ void CharSelectScreen::prefetch_area_scene() {
     for (int f = 0; f < 6; ++f)
         for (int e = 0; e < ec.background_count; ++e) {
             std::snprintf(p, sizeof(p), "background/%s/%s%s", bg, files[f], ec.background[e]);
-            if (!AssetManager::has_prefetch(p)) s.prefetch(p);
+            if (!AssetManager::has_prefetch(p)) s.prefetch_decode(p);   // decode off-thread
         }
 }
 
@@ -276,7 +276,10 @@ void CharSelectScreen::update(uint32_t /*dt*/) {
     // bulk-queued — that starved the courtroom on big servers). DECODE runs each
     // frame (cheap peek/has_prefetch, self-limiting as icons land); ENQUEUE runs
     // only when the window moved, so the worker queue lock isn't hammered.
-    constexpr int DECODE_BUDGET   = 12;
+    // With off-thread decode the per-frame cost here is just a GPU upload
+    // (SDL_CreateTextureFromSurface) of an already-decoded icon, so the grid can
+    // fill much faster — a full 32-cell page in ~1.5 frames instead of ~3.
+    constexpr int DECODE_BUDGET   = 24;
     constexpr int LOOKAHEAD_PAGES = 2;
     const ExtensionsConfig& ec = ExtensionsConfig::get();
     const bool do_enqueue = (scroll_ != pf_scroll_);

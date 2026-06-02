@@ -42,19 +42,31 @@ SDL_Texture* TextureCache::get(SDL_Renderer* r, const char* path) {
         return slots_[idx].tex;
     }
 
-    // Load via AssetManager (HTTP, local, or romfs)
-    SDL_RWops* rw = AssetManager::open_rwops(path);
-    if (!rw) {
-        std::fprintf(stderr, "TextureCache: not found '%s'\n", path);
-        return nullptr;
+    SDL_Texture* tex = nullptr;
+
+    // Off-thread decode fast path: a worker may have already decoded this icon to
+    // an SDL_Surface — if so we only do the GPU upload here (no decode, no I/O).
+    AssetManager::DecodedFrames df;
+    if (AssetManager::take_frames(path, df)) {
+        if (df.count > 0 && df.frames[0])
+            tex = SDL_CreateTextureFromSurface(r, df.frames[0]);
+        for (int i = 0; i < df.count; ++i) if (df.frames[i]) SDL_FreeSurface(df.frames[i]);
     }
 
-    // freesrc=1: IMG_LoadTexture_RW closes rw (which frees the owning buffer)
-    SDL_Texture* tex = IMG_LoadTexture_RW(r, rw, 1);
+    // Otherwise decode here from bytes (HTTP/prefetch cache → sdmc: → romfs:).
     if (!tex) {
-        std::fprintf(stderr, "TextureCache: decode failed '%s': %s\n",
-            path, IMG_GetError());
-        return nullptr;
+        SDL_RWops* rw = AssetManager::open_rwops(path);
+        if (!rw) {
+            std::fprintf(stderr, "TextureCache: not found '%s'\n", path);
+            return nullptr;
+        }
+        // freesrc=1: IMG_LoadTexture_RW closes rw (which frees the owning buffer)
+        tex = IMG_LoadTexture_RW(r, rw, 1);
+        if (!tex) {
+            std::fprintf(stderr, "TextureCache: decode failed '%s': %s\n",
+                path, IMG_GetError());
+            return nullptr;
+        }
     }
 
     idx = evict_slot();
