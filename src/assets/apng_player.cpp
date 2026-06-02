@@ -155,6 +155,7 @@ bool APNGPlayer::load(SDL_Renderer* r, const char* path) {
         int n = df.count < APNG_MAX_FRAMES ? df.count : APNG_MAX_FRAMES;
         for (int i = 0; i < n; ++i) {
             frames_[i] = df.frames[i] ? SDL_CreateTextureFromSurface(r, df.frames[i]) : nullptr;
+            if (frames_[i]) SDL_SetTextureBlendMode(frames_[i], SDL_BLENDMODE_BLEND);
             if (df.frames[i]) SDL_FreeSurface(df.frames[i]);   // ours now; uploaded
             delays_[i] = df.delays[i] > 0 ? df.delays[i] : 100;
         }
@@ -178,7 +179,8 @@ bool APNGPlayer::load(SDL_Renderer* r, const char* path) {
         int n = anim->count < APNG_MAX_FRAMES ? anim->count : APNG_MAX_FRAMES;
         for (int i = 0; i < n; ++i) {
             frames_[i] = SDL_CreateTextureFromSurface(r, anim->frames[i]);
-            if (!frames_[i])
+            if (frames_[i]) SDL_SetTextureBlendMode(frames_[i], SDL_BLENDMODE_BLEND);
+            else
                 std::fprintf(stderr, "APNGPlayer: frame %d texture fail: %s\n",
                     i, SDL_GetError());
             delays_[i] = anim->delays[i] > 0 ? anim->delays[i] : 100;
@@ -208,6 +210,7 @@ bool APNGPlayer::load(SDL_Renderer* r, const char* path) {
         return false;
     }
     frames_[0] = SDL_CreateTextureFromSurface(r, surf);
+    if (frames_[0]) SDL_SetTextureBlendMode(frames_[0], SDL_BLENDMODE_BLEND);
     delays_[0] = 100;
     width_     = surf->w;
     height_    = surf->h;

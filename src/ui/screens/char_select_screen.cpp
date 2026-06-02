@@ -103,6 +103,16 @@ void CharSelectScreen::prefetch_sel_sprite() {
         char emo[64]; lower_copy(emo, def.emotions[0].idle_anim, sizeof(emo));
         cs_prefetch_emote(app_.asset_stream(), lname, emo, "(a)");
         cs_prefetch_emote(app_.asset_stream(), lname, emo, "(b)");
+        // Also the default emote's button thumbnails — the courtroom IC composer's
+        // preview shows these, so warming + decoding them here (off-thread) removes
+        // the "loading sprite..." you'd otherwise see right after pressing A. Probe
+        // webp→png via prefetch_emoticon (buttons aren't always .png).
+        AssetStream& s = app_.asset_stream();
+        char bb[256];
+        std::snprintf(bb, sizeof(bb), "characters/%s/emotions/button1_off", lname);
+        s.prefetch_emoticon(bb);
+        std::snprintf(bb, sizeof(bb), "characters/%s/emotions/button1_on", lname);
+        s.prefetch_emoticon(bb);
     }
     sprite_pf_sel_ = selected_;   // done for this selection (even if it had no emotes)
 }

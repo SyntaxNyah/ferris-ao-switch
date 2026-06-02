@@ -870,6 +870,20 @@ struct HttpResult {
 
 **Thread safety:** safe to call concurrently from multiple threads (each call opens its own socket).
 
+**`HttpClient` (keep-alive) — a 404 must NOT drop the connection.** The
+`AssetStream` workers fetch through a persistent `HttpClient` that reuses one
+TCP/TLS connection across requests. A subtle but huge bug: the retry loop used to
+treat **any** non-200 (including a 404) as a failure worth `close()`+reconnect+
+retry. Extension probing 404s constantly, so on a big HTTPS/Cloudflare server
+(e.g. Skrapegropen, 3800+ files) the warm connection was torn down on nearly
+every request and each sprite paid a fresh DNS+TCP+**TLS handshake** — visible as
+an endless socket open/close storm in the Ryujinx log and painfully slow loads.
+Fix: a framed non-200 is a *complete* response — return it and **keep** the
+connection (`if (res.ok || keep_alive) return …`). Only a real transport failure
+(`keep_alive == false`: stale/closed socket, send error, unframed body, or
+`Connection: close`) drops the socket and retries once. Small rosters hid this
+(few handshakes); large ones made it obvious.
+
 ---
 
 ### `src/net/connect_pool.hpp` / `src/net/connect_pool.cpp`
@@ -1838,6 +1852,24 @@ When `NetworkThread` drops the connection (error, server close, or `disconnect()
 SDL2_image 2.6+ is required for `IMG_LoadAnimation_RW`. Never use `IMG_Load` for animations. Supported animated formats: GIF, APNG, animated WebP. Static formats (PNG, WebP) fall back to `IMG_Load_RW` automatically in `APNGPlayer::load`.
 
 Animated WebP requires both `libwebpdemux` and `libwebp` linked in that order (`-lwebpdemux -lwebp`). If `switch-libwebp` is missing, animated WebP silently falls back to single-frame — `IMG_LoadAnimation_RW` returns null and `APNGPlayer` retries with `IMG_Load_RW`.
+
+**Format is detected by CONTENT, not extension — and mislabeled files exist.**
+Real AO packs ship files whose bytes don't match their extension: e.g.
+Skrapegropen's `polly` has `(a)/(b)*.webp` sprites that are actually **GIF**
+(`GIF89a` magic) while its `emotions/button*.webp` are real WebP. The `_RW`
+loaders probe by magic bytes (like webAO's browser and the Qt client), so the
+GIF decodes via the GIF path regardless of the `.webp` name — **but** you must
+preserve its transparency. An old-style GIF carries a transparent *palette index*
+(Graphics Control Extension, flag bit 0), not an alpha channel. A plain
+`SDL_ConvertSurfaceFormat(..., ARGB8888, 0)` does NOT turn that colorkey into
+alpha, so the sprite renders as a solid chroma-key block (the infamous "giant
+pink screen" on talk). Two safeguards, both in place:
+- `asset_stream.cpp::to_argb8888()` blits the decoded surface onto a zero-filled
+  (transparent) ARGB8888 surface with the source in `BLENDMODE_NONE`, which
+  honors a source colorkey **and** per-pixel alpha for every case.
+- `APNGPlayer::load` (and the off-thread upload path) sets
+  `SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND)` on every frame so the alpha
+  is actually used at draw time.
 
 ### 6. `romfsInit()` must be called before any `romfs:/` access
 

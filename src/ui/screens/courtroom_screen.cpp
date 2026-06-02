@@ -296,6 +296,15 @@ void CourtroomScreen::load_own_character() {
 // blocking on a network fetch. Off-state for every emote, plus the selected
 // emote's on-state. has_prefetch()/peek() guards keep this from re-queueing
 // already-resolved buttons.
+// Emote-button thumbnail base (NO extension). Buttons are the `emotions` category
+// and are probed webp→png like every other asset — they are NOT always .png. Some
+// packs (e.g. skrapegropen/polly) ship .webp buttons, so hardcoding .png left the
+// composer preview stuck on "loading sprite..." there forever.
+static void button_base(char* out, int cap, const char* char_lc, int idx, bool on) {
+    std::snprintf(out, cap, "characters/%s/emotions/button%d_%s",
+                  char_lc, idx + 1, on ? "on" : "off");
+}
+
 void CourtroomScreen::prefetch_emote_buttons() {
     if (!own_loaded_ || own_char_.emotion_count <= 0) return;
     GameState& gs = app_.state();
@@ -303,27 +312,45 @@ void CourtroomScreen::prefetch_emote_buttons() {
     if (cid < 0 || cid >= gs.char_count || !gs.characters[cid].name[0]) return;
     char lc[64]; lc_copy(lc, sizeof(lc), gs.characters[cid].name);
     AssetStream& s = app_.asset_stream();
-    char p[256];
+    char base[256];
     for (int i = 0; i < own_char_.emotion_count; ++i) {
-        std::snprintf(p, sizeof(p), "characters/%s/emotions/button%d_off.png", lc, i + 1);
-        if (!AssetManager::has_prefetch(p) && !app_.tex_cache().peek(p)) s.prefetch(p);
+        button_base(base, sizeof(base), lc, i, false);
+        s.prefetch_emoticon(base);   // probe webp→png, decode the winner off-thread
     }
-    std::snprintf(p, sizeof(p), "characters/%s/emotions/button%d_on.png",
-                  lc, ic_emote_sel_ + 1);
-    if (!AssetManager::has_prefetch(p) && !app_.tex_cache().peek(p)) s.prefetch(p);
+    button_base(base, sizeof(base), lc, ic_emote_sel_, true);
+    s.prefetch_emoticon(base);
 }
 
-// Peek-only: returns the cached emote-button texture, or nullptr if it hasn't
-// been decoded yet (never triggers a blocking load).
+// Peek-only: returns the cached emote-button texture (trying every emotions
+// extension), or nullptr if it hasn't been decoded yet. Never triggers a load.
 SDL_Texture* CourtroomScreen::emote_button_tex(int emote_idx, bool on) const {
     GameState& gs = app_.state();
     int cid = gs.my_char_id;
     if (cid < 0 || cid >= gs.char_count || !gs.characters[cid].name[0]) return nullptr;
     char lc[64]; lc_copy(lc, sizeof(lc), gs.characters[cid].name);
-    char p[256];
-    std::snprintf(p, sizeof(p), "characters/%s/emotions/button%d_%s.png",
-                  lc, emote_idx + 1, on ? "on" : "off");
-    return app_.tex_cache().peek(p);
+    char base[256]; button_base(base, sizeof(base), lc, emote_idx, on);
+    const ExtensionsConfig& ec = ExtensionsConfig::get();
+    char p[288];
+    for (int i = 0; i < ec.emotions_count; ++i) {
+        std::snprintf(p, sizeof(p), "%s%s", base, ec.emotions[i]);
+        if (SDL_Texture* t = app_.tex_cache().peek(p)) return t;
+    }
+    return nullptr;
+}
+
+// Peek the button texture; if it isn't a texture yet but is staged in the asset
+// cache, upload it now (the off-thread decode made that a cheap GPU upload).
+// Tries every emotions extension. Never blocks on the network.
+SDL_Texture* CourtroomScreen::warm_button_tex(const char* char_lc, int idx, bool on) {
+    const ExtensionsConfig& ec = ExtensionsConfig::get();
+    char base[256]; button_base(base, sizeof(base), char_lc, idx, on);
+    char p[288];
+    for (int i = 0; i < ec.emotions_count; ++i) {
+        std::snprintf(p, sizeof(p), "%s%s", base, ec.emotions[i]);
+        if (SDL_Texture* t = app_.tex_cache().peek(p)) return t;
+        if (AssetManager::has_prefetch(p)) return app_.tex_cache().get(app_.renderer().raw(), p);
+    }
+    return nullptr;
 }
 
 // Pre-warm OUR OWN selected emote's (a)/(b) sprites (and pre-anim) so that when
@@ -350,11 +377,10 @@ void CourtroomScreen::prefetch_own_emote() {
     }
     // Also the SELECTED emote's button thumbnail (for the quick-bar icon). Only
     // the selected one — the full grid is fetched lazily when the composer opens.
-    char bp[256];
-    std::snprintf(bp, sizeof(bp), "characters/%s/emotions/button%d_off.png", clc, sel + 1);
-    if (!AssetManager::has_prefetch(bp)) s.prefetch(bp);
-    std::snprintf(bp, sizeof(bp), "characters/%s/emotions/button%d_on.png", clc, sel + 1);
-    if (!AssetManager::has_prefetch(bp)) s.prefetch(bp);
+    // Probe webp→png (prefetch_emoticon) since buttons aren't always .png.
+    char bb[256];
+    button_base(bb, sizeof(bb), clc, sel, false); s.prefetch_emoticon(bb);
+    button_base(bb, sizeof(bb), clc, sel, true);  s.prefetch_emoticon(bb);
 }
 
 // ── Async scene/sprite resolution ─────────────────────────────────────────────
@@ -643,13 +669,8 @@ void CourtroomScreen::update(uint32_t dt_ms) {
         if (cid >= 0 && cid < gs.char_count && gs.characters[cid].name[0] &&
             ic_emote_sel_ >= 0 && ic_emote_sel_ < own_char_.emotion_count) {
             char lc[64]; lc_copy(lc, sizeof(lc), gs.characters[cid].name);
-            char p[256];
-            for (int on = 0; on < 2; ++on) {
-                std::snprintf(p, sizeof(p), "characters/%s/emotions/button%d_%s.png",
-                              lc, ic_emote_sel_ + 1, on ? "on" : "off");
-                if (!app_.tex_cache().peek(p) && AssetManager::has_prefetch(p))
-                    app_.tex_cache().get(app_.renderer().raw(), p);
-            }
+            warm_button_tex(lc, ic_emote_sel_, false);   // peek-or-upload, any ext
+            warm_button_tex(lc, ic_emote_sel_, true);
         }
     }
 
@@ -681,19 +702,12 @@ void CourtroomScreen::update(uint32_t dt_ms) {
         int cid = gs.my_char_id;
         if (cid >= 0 && cid < gs.char_count && gs.characters[cid].name[0]) {
             char lc[64]; lc_copy(lc, sizeof(lc), gs.characters[cid].name);
-            char p[256];
-            int budget = 10;   // small 40x40 PNGs; warmed at courtroom entry
+            int budget = 10;   // cap GPU uploads per frame; warmed at courtroom entry
             for (int i = 0; i < own_char_.emotion_count && budget > 0; ++i) {
-                std::snprintf(p, sizeof(p), "characters/%s/emotions/button%d_off.png", lc, i + 1);
-                if (!app_.tex_cache().peek(p) && AssetManager::has_prefetch(p)) {
-                    app_.tex_cache().get(app_.renderer().raw(), p);
-                    --budget;
-                }
+                if (emote_button_tex(i, false)) continue;        // already a texture (free peek)
+                if (warm_button_tex(lc, i, false)) --budget;     // uploaded a staged one (any ext)
             }
-            std::snprintf(p, sizeof(p), "characters/%s/emotions/button%d_on.png",
-                          lc, ic_emote_sel_ + 1);
-            if (!app_.tex_cache().peek(p) && AssetManager::has_prefetch(p))
-                app_.tex_cache().get(app_.renderer().raw(), p);
+            warm_button_tex(lc, ic_emote_sel_, true);
         }
     }
 

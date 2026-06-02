@@ -13,6 +13,26 @@ namespace ao {
 static constexpr int KIND_RAW    = -1;   // fetch bytes only
 static constexpr int KIND_DECODE = -2;   // fetch the exact path + decode off-thread
 
+// Convert any decoded surface (palette+colorkey GIF, RGB, or RGBA) to a single
+// ARGB8888 surface with REAL alpha. A plain SDL_ConvertSurfaceFormat does NOT
+// turn a GIF's transparent-color index into alpha, so old-style GIF sprites —
+// some of which ship in the wild with a misleading `.webp` extension (e.g.
+// Skrapegropen's Polly) — would render as a solid chroma-key block (the "giant
+// pink screen"). Blitting onto a zero-filled (transparent) ARGB surface with the
+// source in BLENDMODE_NONE honors the source colorkey AND per-pixel alpha for
+// every case: colorkeyed pixels are skipped (stay alpha 0) and real pixels copy
+// verbatim.
+static SDL_Surface* to_argb8888(SDL_Surface* src) {
+    if (!src) return nullptr;
+    SDL_Surface* out = SDL_CreateRGBSurfaceWithFormat(0, src->w, src->h, 32,
+                                                      SDL_PIXELFORMAT_ARGB8888);
+    if (!out) return nullptr;
+    SDL_FillRect(out, nullptr, 0);                      // fully transparent
+    SDL_SetSurfaceBlendMode(src, SDL_BLENDMODE_NONE);   // raw copy; colorkey still honored
+    if (SDL_BlitSurface(src, nullptr, out, nullptr) != 0) { SDL_FreeSurface(out); return nullptr; }
+    return out;
+}
+
 // Decode fetched image bytes into ARGB8888 frames on the worker and stage them
 // for the main thread to upload (AssetManager::store_frames). Converting to a
 // single canonical format here makes SDL_CreateTextureFromSurface a near-memcpy
@@ -32,7 +52,7 @@ static bool decode_and_store(const char* path, uint8_t* data, int size) {
         SDL_RWseek(rw, 0, RW_SEEK_SET);
         SDL_Surface* s = IMG_Load_RW(rw, 0);
         if (!s) return;
-        fr[0] = SDL_ConvertSurfaceFormat(s, SDL_PIXELFORMAT_ARGB8888, 0);
+        fr[0] = to_argb8888(s);
         SDL_FreeSurface(s);
         if (fr[0]) { delays[0] = 0; count = 1; w = fr[0]->w; h = fr[0]->h; ok = true; }
     };
@@ -43,9 +63,7 @@ static bool decode_and_store(const char* path, uint8_t* data, int size) {
         count = anim->count > AssetManager::FRAMES_MAX ? AssetManager::FRAMES_MAX : anim->count;
         w = anim->w; h = anim->h; ok = true;
         for (int i = 0; i < count; ++i) {
-            fr[i] = anim->frames[i]
-                ? SDL_ConvertSurfaceFormat(anim->frames[i], SDL_PIXELFORMAT_ARGB8888, 0)
-                : nullptr;
+            fr[i] = anim->frames[i] ? to_argb8888(anim->frames[i]) : nullptr;
             delays[i] = (anim->delays && anim->delays[i] > 0) ? anim->delays[i] : 100;
             if (!fr[i]) { ok = false; break; }     // bail on any failed frame
         }

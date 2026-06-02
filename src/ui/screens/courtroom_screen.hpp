@@ -173,7 +173,8 @@ private:
     // the texture cache without blocking the render loop (prefetch + peek, like
     // the character-select grid). Returns the cached texture or nullptr.
     void         prefetch_emote_buttons();          // queue visible/selected buttons
-    SDL_Texture* emote_button_tex(int emote_idx, bool on) const; // peek-only
+    SDL_Texture* emote_button_tex(int emote_idx, bool on) const; // peek-only (any ext)
+    SDL_Texture* warm_button_tex(const char* char_lc, int idx, bool on); // peek, else upload a staged one
     void         prefetch_own_emote();              // warm own (a)/(b) sprite for the selected emote
 
     // Own char.ini is loaded ASYNCHRONOUSLY so joining never freezes the render
