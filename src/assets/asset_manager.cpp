@@ -3,9 +3,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cstdint>
-#ifdef __SWITCH__
-#include <sys/stat.h>   // mkdir for the disk cache
-#endif
+#include <sys/stat.h>   // mkdir for the disk cache; stat for has_local_base
 
 namespace ao {
 
@@ -21,6 +19,19 @@ static constexpr const char* ROMFS_BASE = "romfs";
 
 const char* AssetManager::user_base()  { return USER_BASE;  }
 const char* AssetManager::romfs_base() { return ROMFS_BASE; }
+
+bool AssetManager::has_local_base() {
+    // A base pack has a characters/ directory under the user base.
+    char p[512];
+    std::snprintf(p, sizeof(p), "%s/characters", USER_BASE);
+#ifdef __SWITCH__
+    struct stat st;
+    return ::stat(p, &st) == 0 && S_ISDIR(st.st_mode);
+#else
+    struct stat st;
+    return ::stat(p, &st) == 0;
+#endif
+}
 
 // ── Asset URL state ───────────────────────────────────────────────────────────
 
@@ -135,8 +146,17 @@ struct PrefetchEntry {
 };
 
 static PrefetchEntry s_prefetch[PREFETCH_SLOTS] = {};
+static uint64_t      s_prefetch_h[PREFETCH_SLOTS] = {}; // parallel FNV-1a of rel
 static SDL_mutex*    s_prefetch_mutex           = nullptr;
 static int           s_prefetch_rr              = 0;   // round-robin eviction cursor
+
+// FNV-1a; compared before strcmp so the linear scan rejects non-matches with a
+// cheap 64-bit compare instead of a string compare (big win on large servers).
+static uint64_t rel_hash(const char* s) {
+    uint64_t h = 1469598103934665603ULL;
+    for (; *s; ++s) { h ^= (unsigned char)*s; h *= 1099511628211ULL; }
+    return h;
+}
 
 static SDL_mutex* get_prefetch_mutex() {
     if (!s_prefetch_mutex) s_prefetch_mutex = SDL_CreateMutex();
@@ -160,6 +180,7 @@ void AssetManager::store_prefetch(const char* relative, uint8_t* data, int size)
     }
     std::strncpy(s_prefetch[slot].rel, relative, sizeof(s_prefetch[slot].rel) - 1);
     s_prefetch[slot].rel[sizeof(s_prefetch[slot].rel) - 1] = '\0';
+    s_prefetch_h[slot]        = rel_hash(relative);
     s_prefetch[slot].data     = data;
     s_prefetch[slot].size     = size;
     s_prefetch[slot].occupied = true;
@@ -167,10 +188,11 @@ void AssetManager::store_prefetch(const char* relative, uint8_t* data, int size)
 }
 
 bool AssetManager::has_prefetch(const char* relative) {
+    uint64_t h = rel_hash(relative);
     SDL_LockMutex(get_prefetch_mutex());
     bool found = false;
     for (int i = 0; i < PREFETCH_SLOTS; ++i) {
-        if (s_prefetch[i].occupied &&
+        if (s_prefetch[i].occupied && s_prefetch_h[i] == h &&
             std::strcmp(s_prefetch[i].rel, relative) == 0) {
             found = true; break;
         }
@@ -181,9 +203,10 @@ bool AssetManager::has_prefetch(const char* relative) {
 
 // Consume a prefetch entry (removes it from cache, transfers ownership to caller).
 static uint8_t* consume_prefetch(const char* relative, int* out_size) {
+    uint64_t h = rel_hash(relative);
     SDL_LockMutex(get_prefetch_mutex());
     for (int i = 0; i < PREFETCH_SLOTS; ++i) {
-        if (s_prefetch[i].occupied &&
+        if (s_prefetch[i].occupied && s_prefetch_h[i] == h &&
             std::strcmp(s_prefetch[i].rel, relative) == 0) {
             uint8_t* data = s_prefetch[i].data;
             *out_size = s_prefetch[i].size;

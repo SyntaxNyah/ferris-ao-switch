@@ -80,20 +80,30 @@ static void emote_path(char* out, int cap, const char* char_lc,
         std::snprintf(out, cap, "characters/%s/%s%s%s", char_lc, prefix, emote_lc, ext);
 }
 
-// Queue every emote candidate for background prefetch (non-blocking).
-static void prefetch_emote(AssetStream& s, const char* char_lc,
-                           const char* emote_lc, const char* prefix) {
+// Queue emote candidates for background prefetch (non-blocking). Once a format
+// has decoded for this server we queue ONLY that extension (the common case —
+// AO2 servers are format-uniform), which is the ~5x cold-load request cut.
+// `force_all` re-queues every candidate as the fallback for a missing/odd asset.
+static void prefetch_emote(AssetStream& s, const char* char_lc, const char* emote_lc,
+                           const char* prefix, bool force_all = false) {
     if (!char_lc[0] || !emote_lc[0]) return;
     const ExtensionsConfig& ec = ExtensionsConfig::get();
+    const char* learned = ExtensionsConfig::learned(ExtensionsConfig::CAT_EMOTE);
     char p[256];
+    if (!force_all && learned[0]) {
+        emote_path(p, sizeof(p), char_lc, emote_lc, prefix, learned);
+        if (!AssetManager::has_prefetch(p)) s.prefetch(p);
+        return;
+    }
     for (int i = 0; i < ec.emote_count; ++i) {
         emote_path(p, sizeof(p), char_lc, emote_lc, prefix, ec.emote[i]);
         if (!AssetManager::has_prefetch(p)) s.prefetch(p);
     }
 }
 
-// Decode the first emote candidate that is already in the prefetch cache.
-// Never touches the network. Returns true once a frame is loaded.
+// Decode the first emote candidate already in the prefetch cache. Never touches
+// the network. On success, remember the winning format so the next sprite probes
+// only it. Returns true once a frame is loaded.
 static bool resolve_emote(APNGPlayer& pl, SDL_Renderer* r, const char* char_lc,
                           const char* emote_lc, const char* prefix) {
     if (!char_lc[0] || !emote_lc[0]) return false;
@@ -101,15 +111,27 @@ static bool resolve_emote(APNGPlayer& pl, SDL_Renderer* r, const char* char_lc,
     char p[256];
     for (int i = 0; i < ec.emote_count; ++i) {
         emote_path(p, sizeof(p), char_lc, emote_lc, prefix, ec.emote[i]);
-        if (AssetManager::has_prefetch(p)) { pl.set_loop(true); return pl.load(r, p); }
+        if (AssetManager::has_prefetch(p)) {
+            pl.set_loop(true);
+            if (!pl.load(r, p)) return false;
+            ExtensionsConfig::note(ExtensionsConfig::CAT_EMOTE, ec.emote[i]);
+            return true;
+        }
     }
     return false;
 }
 
-static void prefetch_bgimg(AssetStream& s, const char* bg_lc, const char* file) {
+static void prefetch_bgimg(AssetStream& s, const char* bg_lc, const char* file,
+                           bool force_all = false) {
     if (!bg_lc[0]) return;
     const ExtensionsConfig& ec = ExtensionsConfig::get();
+    const char* learned = ExtensionsConfig::learned(ExtensionsConfig::CAT_BACKGROUND);
     char p[256];
+    if (!force_all && learned[0]) {
+        std::snprintf(p, sizeof(p), "background/%s/%s%s", bg_lc, file, learned);
+        if (!AssetManager::has_prefetch(p)) s.prefetch(p);
+        return;
+    }
     for (int i = 0; i < ec.background_count; ++i) {
         std::snprintf(p, sizeof(p), "background/%s/%s%s", bg_lc, file, ec.background[i]);
         if (!AssetManager::has_prefetch(p)) s.prefetch(p);
@@ -122,7 +144,12 @@ static bool resolve_bgimg(APNGPlayer& pl, SDL_Renderer* r, const char* bg_lc, co
     char p[256];
     for (int i = 0; i < ec.background_count; ++i) {
         std::snprintf(p, sizeof(p), "background/%s/%s%s", bg_lc, file, ec.background[i]);
-        if (AssetManager::has_prefetch(p)) { pl.set_loop(true); return pl.load(r, p); }
+        if (AssetManager::has_prefetch(p)) {
+            pl.set_loop(true);
+            if (!pl.load(r, p)) return false;
+            ExtensionsConfig::note(ExtensionsConfig::CAT_BACKGROUND, ec.background[i]);
+            return true;
+        }
     }
     return false;
 }
@@ -335,6 +362,7 @@ void CourtroomScreen::queue_scene() {
     scene_pending_ = true;
     bg_ready_ = desk_ready_ = false;
     msg_age_ms_ = 0;   // give this scene load its own give-up window (e.g. BN mid-idle)
+    assets_fallback_done_ = false;   // arm the learned-format fallback for this scene
     // Stream the SERVER's background only — never substitute the bundled
     // background/default courtroom (that's what made rooms look wrong while the
     // real background was still downloading). The viewport stays black until the
@@ -376,6 +404,37 @@ void CourtroomScreen::resolve_assets() {
         pair_ready_ = resolve_emote(pair_player_, r, m_pair_char_, m_pair_emote_, "(a)");
     if (m_shout_ >= 1 && !shout_ready_)
         shout_ready_ = resolve_shout(shout_player_, r, m_char_, m_shout_);
+
+    // Learned-format fallback. We queued only the learned extension to cut the
+    // 404 storm; if a sprite/background hasn't landed shortly after the message
+    // began, re-queue EVERY candidate so a missing-or-odd-format asset still
+    // loads. PROBE_FALLBACK_MS is well under LOAD_GATE_MS, so on a fast CDN the
+    // learned format lands first and this never fires (the request cut), while a
+    // slow/odd asset just falls back to today's full fan-out before the gate —
+    // no visible delay. One shot per message.
+    if (!assets_fallback_done_ && msg_age_ms_ >= PROBE_FALLBACK_MS) {
+        // Re-fanning is dedupe-safe (has_prefetch guards each candidate), so this
+        // is correct whether begin_message queued learned-only or already fanned
+        // out — in the latter case it's a no-op.
+        bool missing = (!idle_ready_ && !talk_ready_) ||
+                       (m_use_pre_  && !preanim_ready_) ||
+                       (m_has_pair_ && !pair_ready_) ||
+                       (scene_pending_ && (!bg_ready_ || !desk_ready_));
+        if (missing) {
+            AssetStream& s = app_.asset_stream();
+            if (!idle_ready_) prefetch_emote(s, m_char_, m_emote_, "(a)", true);
+            if (!talk_ready_) prefetch_emote(s, m_char_, m_emote_, "(b)", true);
+            if (m_use_pre_ && !preanim_ready_)
+                prefetch_emote(s, m_char_, m_preanim_, "", true);
+            if (m_has_pair_ && !pair_ready_)
+                prefetch_emote(s, m_pair_char_, m_pair_emote_, "(a)", true);
+            if (scene_pending_) {
+                if (!bg_ready_)   prefetch_bgimg(s, cur_bg_, bg_filename(cur_pos_), true);
+                if (!desk_ready_) prefetch_bgimg(s, cur_bg_, desk_filename(cur_pos_), true);
+            }
+        }
+        assets_fallback_done_ = true;
+    }
 }
 
 void CourtroomScreen::begin_message() {
@@ -441,6 +500,7 @@ void CourtroomScreen::begin_message() {
                        std::strcmp(prev_emote, m_emote_) == 0;
     preanim_ready_ = pair_ready_ = shout_ready_ = false;
     msg_age_ms_ = 0;
+    assets_fallback_done_ = false;   // arm the learned-format fallback for this line
     if (!same_sprite) {
         idle_ready_ = talk_ready_ = false;
         prefetch_emote(s, m_char_, m_emote_, "(a)");
@@ -1270,6 +1330,50 @@ void CourtroomScreen::cycle_emote(int dir) {
 
 // ── Touch ───────────────────────────────────────────────────────────────────────
 
+// Row height of the currently-focused list, so a finger drag in pixels maps to
+// the same scroll units the mouse wheel uses. Mirrors the per-panel row_h in
+// handle_panel_tap / the panel renderers.
+int CourtroomScreen::focused_row_px() const {
+    const int lh = app_.text().line_h() > 0 ? app_.text().line_h() : 20;
+    switch (active_panel_) {
+        case CourtroomPanel::Music:    return lh + 10;
+        case CourtroomPanel::Area:     return lh + 14;
+        case CourtroomPanel::Evidence: return lh + 10;
+        case CourtroomPanel::OOC:      return lh + 10;
+        case CourtroomPanel::ICInput:  return 62;       // emote cell_h(56) + gap(6)
+        case CourtroomPanel::None:     return lh * 2;   // an IC-log entry ≈ name + line
+    }
+    return lh * 2;
+}
+
+// Scroll whatever has focus by `rows` (mouse wheel and finger drag share this).
+// `rows` follows the wheel sign convention: positive = back/older/up the list.
+void CourtroomScreen::scroll_focused(int rows) {
+    if (rows == 0) return;
+    GameState& gs = app_.state();
+    auto clamp = [](int v, int hi) { return v < 0 ? 0 : (v > hi ? hi : v); };
+    switch (active_panel_) {
+        case CourtroomPanel::Music:
+            music_sel_ = clamp(music_sel_ - rows, gs.music_count - 1); break;
+        case CourtroomPanel::Area:
+            area_sel_  = clamp(area_sel_ - rows,  gs.area_count - 1);  break;
+        case CourtroomPanel::Evidence:
+            evi_scroll_ = clamp(evi_scroll_ - rows, 1 << 20);          break;
+        case CourtroomPanel::OOC:
+            ooc_scroll_ = clamp(ooc_scroll_ + rows, 1 << 20);          break;
+        case CourtroomPanel::ICInput:
+            if (own_loaded_ && own_char_.emotion_count > 0) {
+                ic_emote_sel_ = clamp(ic_emote_sel_ - rows * 4, own_char_.emotion_count - 1);
+                ic_buttons_dirty_ = true;
+            }
+            break;
+        case CourtroomPanel::None:    // scroll the always-on IC log
+            if (gs.ic_log.count > 0)
+                ic_log_scroll_ = clamp(ic_log_scroll_ + rows, gs.ic_log.count - 1);
+            break;
+    }
+}
+
 void CourtroomScreen::handle_tap(int x, int y) {
     GameState& gs = app_.state();
     const ThemeLayout& tl = app_.theme().layout();
@@ -1367,36 +1471,16 @@ void CourtroomScreen::handle_event(const SDL_Event& e) {
     if (kb_active_) return;
     GameState& gs = app_.state();
 
-    // Touch / mouse tap → route to the HUD buttons, chat bar, or open panel.
-    int tx, ty;
-    if (tap_point(e, app_.renderer().raw(), tx, ty)) { handle_tap(tx, ty); return; }
+    // Touch / mouse: a tap (press-release, no drag) routes to the HUD buttons,
+    // chat bar, or open panel; a finger drag scrolls whatever has focus — the
+    // handheld has no wheel, so this is how long lists/the IC log move.
+    int tx, ty, rows;
+    TouchDrag::Kind k = drag_.feed(e, app_.renderer().raw(), focused_row_px(), tx, ty, rows);
+    if (k == TouchDrag::TAP)    { handle_tap(tx, ty); return; }
+    if (k == TouchDrag::SCROLL) { scroll_focused(rows); return; }
 
     // Mouse wheel scrolls whatever is in focus (wheel up = back/older/up the list).
-    if (e.type == SDL_MOUSEWHEEL && e.wheel.y != 0) {
-        int d = e.wheel.y;
-        auto clamp = [](int v, int hi) { return v < 0 ? 0 : (v > hi ? hi : v); };
-        switch (active_panel_) {
-            case CourtroomPanel::Music:
-                music_sel_ = clamp(music_sel_ - d, gs.music_count - 1); break;
-            case CourtroomPanel::Area:
-                area_sel_  = clamp(area_sel_ - d,  gs.area_count - 1);  break;
-            case CourtroomPanel::Evidence:
-                evi_scroll_ = clamp(evi_scroll_ - d, 1 << 20);          break;
-            case CourtroomPanel::OOC:
-                ooc_scroll_ = clamp(ooc_scroll_ + d, 1 << 20);          break;
-            case CourtroomPanel::ICInput:
-                if (own_loaded_ && own_char_.emotion_count > 0) {
-                    ic_emote_sel_ = clamp(ic_emote_sel_ - d * 4, own_char_.emotion_count - 1);
-                    ic_buttons_dirty_ = true;
-                }
-                break;
-            case CourtroomPanel::None:    // scroll the always-on IC log
-                if (gs.ic_log.count > 0)
-                    ic_log_scroll_ = clamp(ic_log_scroll_ + d, gs.ic_log.count - 1);
-                break;
-        }
-        return;
-    }
+    if (e.type == SDL_MOUSEWHEEL && e.wheel.y != 0) { scroll_focused(e.wheel.y); return; }
 
     enum Act { None, Up, Down, Left, Right, Confirm, Back,
                TogOOC, TogMusic, TogEvi, TogIC, TogArea, Disconnect } act = None;

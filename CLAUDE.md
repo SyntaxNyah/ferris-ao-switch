@@ -271,11 +271,17 @@ inline, not separate screens.
 
 ### `src/ui/touch.hpp`
 
-Header-only tap helpers shared by every screen.
+Header-only tap + drag-scroll helpers shared by every screen.
 
 ```cpp
 bool tap_point(const SDL_Event& e, SDL_Renderer* r, int& x, int& y);
 bool pt_in(int x, int y, const SDL_Rect& rc);
+
+struct TouchDrag {                       // one per scrollable screen, kept as a member
+    enum Kind { NONE, TAP, SCROLL };
+    Kind feed(const SDL_Event& e, SDL_Renderer* r, int row_px,
+              int& tx, int& ty, int& rows);
+};
 ```
 
 `tap_point` returns true on a tap and fills **logical (1280×720)** coordinates:
@@ -284,9 +290,23 @@ bool pt_in(int x, int y, const SDL_Rect& rc);
   `SDL_RenderWindowToLogical`. SDL's synthetic touch-as-mouse events
   (`which == SDL_TOUCH_MOUSEID`) are ignored so a tap is never handled twice.
 
-Each screen calls `tap_point` at the top of `handle_event` and hit-tests with
-`pt_in` against the same rects it renders. There is no cursor state — every tap
-is a discrete press.
+`tap_point` fires on **touch-down**; it is still used by screens that don't
+scroll. Screens with long lists own a **`TouchDrag`** member and call `feed()`
+at the top of `handle_event` instead. `feed()` classifies a gesture into:
+- **`TAP`** — a mouse left-click, or a finger press+release that never moved past
+  a ~10 px threshold. Fills `tx,ty`; the screen does its normal `pt_in` hit-test.
+  (Note this is a touch-**up** tap, so a drag is never mis-handled as a tap.)
+- **`SCROLL`** — a finger drag; `rows` is how many list rows to move, computed
+  from the drag distance and the focused list's `row_px` (its row height).
+- **`NONE`** — nothing actionable yet (e.g. an in-progress drag under threshold).
+
+`rows` uses the **same sign convention as a mouse wheel's `y`** (positive =
+toward earlier entries, the way content follows the finger), so every screen
+routes the wheel and a drag through **one** `scroll_*()` call with the same sign
+(`scroll_by(rows)` / `scroll_by(e.wheel.y)`). The Switch handheld has no mouse
+wheel, so this is how `ConnectScreen` (server list), `CharSelectScreen` (the grid),
+and `CourtroomScreen` (panels + IC log) scroll on hardware. Each still hit-tests
+with `pt_in` against the same rects it renders.
 
 ---
 
@@ -926,8 +946,14 @@ any asset skips the network entirely.
 Parsed from `<asset_url>/extensions.json` (webAO format) — the ordered list of
 file extensions to probe for each asset category, because an AO2 asset path has
 no extension on the wire (`characters/phoenix/(b)normal` could be `.webp`,
-`.apng`, `.gif`, or `.png`). Falls back to AO2 classic defaults when the file is
+`.apng`, `.gif`, or `.png`). Falls back to built-in defaults when the file is
 absent or unparseable.
+
+**Defaults are WebP-first** (modern AO2 content is overwhelmingly WebP), with the
+classic formats as fallbacks so nothing 404s — just a smarter order:
+- `emote`: `.webp` → `.webp.static` → `.png` → `.gif` → `.apng`
+- `charicon` / `emotions`: `.webp` → `.png`
+- `background`: `.webp` → `.png` → `.gif` → `.apng`
 
 ```cpp
 static constexpr int MAX_EXTS = 6;
@@ -938,8 +964,13 @@ char emotions[MAX_EXTS][EXT_LEN];   int emotions_count;    // still frames
 char background[MAX_EXTS][EXT_LEN]; int background_count;
 
 static void fetch_and_apply();   // blocking; main thread, one-shot at lobby-enter
-static void reset();             // restore defaults (call on disconnect)
+static void reset();             // defaults + forget learned formats (on disconnect)
 static const ExtensionsConfig& get();
+
+// Learned winning format per category (main thread only — no locking).
+enum Category { CAT_CHARICON, CAT_EMOTE, CAT_EMOTIONS, CAT_BACKGROUND, CAT_COUNT };
+static const char* learned(Category c);                // "" until one decodes
+static void        note(Category c, const char* ext);  // record a decoded format
 ```
 
 **Usage:**
@@ -948,6 +979,18 @@ const ExtensionsConfig& ec = ExtensionsConfig::get();
 for (int i = 0; i < ec.emote_count; ++i)
     try path "characters/<c>/(b)<emote>" + ec.emote[i];   // first that resolves wins
 ```
+
+**Learned-format probing (the cold-load request cut).** Firing all ~5 emote
+candidates per asset means 4 always 404. Because an AO2 server is format-uniform
+(its whole pack is one image type), the decode path calls `note(cat, ext)` the
+moment a candidate actually decodes, and the courtroom's `prefetch_emote` /
+`prefetch_bgimg` then queue **only** that `learned()` extension for subsequent
+sprites/backgrounds — roughly a 5× cut in cold-load requests. If a learned-only
+prefetch hasn't landed shortly after a message begins (`PROBE_FALLBACK_MS`, well
+under the 400 ms load gate, so it's invisible), `resolve_assets()` re-queues the
+**full** candidate list as a fallback, so an odd/missing asset still loads.
+`learned()`/`note()` are main-thread only (the worker just fetches the exact path
+it's handed), so there is no locking. All learned hints are cleared by `reset()`.
 
 `App::update()` calls `fetch_and_apply()` once when `in_lobby` first becomes true
 (after the asset URL is known). `CourtroomScreen` and `CharSelectScreen` read
@@ -1025,6 +1068,21 @@ void reset();                          // back to first frame
 **Resource management:** `unload()` destroys all `SDL_Texture*` and zeros arrays. Called automatically in `load()` before loading a new animation.
 
 **Path cache (no reload):** `load()` records the loaded relative path and returns immediately if asked to load the **same** path again — keeping the decoded frames. This is what makes a character talking line-after-line cheap: the courtroom re-requests the same `(a)`/`(b)` sprite each message, and without this every line paid a full re-decode (and a re-fetch if the prefetch entry had been evicted). `CourtroomScreen::begin_message` also skips re-prefetching the speaker sprite when the char+emote is unchanged, so a repeated line does no asset work at all and skips the Loading gate.
+
+**Shared decoded-animation cache (main thread only).** A process-global LRU
+(anonymous namespace in `apng_player.cpp`: `ANIM_SLOTS = 32`, `ANIM_BUDGET ≈
+96 MB` of decoded frames) keyed by relative path. When a player switches to a
+different sprite, `load()` first calls a private `detach()` that **parks** the
+current frame-set into this cache (transfers ownership, no destroy); if a later
+`load()` asks for a path that is still parked, `anim_take()` hands the frames
+straight back — instant re-show, no re-decode and no SD/network read. Ownership
+is transferred, never shared: a frame-set is owned by exactly one `APNGPlayer`
+**or** one cache slot at a time, so there are no double-frees. Eviction is LRU by
+an internal clock, and a frame-set too big for the budget is simply discarded.
+This is the in-memory analogue of AO-SDL keeping sprites resident, so person A →
+person B → person A re-shows A's sprite with zero work. All access is on the
+render thread; no locking. (`unload()` still fully frees a player's own frames —
+only `detach()` parks them.)
 
 ---
 
@@ -1217,7 +1275,9 @@ waiting_for_keyboard_ = false;
 First screen the user sees. Four-tab UI: **Servers** (0), **Direct Connect** (1),
 **Settings** (2), **Credits** (3). L cycles tabs (`tab_ = (tab_+1)%4`); tapping a
 tab selects it directly. Touch: tap a server row to select (tap the selected row
-to connect); tap a direct-connect field to edit it / connect.
+to connect); tap a direct-connect field to edit it / connect. A `TouchDrag drag_`
+member classifies finger gestures — a press-release is a tap, a drag scrolls the
+server list via `scroll_servers()` (the shared wheel+drag helper).
 
 **Settings tab (tab 2):** edits the persisted `Settings` (Up/Down select a row,
 A / ←→ change, mouse-tap a row acts; every change `save()`s immediately):
@@ -1278,7 +1338,7 @@ char         ms_url_[256];         // master server URL (configurable)
 
 8×4 grid (32 per page) over a **filtered** view of the roster.
 
-- D-pad → navigate; **mouse wheel** → scroll a row at a time (`scroll_` is kept row-aligned = a multiple of `COLS`, so the grid never half-shifts)
+- D-pad → navigate; **mouse wheel or touch drag** → scroll a row at a time, both via `scroll_by()` (`scroll_` is kept row-aligned = a multiple of `COLS`, so the grid never half-shifts). The screen owns a `TouchDrag drag_`; a press-release taps a cell, a drag scrolls.
 - A → `pick_char(real_index(selected_))`: claim if not taken → `CC` → `push_screen(new CourtroomScreen(...))` (the dedicated AreaSelectScreen is bypassed; rooms switch from inside the courtroom)
 - **Y / F / tap the search bar** → `open_search()`: system keyboard sets a name filter; **B / Esc** clears it
 - Touch → tap a cell to highlight, tap the highlighted cell to pick (shares `pick_char`)
@@ -1340,23 +1400,27 @@ the stage (`Layout::IC_LOG`) draws the tail of `gs.ic_log`: each entry is a
 showname line (neutral tint) plus its **word-wrapped** message (its AO colour),
 stacked from the **bottom** with the newest line last — so nothing is cut off.
 Heights come from `TextRenderer::wrapped_height`; a clip rect trims the topmost
-partially-visible entry. The mouse wheel scrolls back through history
-(`ic_log_scroll_` = entries skipped from the newest; reset to 0 on each new
-line). The drawn strings are stable, so after their first frame the message
+partially-visible entry. The mouse wheel or a finger drag scrolls back through
+history (`ic_log_scroll_` = entries skipped from the newest; reset to 0 on each
+new line). The drawn strings are stable, so after their first frame the message
 blocks are `TextRenderer` cache hits (no re-rasterisation).
 
-**Touch (`handle_tap` / `handle_panel_tap`).** Taps (Switch touchscreen or a
-Ryujinx mouse, via `ui/touch.hpp::tap_point`) are hit-tested against the HUD
-buttons (open the matching panel), the chat bar (skip the typewriter, or — when
-idle — open the keyboard and fire a line immediately with the current
-emote/colour/pos), and the open panel (music/area rows select+act, the emote
-grid picks an emote, the OOC panel opens the keyboard). A tap outside an open
-panel closes it. Controller/keyboard, and touch all funnel through the shared
-`join_area` / `play_music` / `compose_ooc` / `compose_and_send` helpers.
+**Touch (`handle_tap` / `handle_panel_tap`).** A `TouchDrag drag_` member
+classifies each gesture at the top of `handle_event`: a press-release **tap**
+(Switch touchscreen or a Ryujinx mouse) is hit-tested against the HUD buttons
+(open the matching panel), the chat bar (skip the typewriter, or — when idle —
+open the keyboard and fire a line immediately with the current emote/colour/pos),
+and the open panel (music/area rows select+act, the emote grid picks an emote,
+the OOC panel opens the keyboard). A tap outside an open panel closes it. A
+finger **drag** scrolls the focused list via `scroll_focused()`. Controller,
+keyboard, and touch all funnel through the shared `join_area` / `play_music` /
+`compose_ooc` / `compose_and_send` helpers.
 
-**Mouse wheel (`SDL_MOUSEWHEEL`).** Scrolls whatever has focus — the open
+**Mouse wheel + touch drag (`SDL_MOUSEWHEEL` / `TouchDrag`).** Both route through
+`scroll_focused(rows)` and scroll whatever has focus — the open
 music/rooms/evidence/OOC panel, the composer's emote grid, or (with no panel
-open) the IC log scrollback.
+open) the IC log scrollback. `focused_row_px()` gives the focused list's row
+height so a finger drag in pixels maps to the same scroll units as a wheel notch.
 
 **OOC own-message highlight.** In the OOC panel, entries whose name equals the
 local username (and that aren't server messages) get a highlighted row + a left
@@ -1767,10 +1831,11 @@ If latency-sensitive loading is needed, call `asset_stream.prefetch()` before th
 ### 12. Character sprite path convention (AO2 standard)
 
 The `(a)`/`(b)` markers are a **prefix**, the sprite lives at the **character
-root** (not an `emotions/` subdir), and the extension is probed in the order
-the server advertises (`ExtensionsConfig`: webp → apng → gif → png by default).
-This matches AO2-Client, AO-SDL, and webAO exactly (see `buildEmoteUrls` in
-webAO/LemmyAO):
+root** (not an `emotions/` subdir), and the extension is probed in the order the
+server advertises, or the WebP-first defaults (`ExtensionsConfig`: webp →
+webp.static → png → gif → apng), narrowing to the server's learned format after
+the first sprite decodes. This matches AO2-Client, AO-SDL, and webAO exactly
+(see `buildEmoteUrls` in webAO/LemmyAO):
 
 ```
 Idle (animated):  characters/<name>/(a)<emote>.<ext>
@@ -1884,6 +1949,7 @@ CourtroomScreen::update()
 | Resource | Count | Size each | Total |
 |----------|-------|-----------|-------|
 | Texture cache slots | 512 | ~64 KB avg (128×128 icon) | ~32 MB |
+| Decoded-animation LRU (`apng_player`) | 32 slots | budget-capped | ≤ ~96 MB |
 | SFX chunks | 16 | ~64 KB avg | ~1 MB |
 | APNG frames | 128 | ~32 KB avg | ~4 MB |
 | GameState (stack) | 1 | ~1.5 MB | ~1.5 MB |

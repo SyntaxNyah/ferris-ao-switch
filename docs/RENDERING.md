@@ -37,11 +37,20 @@ so it drops straight into `IMG_Load_RW`, `IMG_LoadAnimation_RW`,
 ### Extension probing
 
 A path like `characters/phoenix/(b)normal` has no extension — the real file
-could be `.webp`, `.apng`, `.gif`, or `.png`. The order to try comes from
-`ExtensionsConfig` (parsed from `<cdn>/extensions.json`, webAO format, with
-built-in defaults). The courtroom builds the exact candidate path for each
-extension (with the `(a)`/`(b)`-prefix rules below) and decodes the first one
-that is present.
+could be `.webp`, `.webp.static`, `.png`, `.gif`, or `.apng`. The order to try
+comes from `ExtensionsConfig` (parsed from `<cdn>/extensions.json`, webAO format,
+with **WebP-first** built-in defaults — modern AO2 content is overwhelmingly
+WebP). The courtroom builds the exact candidate path for each extension (with the
+`(a)`/`(b)`-prefix rules below) and decodes the first one that is present.
+
+**Learned format (cold-load request cut).** Firing all ~5 candidates means 4
+always 404. Since a server's pack is format-uniform, the decode path records the
+format that actually decoded (`ExtensionsConfig::note`) and the prefetch path
+then queues **only** that extension for later sprites/backgrounds — a ~5× cut in
+cold-load requests. If a learned-only prefetch hasn't landed shortly after a
+message begins (`PROBE_FALLBACK_MS`, comfortably under the 400 ms load gate, so
+it's invisible), `resolve_assets()` re-queues the full candidate list as a
+fallback so an odd/missing asset still loads. Cleared on disconnect.
 
 ### Non-blocking loading (no main-thread network — buttery smooth)
 
@@ -348,8 +357,8 @@ panel highlights the new room immediately.
 - **The IC log re-blits cached textures.** Each entry is a showname line plus a
   word-wrapped message block; the strings are stable so they stay in the
   (96-slot) text cache and re-blit with no per-frame rasterisation or allocation
-  (only the wrap-height math runs each frame, which is metrics-only). The wheel
-  scrolls back through history.
+  (only the wrap-height math runs each frame, which is metrics-only). The mouse
+  wheel or a finger drag scrolls back through history.
 - **Audio never blocks the render loop.** `AudioManager::play_sfx` resolves only
   from the prefetch cache or local files (`open_rwops_cached`, no HTTP) — if the
   sound isn't ready it plays nothing rather than stalling. The courtroom

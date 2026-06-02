@@ -133,6 +133,18 @@ void CharSelectScreen::open_search() {
     pf_scroll_ = -1;
 }
 
+// Move the selection by whole rows — the shared path for the mouse wheel and a
+// touch drag. update() row-aligns scroll_ afterwards to keep selection visible,
+// so moving the cursor IS scrolling the grid here. `rows` follows the wheel sign
+// convention (positive = toward earlier entries / scroll up).
+void CharSelectScreen::scroll_by(int rows) {
+    int total = vis_count();
+    if (total == 0) return;
+    selected_ -= rows * COLS;
+    if (selected_ < 0) selected_ = 0;
+    if (selected_ >= total) selected_ = total - 1;
+}
+
 // Claim a character (CC) and enter the courtroom. Optimistically records
 // my_char_id so the IC composer works before the server's PV confirmation lands.
 void CharSelectScreen::pick_char(int idx) {
@@ -149,9 +161,10 @@ void CharSelectScreen::handle_event(const SDL_Event& e) {
     char_count_ = app_.state().char_count;
     int total = vis_count();
 
-    // Touch / mouse.
-    int tx, ty;
-    if (tap_point(e, app_.renderer().raw(), tx, ty)) {
+    // Touch / mouse: tap (press-release) or finger drag-scroll.
+    int tx, ty, rows;
+    TouchDrag::Kind k = drag_.feed(e, app_.renderer().raw(), CELL_H + CELL_GAP, tx, ty, rows);
+    if (k == TouchDrag::TAP) {
         if (pt_in(tx, ty, SEARCH_BAR)) { open_search(); return; }
         for (int row = 0; row < ROWS; ++row)
             for (int col = 0; col < COLS; ++col) {
@@ -167,6 +180,7 @@ void CharSelectScreen::handle_event(const SDL_Event& e) {
             }
         return;
     }
+    if (k == TouchDrag::SCROLL) { scroll_by(rows); return; }
 
     if (total == 0) {
         // No matches (or no roster yet): still allow opening search, and always
@@ -186,9 +200,7 @@ void CharSelectScreen::handle_event(const SDL_Event& e) {
 
     // Mouse wheel scrolls a row at a time (update() row-aligns scroll_).
     if (e.type == SDL_MOUSEWHEEL && e.wheel.y != 0) {
-        selected_ -= e.wheel.y * COLS;
-        if (selected_ < 0) selected_ = 0;
-        if (selected_ >= total) selected_ = total - 1;
+        scroll_by(e.wheel.y);
         return;
     }
 

@@ -1,5 +1,6 @@
 #pragma once
 #include "../screen.hpp"
+#include "../touch.hpp"
 #include "../../state/game_state.hpp"
 
 namespace ao {
@@ -18,6 +19,7 @@ private:
     void rebuild_filter();          // recompute filt_ from search_
     void prefetch_area_scene();     // warm the room background while you browse
     void prefetch_sel_sprite();     // warm the highlighted char's default sprite
+    void scroll_by(int rows);       // move selection by whole rows (wheel / touch drag)
 
     // The visible/navigable list is the filtered set when searching, else every
     // slot. selected_/scroll_ are positions in THAT list; real_index() maps a
@@ -36,6 +38,8 @@ private:
     char search_[48]  = {};
     int  filt_[GameState::MAX_CHARS];
     int  filt_count_  = 0;
+
+    TouchDrag drag_;         // tap vs finger drag-scroll classifier for the grid
 
     static constexpr int COLS = 8;
     static constexpr int ROWS = 4;

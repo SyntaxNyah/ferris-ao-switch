@@ -108,6 +108,11 @@ public:
     // Convenience helpers
     static const char* user_base();   // "sdmc:/switch/ferris-ao/base" (or "base" on desktop)
     static const char* romfs_base();  // "romfs:" (or "romfs" on desktop)
+
+    // True if a local AO2 base pack is present (user_base has a characters/ dir).
+    // When present, assets load locally with zero network — the AO-SDL-style
+    // "instant" path. Surfaced in the connect-screen Settings tab.
+    static bool has_local_base();
 };
 
 } // namespace ao

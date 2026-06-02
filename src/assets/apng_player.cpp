@@ -2,8 +2,103 @@
 #include "asset_manager.hpp"
 #include <cstdio>
 #include <cstring>
+#include <cstdint>
 
 namespace ao {
+
+// ── Shared decoded-animation cache (main thread only) ───────────────────────────
+//
+// An LRU of already-decoded frame-sets keyed by relative path, bounded by an
+// approximate VRAM budget. APNGPlayer "parks" its current frames here when it
+// switches to another sprite and "takes" them back if asked for the same path
+// again — so re-showing a recently-seen character/background is instant (no
+// re-decode, no SD/network read). Ownership is transferred, never shared: a
+// frame-set is owned by exactly one APNGPlayer OR one cache slot at a time, so
+// there are no dangling pointers or double-frees. All access is on the render
+// thread, so no locking is needed.
+namespace {
+
+struct AnimSlot {
+    char         path[256];
+    SDL_Texture* frames[APNG_MAX_FRAMES];
+    int          delays[APNG_MAX_FRAMES];
+    int          count;
+    int          w, h;
+    uint32_t     bytes;       // approx VRAM (w*h*4*count)
+    uint32_t     last_used;
+    bool         occupied;
+};
+
+constexpr int      ANIM_SLOTS  = 32;
+constexpr uint32_t ANIM_BUDGET = 96u * 1024 * 1024;   // ~96 MB of decoded frames
+
+AnimSlot s_anim[ANIM_SLOTS] = {};
+uint32_t s_anim_total = 0;
+uint32_t s_anim_clock = 0;
+
+uint32_t anim_bytes(int w, int h, int count) {
+    return (uint32_t)(w > 0 ? w : 1) * (uint32_t)(h > 0 ? h : 1) * 4u *
+           (uint32_t)(count > 0 ? count : 1);
+}
+
+void anim_drop(AnimSlot& s) {   // destroy a cached slot's textures
+    for (int i = 0; i < s.count; ++i)
+        if (s.frames[i]) { SDL_DestroyTexture(s.frames[i]); s.frames[i] = nullptr; }
+    if (s_anim_total >= s.bytes) s_anim_total -= s.bytes; else s_anim_total = 0;
+    s.count = 0; s.bytes = 0; s.occupied = false; s.path[0] = '\0';
+}
+
+// Take ownership of a decoded frame-set into the cache. If it can't fit even
+// after evicting LRU entries, the frames are destroyed (discarded).
+void anim_store(const char* path, SDL_Texture** frames, const int* delays,
+                int count, int w, int h) {
+    if (count <= 0 || !path || !path[0]) {
+        for (int i = 0; i < count; ++i) if (frames[i]) SDL_DestroyTexture(frames[i]);
+        return;
+    }
+    uint32_t bytes = anim_bytes(w, h, count);
+    auto first_free = []() {
+        for (int i = 0; i < ANIM_SLOTS; ++i) if (!s_anim[i].occupied) return i;
+        return -1;
+    };
+    while (bytes <= ANIM_BUDGET && (s_anim_total + bytes > ANIM_BUDGET || first_free() < 0)) {
+        int lru = -1;
+        for (int i = 0; i < ANIM_SLOTS; ++i)
+            if (s_anim[i].occupied &&
+                (lru < 0 || s_anim[i].last_used < s_anim[lru].last_used)) lru = i;
+        if (lru < 0) break;
+        anim_drop(s_anim[lru]);
+    }
+    int slot = first_free();
+    if (bytes > ANIM_BUDGET || slot < 0) {   // too big / no room — discard
+        for (int i = 0; i < count; ++i) if (frames[i]) SDL_DestroyTexture(frames[i]);
+        return;
+    }
+    AnimSlot& s = s_anim[slot];
+    std::strncpy(s.path, path, sizeof(s.path) - 1); s.path[sizeof(s.path) - 1] = '\0';
+    for (int i = 0; i < count; ++i) { s.frames[i] = frames[i]; s.delays[i] = delays[i]; }
+    s.count = count; s.w = w; s.h = h; s.bytes = bytes;
+    s.last_used = ++s_anim_clock; s.occupied = true;
+    s_anim_total += bytes;
+}
+
+// Hand a cached frame-set back to the caller (cache relinquishes ownership).
+bool anim_take(const char* path, SDL_Texture** frames, int* delays,
+               int* count, int* w, int* h) {
+    if (!path || !path[0]) return false;
+    for (int i = 0; i < ANIM_SLOTS; ++i) {
+        AnimSlot& s = s_anim[i];
+        if (!s.occupied || std::strcmp(s.path, path) != 0) continue;
+        for (int j = 0; j < s.count; ++j) { frames[j] = s.frames[j]; delays[j] = s.delays[j]; }
+        *count = s.count; *w = s.w; *h = s.h;
+        if (s_anim_total >= s.bytes) s_anim_total -= s.bytes; else s_anim_total = 0;
+        s.count = 0; s.bytes = 0; s.occupied = false; s.path[0] = '\0';
+        return true;
+    }
+    return false;
+}
+
+} // anonymous namespace
 
 APNGPlayer::~APNGPlayer() { unload(); }
 
@@ -20,23 +115,40 @@ void APNGPlayer::unload() {
     path_[0]       = '\0';
 }
 
+void APNGPlayer::detach() {
+    // Move the current frames into the shared cache (it takes ownership) so a
+    // later load of the same path is instant. Then clear our state WITHOUT
+    // destroying (the cache — or anim_store's discard — owns them now).
+    if (frame_count_ > 0)
+        anim_store(path_, frames_, delays_, frame_count_, width_, height_);
+    for (int i = 0; i < APNG_MAX_FRAMES; ++i) frames_[i] = nullptr;
+    frame_count_   = 0;
+    current_frame_ = 0;
+    accum_ms_      = 0;
+    done_          = false;
+    width_ = height_ = 0;
+    path_[0]       = '\0';
+}
+
 // `path` is a RELATIVE asset path.
-// Resolution order: HTTP streaming → sdmc: local base → romfs: bundled fallback.
+// Resolution order: decode cache → HTTP streaming → sdmc: local base → romfs:.
 bool APNGPlayer::load(SDL_Renderer* r, const char* path) {
-    // Already showing this exact asset — keep the decoded frames. This is what
-    // makes a character talking line-after-line cheap: the courtroom re-requests
-    // the same (a)/(b) sprite every message, and without this each one paid a
-    // full re-decode (and a re-fetch if the prefetch entry had been evicted).
+    // Already showing this exact asset — keep the decoded frames.
     if (frame_count_ > 0 && path && std::strcmp(path, path_) == 0)
         return true;
 
-    unload();
+    // Park the current frames in the cache, then re-show this path instantly if
+    // we've decoded it before.
+    detach();
+    if (path && anim_take(path, frames_, delays_, &frame_count_, &width_, &height_)) {
+        std::strncpy(path_, path, sizeof(path_) - 1);
+        path_[sizeof(path_) - 1] = '\0';
+        current_frame_ = 0; accum_ms_ = 0; done_ = false;
+        return true;
+    }
 
     SDL_RWops* rw = AssetManager::open_rwops(path);
-    if (!rw) {
-        std::fprintf(stderr, "APNGPlayer: not found '%s'\n", path);
-        return false;
-    }
+    if (!rw) return false;
 
 #if SDL_IMAGE_VERSION_ATLEAST(2, 6, 0)
     // Try animated (APNG / GIF) first — freesrc=1 closes rw when done

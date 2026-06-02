@@ -42,12 +42,12 @@ ferris-ao-switch implements the full AO2 client protocol so Switch players can j
 - **Server browser** — fetches the public server list from the Attorney Online master server (`https://servers.aceattorneyonline.com/servers`); master server URL is configurable in-app
 
 ### Gameplay
-- **Character select** — full grid of server character slots (grayed-out when taken), with **name search/filter** and mouse-wheel scrolling for big rosters
+- **Character select** — full grid of server character slots (grayed-out when taken), with **name search/filter**, mouse-wheel and **touch drag-scrolling** for big rosters
 - **Quick talk** — a tap-to-talk IC bar (tap it or press Enter to type & send instantly) with inline `< >` emote arrows; the emote isn't reset between lines, so back-and-forth is fast
 - **Room switching** — in-courtroom **Rooms** panel lists every area with live player counts, statuses and lock states (ARUP); join one to move rooms without reconnecting
 - **IC messages** — typewriter effect, word wrap, per-message text colors (12 colors), shownames, objection/hold-it/take-that popups, realization flash, screenshake
 - **Emote picker** — IC composer shows a grid of your character's emotes with sprite-button thumbnails and a live preview of the selected one
-- **IC log** — always-on scrollback column showing recent IC lines (showname + colored, word-wrapped message), newest at the bottom; scroll back through history with the mouse wheel
+- **IC log** — always-on scrollback column showing recent IC lines (showname + colored, word-wrapped message), newest at the bottom; scroll back through history with the mouse wheel or a finger drag
 - **OOC chat** — your own messages are highlighted so they're easy to find in the log
 - **Pairing** — renders two characters side by side with individual offsets and flip states
 - **Evidence panel** — view, present, add, edit, and delete evidence; grid view with thumbnails
@@ -59,6 +59,8 @@ ferris-ao-switch implements the full AO2 client protocol so Switch players can j
 ### Assets
 - **HTTP & HTTPS streaming** — loads assets on-demand from a server CDN (`ASS` packet); `https://` (TLS) and `http://` URLs both supported; no base pack download needed
 - **Async, non-blocking loads** — sprites/backgrounds/music are prefetched on 8 worker threads and decoded from cache on the main thread, so the courtroom never stalls on the network
+- **Smart WebP-first probing** — AO2 assets carry no extension on the wire, so the client probes candidates **WebP-first** (the modern AO default), then `.webp.static`/`.png`/`.gif`. It learns the format a server actually uses on the first sprite and then probes **only** that one — collapsing the cold-load 404 storm (was ~5 requests per asset, 4 of which 404) — with an automatic fall back to the full candidate list for any odd/missing asset
+- **Decoded-animation cache** — an LRU of already-decoded frame-sets (≈96 MB VRAM budget) keeps recently-seen characters/backgrounds in memory, so when someone who just spoke talks again their sprite re-shows instantly (no re-decode, no re-fetch)
 - **Persistent disk cache** — streamed assets are saved to `sdmc:/switch/ferris-ao/cache` (keyed by full URL) and served from SD on the next view/relaunch, so repeat fetches skip the network entirely — pairs with HTTPS keep-alive to make the most of Cloudflare/CDN edge caching
 - **No-freeze loading** — char.ini, sprites, audio and music all load off the main thread (your own sprite is pre-warmed on join, audio plays only from cache); the render loop never blocks on the network, so there's no join freeze or IC stutter even on 3000+ character servers
 - **Saved settings** — a custom showname, theme, master-server URL and volumes persist across servers and launches (`sdmc:/switch/ferris-ao/config.ini`)
@@ -71,7 +73,7 @@ ferris-ao-switch implements the full AO2 client protocol so Switch players can j
 - **1280×720 layout** — matches Switch native resolution in both docked and handheld modes; full-screen courtroom stage with an overlaid chat bar, corner HP bars, a now-playing strip, and an always-on IC log (authentic AO composition, themeable via `courtroom_design.ini`)
 
 ### Input
-- **Touchscreen** — tap buttons, panels, server/character lists, emote grid; tap the chat box to type a line instantly. Works in handheld mode (and via mouse on Ryujinx)
+- **Touchscreen** — tap buttons, panels, server/character lists, emote grid; tap the chat box to type a line instantly. **Drag to scroll** long lists (servers, the character grid, music/rooms panels, the IC log) — the handheld equivalent of a mouse wheel. Works in handheld mode (and via mouse on Ryujinx)
 - **Joy-Con + Pro Controller** — full D-pad/stick/button mapping
 - **System keyboard** — uses libnx `swkbdShow()` for all text entry; works correctly on Ryujinx
 - **Keyboard fallback** — arrow keys + Enter + letter shortcuts for desktop/emulator development
@@ -308,8 +310,12 @@ The standard AO2 base pack is distributed with the [Attorney Online 2 desktop cl
 Character sprites follow the AO2 naming convention (matching AO2-Client, AO-SDL,
 and webAO). The `(a)`/`(b)` marker is a **prefix** and the sprite lives at the
 **character root** — not in an `emotions/` subfolder. Each is probed across the
-extensions the server advertises (default order: `.webp` → `.apng` → `.gif` →
-`.png`):
+extensions the server advertises (default order, **WebP-first**: `.webp` →
+`.webp.static` → `.png` → `.gif` → `.apng`). The client also **learns** the
+format a server actually ships from the first sprite that decodes and probes
+only that one afterwards, so the usual ~5-candidate fan-out collapses to a single
+request per asset (with an automatic fall back to the full list for an
+odd/missing asset). A server's `extensions.json` overrides the default order.
 
 | File | Purpose |
 |---|---|
@@ -452,6 +458,7 @@ If the server places you in an area automatically (single-area servers), the Are
 |---|---|
 | **L / R** | Switch between Servers and Direct Connect tabs |
 | **D-pad Up/Down** | Move selection (server list or field) |
+| **Mouse wheel / touch drag** | Scroll the server list |
 | **A** | Connect to selected server (Servers tab) / Edit field (Direct Connect tab) |
 | **R** | Refresh server list (Servers tab) |
 | **ZL** | Edit master server URL |
@@ -462,7 +469,7 @@ If the server places you in an area automatically (single-area servers), the Are
 | Button | Action |
 |---|---|
 | **D-pad** | Move cursor |
-| **Mouse wheel** | Scroll the grid a row at a time |
+| **Mouse wheel / touch drag** | Scroll the grid a row at a time |
 | **A** | Select character (if not taken) |
 | **Y** / **F** | Search characters by name (system keyboard) |
 | **B** | Clear the search |
@@ -497,7 +504,7 @@ corners and the now-playing track runs along the top.
 | **← / →** | Cycle your emote (no composer needed) |
 | **A / Enter** | Quick-talk: type & send with the current emote — or skip the typewriter / confirm in a panel |
 | **D-pad Up/Down** | Navigate / scroll the open panel |
-| **Mouse wheel** | Scroll the open panel or the IC log |
+| **Mouse wheel / touch drag** | Scroll the open panel or the IC log |
 | **B** | Close the open panel |
 | **+** | Leave the courtroom (disconnect) |
 
@@ -541,9 +548,12 @@ Everything is tappable in handheld mode (and via mouse on Ryujinx):
 | OOC panel | Tap to open the keyboard |
 | Any panel | Tap outside it to close |
 
-**Mouse wheel** (Ryujinx/desktop) scrolls whatever has focus — the IC log
-scrollback, the music/rooms/evidence/OOC panels, the composer's emote grid, the
-character grid, and the server list.
+**Drag to scroll.** Since the handheld has no mouse wheel, a finger **drag**
+scrolls whatever has focus — the server list, the character grid, the
+music/rooms/evidence/OOC panels, the composer's emote grid, and the IC-log
+scrollback. A quick press-and-release is still a tap; only movement past a small
+threshold becomes a scroll, so taps and drags never collide. **Mouse wheel**
+(Ryujinx/desktop) drives the exact same scrolling.
 
 ---
 

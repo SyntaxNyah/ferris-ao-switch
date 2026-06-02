@@ -1,5 +1,6 @@
 #pragma once
 #include "../screen.hpp"
+#include "../touch.hpp"
 #include "../../assets/apng_player.hpp"
 #include "../../assets/char_ini_parser.hpp"
 #include <cstdint>
@@ -53,6 +54,8 @@ private:
     // ── Touch ───────────────────────────────────────────────────────────────
     void handle_tap(int x, int y);        // route a tap to a button / chatbox / panel
     void handle_panel_tap(int x, int y);  // tap inside the open panel
+    void scroll_focused(int rows);        // scroll the focused panel / IC log (wheel + drag)
+    int  focused_row_px() const;          // row height of the focused list (drag px → rows)
 
     // ── Actions (shared by controller, keyboard and touch) ──────────────────
     void join_area(int idx);   // send AO2 area-join (MC) for areas[idx]
@@ -113,7 +116,9 @@ private:
     bool pair_ready_     = false;
     bool shout_ready_    = false;
     uint32_t msg_age_ms_ = 0;     // ms since begin_message (load gate / give-up)
+    bool assets_fallback_done_ = false;  // learned-format fallback fired for this line
     static constexpr uint32_t LOAD_GATE_MS   = 400;   // start the line quickly; sprite pops in when ready
+    static constexpr uint32_t PROBE_FALLBACK_MS = 180; // re-fan-out all exts if learned-only didn't land (< gate)
     static constexpr uint32_t ASSET_GIVEUP_MS = 8000; // stop probing missing assets
 
     Phase phase_ = Phase::Idle;
@@ -149,7 +154,9 @@ private:
     int evi_scroll_   = 0;
     int area_scroll_  = 0;
     int area_sel_     = 0;
-    int ic_log_scroll_ = 0;   // entries skipped from the newest (mouse-wheel scrollback)
+    int ic_log_scroll_ = 0;   // entries skipped from the newest (wheel / drag scrollback)
+
+    TouchDrag drag_;          // tap vs finger drag-scroll classifier (panels + IC log)
 
     // ── IC composer state (own character) ─────────────────────────────────
     CharDef own_char_;

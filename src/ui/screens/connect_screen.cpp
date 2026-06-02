@@ -494,6 +494,19 @@ void ConnectScreen::connect_direct() {
     app_.connect(host, port, mode);
 }
 
+// Move the server selection by `rows` — shared by the mouse wheel and a touch
+// drag — keeping the selected row inside the visible window. `rows` follows the
+// wheel sign convention (positive = toward earlier entries).
+void ConnectScreen::scroll_servers(int rows) {
+    if (server_count_ <= 0) return;
+    server_sel_ -= rows;
+    if (server_sel_ < 0) server_sel_ = 0;
+    if (server_sel_ > server_count_ - 1) server_sel_ = server_count_ - 1;
+    if (server_sel_ < scroll_offset_) scroll_offset_ = server_sel_;
+    if (server_sel_ >= scroll_offset_ + VISIBLE_ROWS)
+        scroll_offset_ = server_sel_ - VISIBLE_ROWS + 1;
+}
+
 // ── handle_event ──────────────────────────────────────────────────────────────
 
 void ConnectScreen::handle_event(const SDL_Event& e) {
@@ -501,9 +514,14 @@ void ConnectScreen::handle_event(const SDL_Event& e) {
         return e.type == SDL_CONTROLLERBUTTONDOWN && e.cbutton.button == b;
     };
 
-    // ── Touch / mouse ──────────────────────────────────────────────────────────
-    int tx, ty;
-    if (tap_point(e, app_.renderer().raw(), tx, ty)) {
+    // ── Touch / mouse: tap (press-release) or finger drag-scroll the server list ─
+    int tx, ty, rows;
+    TouchDrag::Kind k = drag_.feed(e, app_.renderer().raw(), ROW_H, tx, ty, rows);
+    if (k == TouchDrag::SCROLL) {
+        if (tab_ == 0) scroll_servers(rows);   // only the server list scrolls
+        return;
+    }
+    if (k == TouchDrag::TAP) {
         // Tab bar [y 50..80]: Servers | Direct | Settings | Credits
         if (ty >= 50 && ty < 80) {
             if      (tx < 180) tab_ = 0;
@@ -569,14 +587,9 @@ void ConnectScreen::handle_event(const SDL_Event& e) {
         return;  // credits tab: tabs handled above, nothing else tappable
     }
 
-    // Mouse wheel scrolls the server list.
-    if (e.type == SDL_MOUSEWHEEL && e.wheel.y != 0 && tab_ == 0 && server_count_ > 0) {
-        server_sel_ -= e.wheel.y;
-        if (server_sel_ < 0) server_sel_ = 0;
-        if (server_sel_ > server_count_ - 1) server_sel_ = server_count_ - 1;
-        if (server_sel_ < scroll_offset_) scroll_offset_ = server_sel_;
-        if (server_sel_ >= scroll_offset_ + VISIBLE_ROWS)
-            scroll_offset_ = server_sel_ - VISIBLE_ROWS + 1;
+    // Mouse wheel scrolls the server list (same path as a finger drag).
+    if (e.type == SDL_MOUSEWHEEL && e.wheel.y != 0 && tab_ == 0) {
+        scroll_servers(e.wheel.y);
         return;
     }
 
@@ -913,9 +926,16 @@ void ConnectScreen::render() {
             text.draw(labels[i], 110, CONTENT_Y + 20 + i * 100 + 10, sel ? YELLOW : GRAY);
             text.draw(vals[i],   110 + 320, CONTENT_Y + 20 + i * 100 + 10, WHITE);
         }
+        int iy = CONTENT_Y + 20 + 4 * 100 + 6;
+        bool localbase = AssetManager::has_local_base();
+        char lb[128];
+        std::snprintf(lb, sizeof(lb), "Local base pack: %s",
+            localbase ? "detected - assets load instantly (offline)"
+                      : "not found - assets stream from the server");
+        text.draw(lb, 110, iy, localbase ? SDL_Color{120, 220, 120, 255} : DIM);
         text.draw("Drop AO2 theme folders in sdmc:/switch/ferris-ao/base/themes "
                   "(or misc) and pick them here. Settings save automatically.",
-                  110, CONTENT_Y + 20 + 4 * 100 + 6, DIM);
+                  110, iy + 26, DIM);
     } else {
         // ── Credits ───────────────────────────────────────────────────────────
         SDL_Rect box = {Renderer::WIDTH / 2 - 360, CONTENT_Y + 60, 720, 280};

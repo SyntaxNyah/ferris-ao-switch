@@ -42,6 +42,10 @@ public:
     void reset();
 
 private:
+    // Park the current frames into the shared decode cache (transfer ownership,
+    // no destroy) and clear our state — used before loading a different path.
+    void detach();
+
     char         path_[256] = {};   // currently-loaded asset; load() of the same path is a no-op
     SDL_Texture* frames_[APNG_MAX_FRAMES] = {};
     int          delays_[APNG_MAX_FRAMES] = {};  // ms per frame

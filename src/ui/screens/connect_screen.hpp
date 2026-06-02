@@ -1,5 +1,6 @@
 #pragma once
 #include "../screen.hpp"
+#include "../touch.hpp"
 #include "../../net/network_thread.hpp"
 #include <SDL2/SDL.h>
 
@@ -31,6 +32,7 @@ public:
 
 private:
     void start_fetch();
+    void scroll_servers(int rows);   // move the server selection (wheel / touch drag)
     void connect_to_server(const ServerEntry& s);
     void connect_direct();
     void open_keyboard(const char* hint, const char* initial, char* buf, int buf_sz, int max_len);
@@ -83,6 +85,7 @@ private:
     // ── Shared ────────────────────────────────────────────────────────────────
     int  tab_       = 0;   // 0=servers, 1=direct, 2=settings, 3=credits
     char status_[256] = {};
+    TouchDrag drag_;       // tap vs finger drag-scroll classifier (server list)
 
     static constexpr int VISIBLE_ROWS = 10;
     static constexpr int ROW_H        = 48;

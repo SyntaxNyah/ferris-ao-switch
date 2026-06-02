@@ -14,34 +14,54 @@ static bool             s_loaded = false;
 // ── Defaults ───────────────────────────────────────────────────────────────────
 
 static void apply_defaults(ExtensionsConfig& c) {
-    // Defaults taken verbatim from webAO's fetchExtensions() fallback
-    // (webAO/src/client/fetchLists.ts). Exactly matching webAO avoids
-    // assets 404'ing when a server has no extensions.json file.
+    // Candidate extensions, WebP-first. Modern AO2 content is overwhelmingly
+    // WebP, so probing it first (then .webp.static, .png, .gif) lands the real
+    // asset on the first try for almost every server while the classic formats
+    // remain as fallbacks — no asset 404s, just a smarter order. A server's
+    // extensions.json still overrides these, and the learned-format hint
+    // re-tunes the order per server at runtime if it turns out to be png/gif.
 
-    // charicon: .png, .webp
+    // charicon: .webp, .png
     c.charicon_count = 2;
-    std::strncpy(c.charicon[0], ".png",  ExtensionsConfig::EXT_LEN - 1);
-    std::strncpy(c.charicon[1], ".webp", ExtensionsConfig::EXT_LEN - 1);
+    std::strncpy(c.charicon[0], ".webp", ExtensionsConfig::EXT_LEN - 1);
+    std::strncpy(c.charicon[1], ".png",  ExtensionsConfig::EXT_LEN - 1);
 
-    // emote (pre-anims + (a)/(b) sprites): .gif, .png, .apng, .webp, .webp.static
+    // emote (pre-anims + (a)/(b) sprites): .webp, .webp.static, .png, .gif, .apng
     c.emote_count = 5;
-    std::strncpy(c.emote[0], ".gif",         ExtensionsConfig::EXT_LEN - 1);
-    std::strncpy(c.emote[1], ".png",         ExtensionsConfig::EXT_LEN - 1);
-    std::strncpy(c.emote[2], ".apng",        ExtensionsConfig::EXT_LEN - 1);
-    std::strncpy(c.emote[3], ".webp",        ExtensionsConfig::EXT_LEN - 1);
-    std::strncpy(c.emote[4], ".webp.static", ExtensionsConfig::EXT_LEN - 1);
+    std::strncpy(c.emote[0], ".webp",        ExtensionsConfig::EXT_LEN - 1);
+    std::strncpy(c.emote[1], ".webp.static", ExtensionsConfig::EXT_LEN - 1);
+    std::strncpy(c.emote[2], ".png",         ExtensionsConfig::EXT_LEN - 1);
+    std::strncpy(c.emote[3], ".gif",         ExtensionsConfig::EXT_LEN - 1);
+    std::strncpy(c.emote[4], ".apng",        ExtensionsConfig::EXT_LEN - 1);
 
-    // emotions (emote-button icons): .png, .webp
+    // emotions (emote-button icons): .webp, .png
     c.emotions_count = 2;
-    std::strncpy(c.emotions[0], ".png",  ExtensionsConfig::EXT_LEN - 1);
-    std::strncpy(c.emotions[1], ".webp", ExtensionsConfig::EXT_LEN - 1);
+    std::strncpy(c.emotions[0], ".webp", ExtensionsConfig::EXT_LEN - 1);
+    std::strncpy(c.emotions[1], ".png",  ExtensionsConfig::EXT_LEN - 1);
 
-    // background: .png, .gif, .webp, .apng
+    // background: .webp, .png, .gif, .apng
     c.background_count = 4;
-    std::strncpy(c.background[0], ".png",  ExtensionsConfig::EXT_LEN - 1);
-    std::strncpy(c.background[1], ".gif",  ExtensionsConfig::EXT_LEN - 1);
-    std::strncpy(c.background[2], ".webp", ExtensionsConfig::EXT_LEN - 1);
+    std::strncpy(c.background[0], ".webp", ExtensionsConfig::EXT_LEN - 1);
+    std::strncpy(c.background[1], ".png",  ExtensionsConfig::EXT_LEN - 1);
+    std::strncpy(c.background[2], ".gif",  ExtensionsConfig::EXT_LEN - 1);
     std::strncpy(c.background[3], ".apng", ExtensionsConfig::EXT_LEN - 1);
+}
+
+// ── Learned winning format (main thread only) ───────────────────────────────────
+// One short extension string per category; "" until a candidate decodes. Stored
+// outside the config struct so fetch_and_apply()/reset() of the config don't
+// disturb it independently of intent (reset() clears it explicitly).
+static char s_learned[ExtensionsConfig::CAT_COUNT][ExtensionsConfig::EXT_LEN] = {};
+
+const char* ExtensionsConfig::learned(Category c) {
+    return (c >= 0 && c < CAT_COUNT) ? s_learned[c] : "";
+}
+
+void ExtensionsConfig::note(Category c, const char* ext) {
+    if (c < 0 || c >= CAT_COUNT || !ext || !ext[0]) return;
+    if (std::strcmp(s_learned[c], ext) == 0) return;   // unchanged
+    std::strncpy(s_learned[c], ext, EXT_LEN - 1);
+    s_learned[c][EXT_LEN - 1] = '\0';
 }
 
 // ── JSON parser ────────────────────────────────────────────────────────────────
@@ -94,6 +114,7 @@ static int parse_ext_array(const char* json, int json_len,
 
 void ExtensionsConfig::reset() {
     apply_defaults(s_cfg);
+    std::memset(s_learned, 0, sizeof(s_learned));   // next server may use a different format
     s_loaded = false;
 }
 
