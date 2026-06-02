@@ -49,6 +49,35 @@ static void cs_prefetch_emote(AssetStream& s, const char* c, const char* e,
     }
 }
 
+// A unified pointer (touch OR mouse) in logical coords + its phase. On Ryujinx
+// the mouse arrives as touch events; on desktop as mouse events — handle both.
+namespace {
+enum PtrPhase { PTR_NONE, PTR_DOWN, PTR_MOVE, PTR_UP };
+PtrPhase pointer_of(const SDL_Event& e, SDL_Renderer* r, int& px, int& py) {
+    switch (e.type) {
+    case SDL_FINGERDOWN:   px=(int)(e.tfinger.x*Renderer::WIDTH); py=(int)(e.tfinger.y*Renderer::HEIGHT); return PTR_DOWN;
+    case SDL_FINGERMOTION: px=(int)(e.tfinger.x*Renderer::WIDTH); py=(int)(e.tfinger.y*Renderer::HEIGHT); return PTR_MOVE;
+    case SDL_FINGERUP:     px=(int)(e.tfinger.x*Renderer::WIDTH); py=(int)(e.tfinger.y*Renderer::HEIGHT); return PTR_UP;
+    case SDL_MOUSEBUTTONDOWN:
+        if (e.button.button==SDL_BUTTON_LEFT && e.button.which!=SDL_TOUCH_MOUSEID) {
+            float lx=0,ly=0; SDL_RenderWindowToLogical(r,e.button.x,e.button.y,&lx,&ly);
+            px=(int)lx; py=(int)ly; return PTR_DOWN;
+        }
+        return PTR_NONE;
+    case SDL_MOUSEMOTION:
+        if ((e.motion.state & SDL_BUTTON_LMASK) && e.motion.which!=SDL_TOUCH_MOUSEID) {
+            float lx=0,ly=0; SDL_RenderWindowToLogical(r,e.motion.x,e.motion.y,&lx,&ly);
+            px=(int)lx; py=(int)ly; return PTR_MOVE;
+        }
+        return PTR_NONE;
+    case SDL_MOUSEBUTTONUP:
+        if (e.button.button==SDL_BUTTON_LEFT && e.button.which!=SDL_TOUCH_MOUSEID) return PTR_UP;
+        return PTR_NONE;
+    default: return PTR_NONE;
+    }
+}
+} // namespace
+
 CharSelectScreen::CharSelectScreen(App& app) : Screen(app) { apply_zoom(); }
 
 void CharSelectScreen::on_enter() {
@@ -181,6 +210,27 @@ void CharSelectScreen::set_zoom(int delta) {
     scroll_    = 0;         // update() re-centres on the selection next frame
 }
 
+SDL_Rect CharSelectScreen::scrollbar_track() const {
+    return {Renderer::WIDTH - 24, START_Y, 14, GRID_BOTTOM - START_Y};
+}
+
+// Jump the grid so the row at the scrollbar y becomes the top row. Moves the
+// selection there too so update() keeps it on-screen.
+void CharSelectScreen::scrollbar_jump(int py) {
+    int total = vis_count();
+    if (total <= 0 || cols_ <= 0) return;
+    int total_rows = (total + cols_ - 1) / cols_;
+    if (total_rows <= rows_) return;          // everything already fits
+    SDL_Rect t = scrollbar_track();
+    float frac = (float)(py - t.y) / (float)t.h;
+    if (frac < 0.0f) frac = 0.0f;
+    if (frac > 1.0f) frac = 1.0f;
+    int top_row = (int)(frac * (float)(total_rows - rows_) + 0.5f);
+    if (top_row < 0) top_row = 0;
+    selected_ = top_row * cols_;
+    if (selected_ >= total) selected_ = total - 1;
+}
+
 // Claim a character (CC) and enter the courtroom. Optimistically records
 // my_char_id so the IC composer works before the server's PV confirmation lands.
 void CharSelectScreen::pick_char(int idx) {
@@ -197,10 +247,24 @@ void CharSelectScreen::handle_event(const SDL_Event& e) {
     char_count_ = app_.state().char_count;
     int total = vis_count();
 
+    // Right-edge scrollbar — click or drag to jump anywhere in the roster. The
+    // reliable fast-nav for thousands of characters: works with mouse OR touch and
+    // needs no keyboard modifier (Ryujinx maps the mouse to touch and doesn't
+    // forward Ctrl/Shift to homebrew). Handled before the grid's tap/drag.
+    {
+        int px, py;
+        PtrPhase ph = pointer_of(e, app_.renderer().raw(), px, py);
+        if (ph == PTR_DOWN && pt_in(px, py, scrollbar_track())) { sb_drag_ = true; scrollbar_jump(py); return; }
+        if (ph == PTR_MOVE && sb_drag_) { scrollbar_jump(py); return; }
+        if (ph == PTR_UP   && sb_drag_) { sb_drag_ = false; return; }
+    }
+
     // Touch / mouse: tap (press-release) or finger drag-scroll.
     int tx, ty, rows;
     TouchDrag::Kind k = drag_.feed(e, app_.renderer().raw(), cell_h_ + CELL_GAP, tx, ty, rows);
     if (k == TouchDrag::TAP) {
+        if (pt_in(tx, ty, ZOOM_OUT_BTN)) { set_zoom(+1); return; }   // − : more, smaller
+        if (pt_in(tx, ty, ZOOM_IN_BTN))  { set_zoom(-1); return; }   // + : fewer, bigger
         if (pt_in(tx, ty, SEARCH_BAR)) { open_search(); return; }
         for (int row = 0; row < rows_; ++row)
             for (int col = 0; col < cols_; ++col) {
@@ -234,13 +298,11 @@ void CharSelectScreen::handle_event(const SDL_Event& e) {
         return;
     }
 
-    // Mouse wheel (Ryujinx/desktop): scroll a row; hold Ctrl to ZOOM; hold Shift
-    // to page (fast-scroll). update() row-aligns scroll_ afterwards.
+    // Mouse wheel (Ryujinx/desktop) scrolls a few rows at a time — faster than one
+    // row so big rosters move quickly; the scrollbar handles big jumps and the
+    // on-screen − / + buttons zoom (Ryujinx doesn't forward Ctrl/Shift modifiers).
     if (e.type == SDL_MOUSEWHEEL && e.wheel.y != 0) {
-        SDL_Keymod mod = SDL_GetModState();
-        if (mod & KMOD_CTRL)        set_zoom(e.wheel.y > 0 ? -1 : +1);  // wheel-up = zoom in
-        else if (mod & KMOD_SHIFT)  scroll_by(e.wheel.y * rows_);       // a whole page per notch
-        else                        scroll_by(e.wheel.y);               // a row per notch
+        scroll_by(e.wheel.y * 3);
         return;
     }
 
@@ -383,7 +445,7 @@ void CharSelectScreen::render() {
     txt.draw("Select Character", 20, 18, {220, 220, 255, 255});
 
     // The selected character's name — always visible, since dense zoom hides the
-    // per-cell labels. Plus a one-line hint for the zoom / fast-scroll controls.
+    // per-cell labels.
     {
         int total0 = vis_count();
         if (total0 > 0 && selected_ >= 0 && selected_ < total0) {
@@ -395,8 +457,20 @@ void CharSelectScreen::render() {
             }
         }
     }
-    txt.draw("Ctrl+Wheel: zoom   Shift+Wheel: fast", Renderer::WIDTH - 360, 22,
-             {120, 130, 160, 255});
+
+    // Zoom buttons (tap / click — the Ryujinx-reliable control).
+    {
+        auto draw_btn = [&](const SDL_Rect& b, const char* s, bool on) {
+            r.fill_rect(b, on ? SDL_Color{40, 55, 95, 255} : SDL_Color{24, 28, 42, 255});
+            r.draw_rect(b, {90, 110, 170, 255});
+            txt.draw(s, b.x + b.w / 2 - 4, b.y + (b.h - txt.line_h()) / 2,
+                     on ? SDL_Color{220, 230, 255, 255} : SDL_Color{90, 95, 110, 255});
+        };
+        char zl[16]; std::snprintf(zl, sizeof(zl), "Zoom %d/%d", zoom_ + 1, ZOOM_COUNT);
+        txt.draw(zl, ZOOM_OUT_BTN.x - 96, 18, {150, 160, 185, 255});
+        draw_btn(ZOOM_OUT_BTN, "-", zoom_ < ZOOM_COUNT - 1);
+        draw_btn(ZOOM_IN_BTN,  "+", zoom_ > 0);
+    }
 
     // Search bar (tap, or Y / F to type).
     r.fill_rect(SEARCH_BAR, {18, 22, 42, 255});
@@ -487,6 +561,22 @@ void CharSelectScreen::render() {
                 txt.draw(label, x + 6, y + cell_h_ - 20, tc);
             }
         }
+    }
+
+    // Right-edge scrollbar — drag/click to jump. Thumb sized to the visible
+    // fraction of the roster; only shown when there's more than one page.
+    int total_rows = (total + cols_ - 1) / cols_;
+    if (total_rows > rows_) {
+        SDL_Rect trk = scrollbar_track();
+        r.fill_rect(trk, {20, 24, 40, 255});
+        r.draw_rect(trk, {60, 70, 110, 255});
+        int thumb_h = (int)(trk.h * ((float)rows_ / (float)total_rows));
+        if (thumb_h < 18) thumb_h = 18;
+        float pos = (float)(scroll_ / cols_) / (float)(total_rows - rows_);
+        if (pos < 0.0f) pos = 0.0f; if (pos > 1.0f) pos = 1.0f;
+        int thumb_y = trk.y + (int)((trk.h - thumb_h) * pos);
+        r.fill_rect({trk.x + 2, thumb_y, trk.w - 4, thumb_h},
+                    sb_drag_ ? SDL_Color{120, 160, 230, 255} : SDL_Color{80, 110, 170, 255});
     }
 }
 

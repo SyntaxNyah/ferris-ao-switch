@@ -50,12 +50,19 @@ private:
     int  cols_   = 8, rows_ = 4;    // visible grid dimensions for the current zoom
     int  cell_w_ = 140, cell_h_ = 132;
     bool tl_held_ = false, tr_held_ = false;  // trigger-axis edge detect (page scroll)
+    bool sb_drag_ = false;                     // dragging the right-edge scrollbar
+
+    void scrollbar_jump(int py);               // jump the view from a scrollbar y
+    SDL_Rect scrollbar_track() const;          // right-edge scrollbar rect
 
     static constexpr int ZOOM_COUNT = 5;
     // Fixed margins; cell_w_/cell_h_ are derived to fill (START_X..W-START_X) ×
     // (START_Y..GRID_BOTTOM). Shared by render() and the touch hit-test.
     static constexpr int START_X = 40, START_Y = 104, CELL_GAP = 8, GRID_BOTTOM = 684;
-    static constexpr SDL_Rect SEARCH_BAR = {40, 64, 760, 32};
+    static constexpr SDL_Rect SEARCH_BAR    = {40, 64, 760, 32};
+    // On-screen zoom buttons (tap/click — work on Ryujinx where Ctrl+wheel doesn't).
+    static constexpr SDL_Rect ZOOM_OUT_BTN  = {1280 - 104, 14, 38, 32};   // "−" (more, smaller)
+    static constexpr SDL_Rect ZOOM_IN_BTN   = {1280 - 60,  14, 38, 32};   // "+" (fewer, bigger)
 };
 
 } // namespace ao
