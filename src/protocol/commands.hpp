@@ -18,7 +18,7 @@ inline int hi(char* buf, int cap, const char* hdid) {
 
 // ID#<software>#<version>#%
 inline int id(char* buf, int cap,
-              const char* software = "ferris-ao-switch-v1",
+              const char* software = "ferris-ao-switch-v1.05",
               const char* version  = "2.999.999") {
     return std::snprintf(buf, cap, "ID#%s#%s#%%", software, version);
 }

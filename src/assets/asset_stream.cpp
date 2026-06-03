@@ -201,6 +201,11 @@ bool AssetStream::poll_done(char* out_path, int out_cap) {
 // ── Worker ────────────────────────────────────────────────────────────────────
 
 int AssetStream::thread_func(void* userdata) {
+    // Workers run at LOW priority so the render and audio threads always win the
+    // CPU on the Switch's 3 cores — keeps 3000+ char servers smooth (the
+    // background downloaders never hitch the courtroom) and gives audio the best
+    // shot under load. They still load at full speed when a core is free.
+    SDL_SetThreadPriority(SDL_THREAD_PRIORITY_LOW);
     ((AssetStream*)userdata)->run();
     return 0;
 }

@@ -44,7 +44,7 @@ ROMFS    := romfs
 
 APP_TITLE   := Ferris-AO
 APP_AUTHOR  := SyntaxNyah
-APP_VERSION := 1.0.1
+APP_VERSION := 1.05
 APP_ICON    := icon.jpg
 
 #---------------------------------------------------------------------------------

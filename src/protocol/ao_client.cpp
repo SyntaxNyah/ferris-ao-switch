@@ -106,6 +106,12 @@ void AOClient::process(InQueue& in) {
             }
             consumed += n;
         }
+        // A handler dispatched above (a kick/ban/disconnect → on_disconnected)
+        // can reset parse_len_ to 0 out from under us. Clamp so this compaction
+        // never calls memmove with a negative (→ huge size_t) length: that was a
+        // hard crash whenever a server dropped us mid-batch (e.g. an Akashi "you
+        // are sending messages too quickly" kick).
+        if (consumed > parse_len_) consumed = parse_len_;
         if (consumed > 0) {
             std::memmove(parse_buf_, parse_buf_ + consumed, parse_len_ - consumed);
             parse_len_ -= consumed;
@@ -226,7 +232,7 @@ void AOClient::on_id(const Packet& p) {
     // AO2 client with all features enabled. Match that format verbatim (keep the
     // 2.999.999 protocol field; only the software name carries our version).
     char buf[128];
-    send(buf, cmd::id(buf, sizeof(buf), "ferris-ao-switch-v1", "2.999.999"));
+    send(buf, cmd::id(buf, sizeof(buf), "ferris-ao-switch-v1.05", "2.999.999"));
     std::fprintf(stderr, "[ao_client] ID received — sent client ID\n");
 }
 

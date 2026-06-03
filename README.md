@@ -194,16 +194,28 @@ CXXFLAGS := -std=c++17 -O2 -fno-exceptions -fno-rtti $(ARCH)
 
 ## Running on Ryujinx
 
-[Ryujinx](https://ryujinx.app/) emulates Nintendo Switch homebrew correctly, including SDL2, libnx system calls, and the `swkbdShow()` software keyboard applet.
+[Ryujinx](https://ryujinx.app/) emulates Nintendo Switch homebrew correctly, including SDL2, libnx system calls, and the keyboard.
+
+### Required Ryujinx settings
+
+Set these three **before** launching, or you'll get no network, no typing, or no sound:
+
+| Setting | Where | Why |
+|---------|-------|-----|
+| **Enable Internet Access** — ON | Settings → System | Reach AO2 servers and stream assets. Without it the client can't connect to anything. |
+| **Enable Keyboard** — ON | Settings → Input | Type into IC/OOC with your computer keyboard. |
+| **Audio Backend** = **SDL3** (or SoundIO / OpenAL — **not `Dummy`**) | Settings → Audio | `Dummy` produces no sound for any game. Also keep Ryujinx's volume up. |
+
+### Loading the `.nro`
 
 1. Open Ryujinx
 2. **File → Open Ryujinx Folder** → navigate to `portable/` (or wherever your Ryujinx data is)
 3. Drag `ferris-ao-switch.nro` onto the Ryujinx game list, or use **File → Load Application from File**
 4. Ryujinx will boot the `.nro` and present the Connect screen
 
-**Network on Ryujinx:** Ryujinx uses your PC's network stack. Connect to any AO2 server by IP or hostname exactly as you would from a desktop client. `localhost` works if you're running Ferris-AO on the same machine.
+**Network on Ryujinx:** Ryujinx uses your PC's network stack (Enable Internet Access must be on). Connect to any AO2 server by IP or hostname exactly as you would from a desktop client. `localhost` works if you're running Ferris-AO on the same machine.
 
-**Keyboard on Ryujinx:** The system keyboard applet (`swkbdShow`) is emulated. A text input dialog will appear when you edit a field.
+**Keyboard on Ryujinx:** with **Enable Keyboard** on, type directly with your computer keyboard. The in-app on-screen keyboard also works via mouse/touch and the controller.
 
 ---
 
