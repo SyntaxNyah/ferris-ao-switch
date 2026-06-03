@@ -56,6 +56,14 @@ private:
     int  server_sel_    = 0;
     int  scroll_offset_ = 0;
 
+    // Debounce repeated connect requests. On Ryujinx a single mouse/touch click
+    // emits BOTH a finger event and a real mouse event, so a tap can call
+    // connect() twice in a few ms; the second call tears down the first attempt
+    // and drops the connection. Ignoring connects within this window makes a tap
+    // behave like the (single-fire) keybind. 0 = never connected yet.
+    uint32_t last_connect_ms_ = 0;
+    static constexpr uint32_t CONNECT_DEBOUNCE_MS = 1000;
+
     enum class FetchState { Idle, Loading, Done, Error };
     // SDL_atomic_t used so the fetch thread can write without a mutex on the state
     SDL_atomic_t fetch_state_atom_;  // holds FetchState cast to int

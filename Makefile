@@ -44,7 +44,7 @@ ROMFS    := romfs
 
 APP_TITLE   := Ferris-AO
 APP_AUTHOR  := SyntaxNyah
-APP_VERSION := 1.0.0
+APP_VERSION := 1.0.1
 APP_ICON    := icon.jpg
 
 #---------------------------------------------------------------------------------
@@ -113,6 +113,7 @@ export HFILES_BIN   := $(addsuffix .h,$(subst .,_,$(BINFILES)))
 
 export INCLUDE := $(foreach dir,$(INCLUDES),-I$(CURDIR)/$(dir)) \
                   $(foreach dir,$(LIBDIRS),-I$(dir)/include) \
+                  -I$(PORTLIBS)/include/opus \
                   -I$(CURDIR)/$(BUILD)
 
 export LIBPATHS := $(foreach dir,$(LIBDIRS),-L$(dir)/lib)

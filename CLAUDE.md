@@ -112,7 +112,7 @@ Entry point. Constructs `App`, pushes `ConnectScreen` as the initial screen, cal
 **Class:** `ao::App`
 
 Owns the entire application lifecycle:
-- SDL2 init: `SDL_Init`, `Mix_OpenAudio` (44100 Hz, stereo, 4096 chunk), `TTF_Init`, `IMG_Init`, `SDLNet_Init`, `romfsInit`
+- SDL2 init: `SDL_Init`, `Mix_OpenAudio` (**48000 Hz**, S16, stereo, 2048 chunk — 48 kHz is the Switch/`audout` native rate; opening at 44.1 kHz produced silence), `TTF_Init`, `IMG_Init`, `SDLNet_Init`, `romfsInit`. `Mix_Init` flags and the `Mix_QuerySpec` result are logged so an audio fault is visible on the console instead of silent.
 - Creates `SDL_Window` (1280×720 fullscreen) and `SDL_Renderer` (hardware accelerated, vsync)
 - Instantiates `Renderer`, `InputManager`, `AudioManager`, `MusicPlayer`, `NetworkThread`, `AOClient`, `GameState`
 - Holds the screen stack (`Screen* stack_[4]`, `int top_ = -1`)
@@ -1197,21 +1197,45 @@ struct CharDef {
 SFX pool using SDL_mixer.
 
 ```cpp
-bool init();                          // Call after Mix_OpenAudio; allocates SFX_CHANNELS=8 channels
+bool init();                          // Call after Mix_OpenAudio; allocates SFX_CHANNELS=16 channels
 bool play_sfx(const char* path);     // Cached; resolves via AssetManager
 void stop_sfx();                     // Halt all SFX channels
 void set_sfx_volume(int vol);        // 0–128 (MIX_MAX_VOLUME)
 ```
+
+`init()` is the **single** channel-allocation point — `App::init` does NOT also
+call `Mix_AllocateChannels`, so `SFX_CHANNELS` (16) is authoritative. 16 lets a
+blip, the message SFX and a shout SFX overlap without cutting each other off.
 
 **Cache:** `SfxEntry sfx_cache_[16]` — LRU by `last_used = SDL_GetTicks()`. `evict_sfx()` finds oldest occupied slot when all 16 are full.
 
 **`play_sfx(path)` is NON-BLOCKING** — it must be safe to call every typewriter
 blip without a network stall:
 1. `find_sfx(path)` — cached chunk → play immediately.
-2. Miss: `AssetManager::open_rwops_cached(path)` (prefetch/local only, **no HTTP**)
-   → `Mix_LoadWAV_RW(rw, 1)`. If the bytes aren't ready it **returns false and
-   plays nothing** rather than blocking.
+2. Miss: `load_sfx_chunk(path)` reads the bytes from `open_rwops_cached`
+   (prefetch/local only, **no HTTP**) and decodes them. If the bytes aren't ready
+   it **returns nullptr and plays nothing** rather than blocking.
 3. Play: `Mix_PlayChannel(-1, chunk, 0)`.
+
+**Opus SFX/blip decode (the "no blips" fix).** `load_sfx_chunk` does NOT just call
+`Mix_LoadWAV_RW`. The devkitPro portlib is **SDL2_mixer 2.0.4**, whose format
+detection classifies *any* `OggS`-framed file as `MUS_OGG` and feeds it to the
+**Vorbis** decoder — but AO blips/SFX are overwhelmingly **Opus** (also `OggS`),
+which the Vorbis decoder rejects, so the chunk loaded as null and the sound was
+silently dropped. `Mix_LoadWAV_RW` routes compressed audio through that same
+broken detector, and there is no typed chunk loader to escape it (unlike music,
+which uses `Mix_LoadMUSType_RW`). So:
+- If the bytes sniff as Opus (`OggS` + `OpusHead` at offset 28), decode them with
+  **libopusfile** (`op_open_memory`/`op_read_stereo`, already linked) into
+  48 kHz / S16 / stereo PCM — exactly the device format — wrap that PCM in an
+  in-memory WAV, and hand it to `Mix_LoadWAV_RW` (native WAV path, no detection).
+- Everything else (WAV / Vorbis-`.ogg` / MP3 / FLAC) goes straight to
+  `Mix_LoadWAV_RW`, whose detector handles those correctly.
+
+This is version-independent: on a newer mixer the Opus branch is simply redundant
+(the WAV it builds still loads), so it never regresses. Requires
+`-I$(PORTLIBS)/include/opus` in the Makefile so `opusfile.h`'s internal
+`<opus_multistream.h>` resolves.
 
 Because of (2), the courtroom **prefetches** the sounds a line will play
 (`prefetch_blip` on entry; `prefetch_blip`/`prefetch_sfx_named` in
@@ -1236,10 +1260,17 @@ const char* current() const;      // Path of currently playing track
 ```
 
 **`play()` behavior:**
-- If `path == "~~"` → `stop()` (AO2 stop-music sentinel)
-- Calls `AssetManager::open_rwops(path)`, then tries `music/<path>` prefix fallback (prefetch → primary/secondary CDN → sdmc: → romfs:)
+- If `path == "~~"` or contains `~stop` → `stop()` (AO2 stop-music sentinels)
+- Calls `AssetManager::open_rwops(path)`, then tries `sounds/music/<path>` and `music/<path>` prefix fallbacks (prefetch → primary/secondary CDN → sdmc: → romfs:)
 - If music already playing: `Mix_HaltMusic()` + `Mix_FreeMusic()` + `SDL_RWclose(music_rw_)`
-- `Mix_LoadMUS_RW(rw, 0)` with `freesrc=0` — we keep `rw` alive in `music_rw_` because SDL_mixer streams from it
+- **Decoder selected explicitly, never by the mixer's auto-detect.** SDL2_mixer
+  2.0.4 maps every `OggS` file to the Vorbis decoder, so an **Opus** track (the
+  AO norm) loads as null and plays silence. `sniff_music_type(rw)` peeks the
+  magic bytes (`OpusHead` → `MUS_OPUS`, plain `OggS` → `MUS_OGG`, `RIFF`/`ID3`/
+  `fLaC`/`MThd`/MPEG-sync → their types); if the magic is inconclusive it falls
+  back to `music_type_for(path)` (by extension), then to plain auto-detect. The
+  chosen type drives `Mix_LoadMUSType_RW(rw, type, 0)`.
+- `freesrc=0` — we keep `rw` alive in `music_rw_` because SDL_mixer streams from it
 - `Mix_FadeInMusic(music_, -1, fade_ms)` (loop forever)
 - Updates `current_path_`
 
@@ -1997,6 +2028,50 @@ If latency-sensitive loading is needed, call `asset_stream.prefetch()` before th
 ### 11. `music_rw_` must outlive Mix_Music
 
 `MusicPlayer` holds `music_rw_` alongside `music_`. `music_rw_` is the `open_rwops()` result; SDL_mixer streams from it. Always call `Mix_FreeMusic(music_)` before `SDL_RWclose(music_rw_)`. The `stop()` method does this correctly. Do not reorder these calls.
+
+### 11b. Never let SDL2_mixer 2.0.4 auto-detect Opus (the "no sound at all" trap)
+
+The devkitPro portlib is **SDL2_mixer 2.0.4** (vs the modern SDL2 2.28.5 core).
+Its format detector classifies *every* `OggS`-framed file as `MUS_OGG` and hands
+it to the **Vorbis** decoder. AO music **and** blips/SFX are predominantly
+**Opus** (same `OggS` container, different codec), so the Vorbis decoder rejects
+them and the track/chunk loads as **null → total silence**, with no error a user
+would notice. This is the root cause of "I don't hear blips or music."
+
+Rules so it can't come back:
+- **Music:** pick the type yourself (`sniff_music_type` magic → extension →
+  auto) and load via `Mix_LoadMUSType_RW`. Never call `Mix_LoadMUS_RW` and trust
+  the result for Opus.
+- **SFX/blips:** there is no typed chunk loader, so `Mix_LoadWAV_RW` would hit the
+  same broken detector. Sniff for Opus (`OggS`+`OpusHead`) and decode it with
+  **libopusfile** → PCM → in-memory WAV → `Mix_LoadWAV_RW`. Non-Opus formats can
+  use `Mix_LoadWAV_RW` directly.
+- **Device rate:** open the mixer at **48000 Hz** (Switch/`audout` native). 44.1
+  kHz played as silence on Ryujinx. `App::init` logs `Mix_QuerySpec` so a wrong
+  obtained spec is visible on the console.
+- If the toolchain's `switch-sdl2_mixer` is ever updated to ≥ 2.6 (which detects
+  Opus correctly), all of the above stays correct — the explicit paths just
+  become belt-and-suspenders, never a regression.
+
+### 11c. A mouse/touch tap can fire TWICE on Ryujinx — debounce destructive actions
+
+Ryujinx (and some Switch setups) emit **both** a finger event *and* a real mouse
+event for a single click, so `TouchDrag::feed` can return `TAP` twice within a few
+ms for one physical tap. For idempotent actions (open a panel, select a row) this
+is harmless, but for **destructive** ones it bites: tapping a server in
+`ConnectScreen` called `connect_to_server` twice, and the second `App::connect`
+tore down the first attempt — the connection "dropped" the instant you tapped it
+(the keyboard/controller path was fine because it fires once). Two guards, both in
+place:
+- `ConnectScreen` **debounces** connects (`CONNECT_DEBOUNCE_MS = 1000`): a connect
+  within 1 s of the previous one is ignored, so a double-fired tap connects once.
+- `App::connect` **drains `in_queue_`** after `disconnect()` (the old NetworkThread
+  is already joined/deleted, so there's no producer): otherwise the torn-down
+  thread's `__DISCONNECT` sentinel would be read by the *new* `AOClient` and drop
+  the fresh connection.
+
+Rule of thumb: any tap that connects, sends, or otherwise can't be safely repeated
+must be debounced or made idempotent — don't assume one tap == one `TAP`.
 
 ### 12. Character sprite path convention (AO2 standard)
 

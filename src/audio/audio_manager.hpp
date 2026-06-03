@@ -4,7 +4,10 @@
 namespace ao {
 
 static constexpr int SFX_CACHE_SLOTS  = 16;
-static constexpr int SFX_CHANNELS     = 8;
+// Mixing channels for overlapping SFX (blip + message SFX + shout can stack).
+// This is the single allocation point — App::init does NOT also call
+// Mix_AllocateChannels, so this count is authoritative.
+static constexpr int SFX_CHANNELS     = 16;
 
 struct SfxEntry {
     char       path[256] = {};

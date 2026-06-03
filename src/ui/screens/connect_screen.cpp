@@ -437,6 +437,12 @@ void ConnectScreen::open_keyboard(const char* hint, const char* initial,
 }
 
 void ConnectScreen::connect_to_server(const ServerEntry& s) {
+    // Debounce duplicate tap events (see CONNECT_DEBOUNCE_MS) so a single click
+    // can't fire two connects and drop itself.
+    uint32_t now = SDL_GetTicks();
+    if (last_connect_ms_ != 0 && (now - last_connect_ms_) < CONNECT_DEBOUNCE_MS) return;
+    last_connect_ms_ = now;
+
     char host[256];
     std::strncpy(host, s.ip, sizeof(host) - 1);
     host[sizeof(host) - 1] = '\0';
@@ -476,6 +482,11 @@ void ConnectScreen::connect_direct() {
         std::snprintf(status_, sizeof(status_), "Enter a server address first");
         return;
     }
+    // Debounce duplicate tap events (see connect_to_server).
+    uint32_t now = SDL_GetTicks();
+    if (last_connect_ms_ != 0 && (now - last_connect_ms_) < CONNECT_DEBOUNCE_MS) return;
+    last_connect_ms_ = now;
+
     char host[256];
     uint16_t port;
     ConnMode mode;

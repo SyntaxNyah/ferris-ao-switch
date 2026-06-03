@@ -88,14 +88,27 @@ bool App::init() {
 
     // Init codecs BEFORE opening the device, and open at the Switch's NATIVE
     // 48 kHz so the audio backend doesn't have to resample (opening at 44.1 kHz
-    // produced silence on Ryujinx). MIX_DEFAULT_FORMAT, stereo.
-    Mix_Init(MIX_INIT_OGG | MIX_INIT_OPUS | MIX_INIT_MP3 | MIX_INIT_MOD);
+    // produced silence on Ryujinx/audout). MIX_DEFAULT_FORMAT (S16) is what the
+    // Switch wants, stereo. The init/Query results are logged so an audio fault
+    // is diagnosable from the Ryujinx/nxlink console instead of silent.
+    const int want = MIX_INIT_OGG | MIX_INIT_OPUS | MIX_INIT_MP3 | MIX_INIT_FLAC | MIX_INIT_MOD;
+    const int got  = Mix_Init(want);
+    // NOTE: a static-linked SDL2_mixer (the Switch portlib) may return 0 here
+    // even though the codecs are compiled in — there is nothing to dlopen — so 0
+    // is NOT fatal. We only warn if a bit we asked for is missing from a nonzero
+    // result, which would mean a genuinely absent decoder.
+    if (got != 0 && (got & want) != want)
+        std::fprintf(stderr, "[audio] Mix_Init: missing decoders (want 0x%X got 0x%X)\n",
+            want, got);
     if (Mix_OpenAudio(48000, MIX_DEFAULT_FORMAT, 2, 2048) != 0) {
         std::fprintf(stderr, "Mix_OpenAudio: %s\n", Mix_GetError());
         return false;
     }
-    Mix_AllocateChannels(16);
-    audio_manager_.init();
+    int qfreq = 0, qchan = 0; Uint16 qfmt = 0;
+    Mix_QuerySpec(&qfreq, &qfmt, &qchan);
+    std::fprintf(stderr, "[audio] device opened: %d Hz, fmt 0x%04X, %d ch\n",
+        qfreq, qfmt, qchan);
+    audio_manager_.init();   // single channel allocation (SFX_CHANNELS)
 
 #ifdef __SWITCH__
     // Enable the HID keyboard so a USB/host keyboard (incl. Ryujinx's, with
@@ -301,6 +314,17 @@ void App::render() {
 bool App::connect(const char* host, uint16_t port, ConnMode mode) {
     // Tear down any existing connection
     disconnect();
+
+    // Drain any leftover packets from a previous (or just-torn-down) connection.
+    // disconnect() above joined and deleted the old NetworkThread, so the queue
+    // has no producer now and this is safe. Without it, the old thread's
+    // "__DISCONNECT" sentinel (pushed during teardown) would be read by the NEW
+    // AOClient and immediately drop the fresh connection — the exact symptom when
+    // a double-fired tap calls connect() twice in quick succession.
+    {
+        InPacket stale;
+        while (in_queue_.pop(stale)) { /* discard */ }
+    }
 
     // Reset game state for a fresh connection. Copy from a static blank template
     // rather than `*game_state_ = GameState()` — GameState is ~1.3 MB (4096-char

@@ -22,6 +22,30 @@ Mix_MusicType music_type_for(const char* path) {
         !strcasecmp(dot, ".it")  || !strcasecmp(dot, ".s3m")) return MUS_MOD;
     return MUS_NONE;
 }
+
+// Identify the decoder from the file's MAGIC bytes — more reliable than the
+// extension (some servers send a track name with no extension, or the wrong
+// one). Critically, this distinguishes Opus from Vorbis: both use the "OggS"
+// container, but SDL2_mixer 2.0.4's own auto-detection only checks "OggS" and so
+// hands every Opus track to the Vorbis decoder, which fails silently. We peek
+// for "OpusHead" inside the first Ogg page and force MUS_OPUS ourselves.
+// Reads from the head of `rw` and restores the position. Returns MUS_NONE when
+// nothing matches (caller falls back to the extension, then to auto-detect).
+Mix_MusicType sniff_music_type(SDL_RWops* rw) {
+    unsigned char h[64];
+    const Sint64 pos = SDL_RWtell(rw);
+    const size_t n   = SDL_RWread(rw, h, 1, sizeof(h));
+    SDL_RWseek(rw, pos, RW_SEEK_SET);   // rewind so the decoder sees byte 0
+    if (n >= 36 && std::memcmp(h, "OggS", 4) == 0 &&
+                   std::memcmp(h + 28, "OpusHead", 8) == 0) return MUS_OPUS;
+    if (n >= 4  && std::memcmp(h, "OggS", 4) == 0) return MUS_OGG;   // Vorbis/FLAC-in-Ogg
+    if (n >= 4  && std::memcmp(h, "fLaC", 4) == 0) return MUS_FLAC;
+    if (n >= 4  && std::memcmp(h, "RIFF", 4) == 0) return MUS_WAV;
+    if (n >= 4  && std::memcmp(h, "MThd", 4) == 0) return MUS_MID;
+    if (n >= 3  && std::memcmp(h, "ID3",  3) == 0) return MUS_MP3;
+    if (n >= 2  && h[0] == 0xFF && (h[1] & 0xE0) == 0xE0) return MUS_MP3;  // MPEG frame sync
+    return MUS_NONE;
+}
 } // namespace
 
 namespace ao {
@@ -59,9 +83,12 @@ void MusicPlayer::play(const char* path, int fade_ms) {
     // freesrc=0: we keep rw alive ourselves so SDL_mixer can stream from it.
     // music_rw_ is closed and freed by the next play()/stop() call.
     music_rw_ = rw;
-    Mix_MusicType mt = music_type_for(path);
+    // Pick the decoder by magic first (distinguishes Opus from Vorbis, which the
+    // mixer's own detector cannot), then by extension, then let the mixer detect.
+    Mix_MusicType mt = sniff_music_type(rw);
+    if (mt == MUS_NONE) mt = music_type_for(path);
     music_ = (mt != MUS_NONE) ? Mix_LoadMUSType_RW(rw, mt, 0)   // forced (e.g. Opus)
-                              : Mix_LoadMUS_RW(rw, 0);          // unknown ext → detect
+                              : Mix_LoadMUS_RW(rw, 0);          // unknown → mixer detect
     if (!music_) {
         std::fprintf(stderr, "MusicPlayer: Mix_LoadMUS_RW failed for '%s': %s\n",
             path, Mix_GetError());
