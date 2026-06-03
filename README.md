@@ -781,7 +781,7 @@ Pull requests are welcome. Before contributing:
 
 Created by **SyntaxNyah** — <https://github.com/SyntaxNyah/ferris-ao-switch>
 
-Also reachable in-app from the **Credits** tab on the connect screen.
+
 
 ---
 
